@@ -141,7 +141,7 @@ the spec was lost in the re-layout.
 
 | Tool | Change |
 |---|---|
-| `make_drawing(path, spec=None, views=None)` | Default template as-is, third-angle, no isometric, inches, empty title block. `views`: the list Claude chose (standard orthographic views by direction; section views by cutting plane; detail views by a feature and scale). With a `spec`: apply precision, tolerances, datums, GD&T, callouts, finishes, notes. **Without either it still works** (front/top/right layout), so existing callers, including the knowledge base's finalise, keep working |
+| `make_drawing(path=None, spec=None, views=None)` | Default template as-is, third-angle, no isometric, inches, empty title block. `views`: the list Claude chose (standard orthographic views by direction; section views by cutting plane; detail views by a feature and scale). With a `spec`: apply precision, tolerances, datums, GD&T, callouts, finishes, notes. **Without either it still works** (front/top/right layout), so existing callers keep working. `path` is optional: with a knowledge-base case open, the server names the file (`DN17.SLDDRW` in the output folder) through `case_output_path` and refuses a different path (KNOWLEDGE-BASE.md §6.2). Without an open case a path is required, as now |
 | `check_drawing(path, spec)` *(new)* | Reads the saved drawing back and compares it with the spec (§6) |
 
 Following the usual pattern in `CLAUDE.md`: session method → server wrapper with a precise
@@ -166,8 +166,12 @@ with the misreading and the check passes. Two guards:
 ## 7. Renaming the SolidWorks files
 
 A `.slddrw` does not contain the part; it **points to the part file by name and path**.
-The user renames files to proprietary numbers after review, and renaming `DN17.SLDPRT` in
-Windows Explorer breaks the drawing. Rename through SolidWorks instead:
+This is also why the part is saved under its final name (`DN17.SLDPRT`) **before** the
+drawing is made, never renamed afterwards by the server (KNOWLEDGE-BASE.md §6.2).
+
+The user renames files to proprietary numbers **after approval**, once the knowledge base has
+stored its STEP and PDF (KNOWLEDGE-BASE.md §9). Renaming `DN17.SLDPRT` in Windows Explorer
+breaks the drawing. Rename through SolidWorks instead:
 - **Pack and Go** (File → Pack and Go): rename both files, or add a prefix, and copy them to a
   new folder with the link intact; or
 - rename the part, open the drawing, point it at the renamed part when asked, and save.
@@ -183,22 +187,29 @@ One small commit, so both branches start from the same contract:
 - `errors.py`: `SolidWorksError` gains optional `code` and `params` (default `None`), so
   existing raises keep working unchanged.
 - `units.py`: exact inch ↔ mm helpers (1 in = 25.4 mm), with pure tests.
-- This document and `KNOWLEDGE-BASE.md`, with the drawing-spec format in §4.1 frozen.
-  Changing the format afterwards needs agreement from both branches.
-- The current uncommitted changes in the working tree (`Docs/PROGRESS.md`,
-  `Docs/SolidWorks-MCP-Kickoff.md`, `tests/test_logic.py`, `CLAUDE.md`) committed or set
-  aside first, so neither branch inherits them by accident.
+- This document, `KNOWLEDGE-BASE.md` and `JOB-BRIEF.md`, with the drawing-spec format in
+  §4.1 frozen. Changing the format afterwards needs agreement from both
+  branches.
+- `make_drawing`'s and `save_part`'s `path` becomes optional in their signatures, and the
+  server wrappers call a stub `case_output_path(kind)` (new module `case_paths.py`) that
+  returns `None` (no case open).
+  With `None` and no `path`, the tools refuse as now ("give a path"). The knowledge-base
+  branch later makes the stub return the case's paths; the drawings branch never has to
+  touch it again.
+- Any uncommitted changes in the working tree committed or set aside first, so neither
+  branch inherits them by accident.
 
 ### 8.2 Who owns what
 
 | File / area | Drawings branch | Knowledge-base branch |
 |---|---|---|
-| `make_drawing` and drawing code in `session.py` | **Owns** | Calls it only; never edits it |
-| Other modelling code in `session.py` | Doesn't touch | Error codes at raise sites; context probes (fillet, shell, …) |
-| `server.py` | Edits the `make_drawing` wrapper; adds `check_drawing` | Hooks logging into `_call()`; adds `kb_*` wrappers **in one block at the end** |
+| `make_drawing` and drawing code in `session.py` | **Owns** | Never calls or edits it. At review it opens the saved SLDDRW and saves it as PDF with its own code |
+| Other modelling code in `session.py` | Doesn't touch | Error codes at raise sites; context probes (fillet, shell, …); `save_part` path handling |
+| `server.py` | Edits the `make_drawing` wrapper, keeping the `case_output_path` call from the shared commit; adds `check_drawing` | Hooks logging into `_call()`; adds `kb_*` wrappers **in one block at the end**; fills in `case_output_path` |
 | `constants.py` | Paper size, projection values | Doesn't touch |
 | `drawing_spec.py` (new) | **Owns** | Doesn't import it; stores the spec as JSON |
 | `kb/` package (new) | Doesn't touch | **Owns** |
+| `case_paths.py` (stub from the shared commit) | Doesn't touch | **Owns**; fills it in |
 | Tests | New files (`test_drawing_spec.py`, `test_drawings.py`) | New files (`test_kb_*.py`) |
 | `README.md`, `CHANGELOG.md`, `guide.md` | Own sections only | Own sections only |
 | Version numbers | **Neither branch bumps the version** | — |
@@ -207,20 +218,25 @@ One small commit, so both branches start from the same contract:
 - The README tool count is fixed by whichever branch merges second.
 
 ### 8.3 Merge order
-1. **Drawings merges first.** It is self-contained, and the knowledge base's finalise step
-   calls `make_drawing`.
-2. The knowledge-base branch rebases onto it, then one small follow-up commit makes finalise
-   pass the case's stored spec to `make_drawing(path, spec)` and store `check_drawing`'s result.
-   Until then, finalise calls `make_drawing(path)` with the current signature.
+1. **Drawings merges first.** It is self-contained, and the knowledge-base workflow relies
+   on `make_drawing` with views and a spec, and on `check_drawing`.
+2. The knowledge-base branch rebases onto it, then one small follow-up commit (K6) makes
+   finalise store `check_drawing`'s result for the saved `DN17.SLDDRW` against the stored
+   spec, and review compare that read-back before and after your fixes. Until then,
+   finalise and review record the part's measurements only.
 
 ### 8.4 Testing: one SolidWorks, one Mac
-- **This branch is almost entirely COM work** (views, annotations, precision, read-back).
-  It cannot be run or verified on the Mac. It must be built and tested **on the Windows
-  machine with SolidWorks**, or every step marked untested.
+- **The drawings branch is almost entirely COM work** and cannot be verified on the Mac;
+  it must be built and tested on the Windows machine with SolidWorks.
+- **The knowledge-base branch is mostly pure code** (storage, search, normalisation, cards)
+  and can be built and unit-tested anywhere. Only the server-chosen saves (K2), the probes
+  (K4) and the review exports (K5) need SolidWorks.
 - There is **one SolidWorks instance**. Two agents running integration tests at the same
   time would fight over the active document. **Never run both branches' integration tests
-  at once.** The knowledge base is mostly pure code, so this branch gets SolidWorks most of
-  the time.
+  at once.**
+- Both branches depend on the existing tools working on **SOLIDWORKS 2020**
+  ([PROGRESS.md](PROGRESS.md)). `save_part`, `export` (STEP) and `make_drawing` have not
+  been verified on 2020 yet; Phase 1 of that plan should run before K2 and D1.
 
 ## 9. Decisions (2026-10-19)
 1. **Template:** the user's default drawing template, exactly what SolidWorks' *New →
