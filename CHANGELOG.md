@@ -24,6 +24,13 @@ All notable changes to this project are documented here. This project follows
 - Failures are grouped by signature: the error's code, else its text with
   names, numbers and paths replaced. Fillet, full round, chamfer and shell
   failures carry codes.
+- Knowledge-base tools (optional extra `solidworks-mcp[kb]`): `kb_ingest_drawing`,
+  `kb_view_region`, `kb_describe_case`, `kb_update_spec`, `kb_search`,
+  `kb_get_case`, `kb_abandon_case`, `kb_reembed_pending`. Drawings are
+  rendered with pypdfium2; views and descriptions are embedded with Voyage
+  AI, only once `SWMCP_VOYAGE_OPTED_OUT=1` confirms the account's data
+  opt-out (until then a case is kept as *embedding pending*). Search merges
+  keywords (SQLite FTS5) and vectors by reciprocal rank fusion.
 
 ## [0.16.0] — 2026-10-10
 

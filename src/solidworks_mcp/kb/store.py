@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS cases (
     number INTEGER NOT NULL,
     status TEXT NOT NULL,
     is_open INTEGER NOT NULL DEFAULT 0,
-    source_name TEXT, page INTEGER,
+    source_name TEXT, page INTEGER, dpi INTEGER,
     part_type TEXT, description TEXT, handwritten_dn TEXT,
     spec TEXT, spec_history TEXT,         -- JSON: the latest spec, and the earlier ones
     embedding_pending INTEGER NOT NULL DEFAULT 0,
@@ -129,6 +129,9 @@ class KnowledgeBase:
 
     def close(self) -> None:
         self._db.close()
+
+    def now(self) -> str:
+        return self._clock()
 
     def case_folder(self, dn: str) -> Path:
         return self.folder / "cases" / dn
@@ -256,3 +259,51 @@ class KnowledgeBase:
     def error_signatures(self, tool: str) -> list[dict]:
         return [_row(r) for r in self._db.execute(
             "SELECT * FROM error_signatures WHERE tool = ? ORDER BY count DESC, last_seen DESC", (tool,))]
+
+    # --- search material --------------------------------------------------------
+
+    def set_vectors(self, case_id: int, rows: list) -> None:
+        """Store (kind, model, model_version, dim, float32 bytes) rows, replacing the case's earlier ones of that kind."""
+        with self._lock, self._db:
+            self._db.executemany("INSERT OR REPLACE INTO vectors VALUES (?, ?, ?, ?, ?, ?)",
+                                 [(case_id, *row) for row in rows])
+
+    def vectors(self) -> list[dict]:
+        """Every stored vector of a case that is not abandoned, with the case's DN and status."""
+        return [dict(r) for r in self._db.execute(
+            "SELECT v.*, c.dn, c.status FROM vectors v JOIN cases c ON c.id = v.case_id "
+            "WHERE c.status != 'abandoned'")]
+
+    def case_vectors(self, case_id: int) -> list[dict]:
+        return [dict(r) for r in self._db.execute("SELECT * FROM vectors WHERE case_id = ?", (case_id,))]
+
+    def index_case(self, case_id: int, fields: dict) -> None:
+        """Replace the case's keyword index with `fields` ({field: text})."""
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM fts WHERE case_id = ?", (case_id,))
+            self._db.executemany("INSERT INTO fts (case_id, field, text) VALUES (?, ?, ?)",
+                                 [(case_id, field, text) for field, text in fields.items() if text])
+
+    def keyword_search(self, words: list) -> list[int]:
+        """Case ids whose indexed text matches any of `words`, best first (BM25), abandoned cases left out."""
+        if not words:
+            return []
+        query = " OR ".join('"' + w.replace('"', '""') + '"' for w in words)
+        # bm25() and rank cannot sit in a join or an aggregate, so the best row per case is picked here
+        live = {r[0] for r in self._db.execute("SELECT id FROM cases WHERE status != 'abandoned'")}
+        found = []
+        for row in self._db.execute("SELECT case_id FROM fts WHERE fts MATCH ? ORDER BY rank", (query,)):
+            if row["case_id"] in live and row["case_id"] not in found:
+                found.append(row["case_id"])
+        return found
+
+    def cases(self, where: str = "status != 'abandoned'", params: tuple = ()) -> list[dict]:
+        return [_row(r) for r in self._db.execute(f"SELECT * FROM cases WHERE {where} ORDER BY number", params)]
+
+    def tools_used(self, case_id: int) -> list[str]:
+        return [r[0] for r in self._db.execute(
+            "SELECT DISTINCT tool FROM events WHERE case_id = ? AND read_only = 0 ORDER BY tool", (case_id,))]
+
+    def error_codes(self, case_id: int) -> list[str]:
+        return [r[0] for r in self._db.execute(
+            "SELECT DISTINCT COALESCE(error_code, signature) FROM events WHERE case_id = ? AND ok = 0", (case_id,))]

@@ -623,8 +623,8 @@ def _tool_delegations():
 
     source = pathlib.Path("src/solidworks_mcp/server.py").read_text(encoding="utf-8")
     for node in ast.parse(source).body:
-        if not isinstance(node, ast.AsyncFunctionDef) or not node.decorator_list:
-            continue
+        if not isinstance(node, ast.AsyncFunctionDef) or not node.decorator_list or node.name.startswith("kb_"):
+            continue  # the knowledge-base tools are checked in test_kb_tools.py
         call = next(n for n in ast.walk(node)
                     if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_call")
         target, *passed = call.args

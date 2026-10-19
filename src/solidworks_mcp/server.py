@@ -11,7 +11,7 @@ import inspect
 import sys
 from importlib import resources
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from .errors import SolidWorksError
 from .kb import log as kb_log
@@ -1254,6 +1254,129 @@ async def swept_region(component: str, dimension: str, values: list, heights_mm:
 async def get_assembly_bounding_box() -> dict:
     """Get the bounding box of the whole assembly (min/max/size in mm)."""
     return await _call(_session.get_assembly_bounding_box)
+
+
+# --- knowledge base (Docs/KNOWLEDGE-BASE.md) ------------------------------------
+#
+# Earlier drawing jobs (cases, by DN number) and what was learned from them. These
+# tools are not logged as modelling events. They need the optional extra
+# solidworks-mcp[kb]; without it they fail loud.
+
+_kb_tools = None
+
+
+def _kb():
+    global _kb_tools
+    if _kb_tools is None:
+        try:
+            from .kb.cases import CaseTools
+            from .kb.embed import VoyageEmbedder
+        except ImportError as exc:
+            raise SolidWorksError(f'The knowledge base needs the optional extra: pip install "solidworks-mcp[kb]" '
+                                  f"({exc}).") from None
+        _kb_tools = CaseTools(kb_log.knowledge_base(), VoyageEmbedder())
+    return _kb_tools
+
+
+async def _kb_call(method: str, *args):
+    """Run a knowledge-base tool; errors come back as {ok: false, error}, like every tool's.
+    A (result, JPEG) pair goes out as the result's text plus the image."""
+    try:
+        result = getattr(_kb(), method)(*args)
+    except SolidWorksError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - never leak a stack trace to the agent
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if isinstance(result, tuple):
+        data, jpeg = result
+        return [data, Image(data=jpeg, format="jpeg")]
+    return result
+
+
+@mcp.tool()
+async def kb_ingest_drawing(path: str, page: int = 1):
+    """Start a case from an old drawing: a PDF named DN<number>.pdf (e.g. DN17.pdf).
+
+    The file name gives the case its DN number; any other name is refused, as is
+    a DN that already exists or a second case while one is open. A gap in the
+    numbers is a warning. Renders `page` (1-based; a missing page is refused)
+    and returns an OVERVIEW image: enough for the layout, too coarse to read
+    dimensions. Read every value with kb_view_region, then call kb_describe_case.
+    """
+    return await _kb_call("ingest_drawing", path, page)
+
+
+@mcp.tool()
+async def kb_view_region(box: list, dn: str | None = None):
+    """Zoom into the drawing: one region of the page at full resolution, as an image.
+
+    box = [x0, y0, x1, y1] as fractions of the page, 0 to 1 from the top left
+    ([0, 0, 0.5, 0.5] is the top-left quarter). The smaller the box, the closer
+    the zoom; read every dimension, tolerance and note this way, never from the
+    overview. Returns effective_dpi. dn: another case's drawing instead of the open one.
+    """
+    return await _kb_call("view_region", box, dn)
+
+
+@mcp.tool()
+async def kb_describe_case(view_boxes: dict, description: str, part_type: str, drawing_spec: dict,
+                           handwritten_dn: str | None = None, dn_confirmed: bool = False) -> dict:
+    """Record what the open case's drawing shows, and find earlier cases like it.
+
+    view_boxes: {'front': [x0, y0, x1, y1], 'top': [...], 'side': [...]} in page
+    fractions, rough is fine (a margin is added); only the views the drawing has.
+    description: the part in a few plain sentences. part_type: a short label
+    (bracket, shaft, flange, plate, ...). drawing_spec: every item on the drawing
+    in the format of SHOP-DRAWINGS.md §4.1 ({"units": "in", "items": [...]},
+    values as strings exactly as written, unreadable items flagged, never
+    guessed). handwritten_dn: a DN written on the paper, if any; when it differs
+    from the file name the call is refused: ask the user, and only once they
+    confirm the file name, call again with dn_confirmed=True.
+    Returns the unreadable items (ask the user about each, then kb_update_spec)
+    and the most similar earlier cases.
+    """
+    return await _kb_call("describe_case", view_boxes, description, part_type, drawing_spec, handwritten_dn,
+                          dn_confirmed)
+
+
+@mcp.tool()
+async def kb_update_spec(drawing_spec: dict) -> dict:
+    """Replace the open case's drawing spec whole, e.g. with the user's answers to
+    the unreadable items. The earlier version is kept. Always work from the latest."""
+    return await _kb_call("update_spec", drawing_spec)
+
+
+@mcp.tool()
+async def kb_search(text: str | None = None, like_case: str | None = None, filters: dict | None = None,
+                    limit: int = 5) -> dict:
+    """Find earlier cases: like a text ('turned shaft with a keyway'), like another
+    case ('DN12'), or both. One line per case, best first: approved cases above
+    those that needed changes, above unreviewed ones (flagged with a caution).
+    filters: {'status': [...], 'part_type': 'bracket', 'size_mm': [min, max] of the
+    largest side}. kb_get_case gives one case in full."""
+    return await _kb_call("search", text, like_case, filters, limit)
+
+
+@mcp.tool()
+async def kb_get_case(dn: str, include_timeline: bool = False) -> dict:
+    """One case in full: description, spec, review and its files (the scan; once
+    approved, the STEP and drawing PDF). include_timeline=True adds every modelling
+    step in order, with arguments, errors and measurements: how it was built."""
+    return await _kb_call("get_case", dn, include_timeline)
+
+
+@mcp.tool()
+async def kb_abandon_case(reason: str) -> dict:
+    """Close the open case without finishing it (wrong file, job dropped); tell the
+    user first. It is kept as DN17~1 and the DN can be ingested again."""
+    return await _kb_call("abandon_case", reason)
+
+
+@mcp.tool()
+async def kb_reembed_pending() -> dict:
+    """Embed the cases marked 'embedding pending' (Voyage unreachable, or the
+    opt-out not yet confirmed with SWMCP_VOYAGE_OPTED_OUT=1)."""
+    return await _kb_call("reembed_pending")
 
 
 def main() -> None:
