@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from xml.sax.saxutils import quoteattr
 
@@ -202,6 +203,8 @@ class SolidWorksSession:
         self._model = None    # current IModelDoc2
         self._quiet_depth = 0  # inside _quiet_ui
         self._to_wake = []     # (document, [(object, property)]) to switch back on after it
+        self._lookups = None   # make_drawing's edges, faces and silhouettes, looked up once
+        self._timings = {"items": {}}  # make_drawing's seconds per phase and item
 
     # --- connection -----------------------------------------------------------
 
@@ -5628,10 +5631,14 @@ class SolidWorksSession:
         x0, y0, x1, y1 = SHEET_VIEW_AREA_MM
         notes_height = sum(len(drawing_spec.to_sw_text(n["text"]).splitlines()) for n in notes) * 5.0
         lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0 + notes_height + (4 if notes else 0), x1, y1])
+        started = time.perf_counter()
+        self._timings = {"items": {}}
         doc, drawing = self._new_shop_drawing()
+        stilled = self._still_drawing(doc)
         closed = False
         try:
             made = self._place_views(doc, drawing, part_path, plan, orient, lay, box)
+            self._timings["views"] = time.perf_counter() - started
             if checked is None:
                 # DuplicateDims True leaves out repeats: each dimension in one view
                 placed = {"model_dimensions": len(drawing.InsertModelAnnotations3(
@@ -5639,6 +5646,7 @@ class SolidWorksSession:
             else:
                 placed = self._place_spec(doc, drawing, checked, places, made, notes)
             doc.ClearSelection2(True)
+            saving = time.perf_counter()
             doc.EditRebuild3()
             abs_path = os.path.abspath(path)
             if fmt == "pdf":
@@ -5653,7 +5661,11 @@ class SolidWorksSession:
                     closed = True
             else:
                 self._write_via_saveas3(abs_path, doc)
+            self._timings["save"] = time.perf_counter() - saving
         finally:
+            # never switch a closed drawing's window back on: its view is gone
+            self._to_wake = [w for w in self._to_wake if not any(w[0] is d for d in stilled)]
+            self._lookups = None  # they hold this drawing's views
             # saved, the drawing is named after the part ('holed_box - Sheet1'),
             # so the title it started with no longer closes it (verified)
             if not closed:
@@ -5663,12 +5675,40 @@ class SolidWorksSession:
         result = {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path),
                   "views": {vid: info["name"] for vid, info in made.items()},
                   "scale": f"{lay['scale'][0]}:{lay['scale'][1]}", **placed,
+                  "timings_s": self._timing_report(time.perf_counter() - started),
                   "note": "The drawing refers to the part by file name: rename the two together with "
                           "SolidWorks' Pack and Go, never in Explorer."}
         if checked is not None:
             result["unreadable"] = [i["id"] for i in checked["items"] if i["status"] == "unreadable"]
             result["next"] = "check_drawing reads the saved drawing back and compares it with the spec."
         return result
+
+    # Off for a timing comparison only (a probe sets it on the session).
+    _STILL_DRAWING = True
+
+    def _still_drawing(self, doc) -> list:
+        """Keep the new drawing's window from redrawing while it is made: every
+        dimension and note redrew the sheet with its views. The drawing is
+        closed at the end, so it is never switched back on or redrawn (a redraw
+        of a stilled drawing was in the run that crashed SOLIDWORKS 2020).
+        Returns the documents stilled here."""
+        if not self._STILL_DRAWING:
+            return []
+        before = len(self._to_wake)
+        self._quiet(doc)
+        return [w[0] for w in self._to_wake[before:]]
+
+    def _timing_report(self, total: float) -> dict:
+        """Seconds per phase of make_drawing, rounded; the slowest items first."""
+        return self._timing_summary(self._timings, total)
+
+    @staticmethod
+    def _timing_summary(timings: dict, total: float) -> dict:
+        """Pure: {total, views, items, save, slowest_items} from raw seconds."""
+        items = sorted(timings["items"].items(), key=lambda kv: -kv[1])
+        return {"total": round(total, 1), "views": round(timings.get("views", 0.0), 1),
+                "items": round(sum(v for _, v in items), 1), "save": round(timings.get("save", 0.0), 1),
+                "slowest_items": {k: round(v, 2) for k, v in items[:8]}}
 
     def _new_shop_drawing(self):
         """A new drawing from the default template on an A-size sheet with the
@@ -5837,9 +5877,14 @@ class SolidWorksSession:
         order = {"dimension": 0, "thread": 1, "hole": 1, "datum": 2, "gdt": 2, "finish": 3, "note": 4}
         annotations, text_at, out = {}, {}, {"placed": []}
         self._slots, self._on_host = drawing_spec.TextSlots(SHEET_VIEW_AREA_MM), {}
-        part_edges = list(self._solid_body().GetEdges() or ())
+        # the part and its views do not change while annotations go on: each
+        # edge, face, silhouette list and point is looked up once
+        part_edges = [binding.wrap(e, self._mod.IEdge) for e in self._solid_body().GetEdges() or ()]
+        self._lookups = {"faces": None, "silhouettes": {}, "edge_at": {}}
+        timings = self._timings["items"]
         for sid in sorted(places, key=lambda s: order[items[s]["kind"]]):
             item, place = items[sid], places[sid]
+            began = time.perf_counter()
             target = made.get(place["view"])
             doc.ClearSelection2(True)
             if item["kind"] == "dimension":
@@ -5859,6 +5904,7 @@ class SolidWorksSession:
             if not annotation.SetName(drawing_spec.annotation_name(sid)):
                 raise SolidWorksError(f"Could not name the annotation for {sid}.")
             out["placed"].append(sid)
+            timings[sid] = time.perf_counter() - began
         x, y = SHEET_NOTES_AT_MM
         for item in reversed(notes):  # the first note on top
             doc.ClearSelection2(True)
@@ -5877,7 +5923,28 @@ class SolidWorksSession:
     def _edge_at(self, part_edges, point_mm, label: str, target=None):
         """The part edge through a model point (within 0.01 mm); with a target
         view, else the view's silhouette line through it (the side of a cone or
-        cylinder, which is no model edge). Returns an IEdge or an ISilhouetteEdge."""
+        cylinder, which is no model edge). Returns an IEdge or an ISilhouetteEdge.
+        Remembered per view and point for one make_drawing (_place_spec)."""
+        lookups = self._lookups
+        key = (target["name"] if target is not None else None, tuple(round(c, 6) for c in point_mm))
+        if lookups is not None and key in lookups["edge_at"]:
+            return lookups["edge_at"][key]
+        found = self._find_edge_at(part_edges, point_mm, label, target)
+        if lookups is not None:
+            lookups["edge_at"][key] = found
+        return found
+
+    def _part_faces(self) -> list:
+        """The part's faces (IFace2), listed once per make_drawing."""
+        lookups = self._lookups
+        if lookups is not None and lookups["faces"] is not None:
+            return lookups["faces"]
+        faces = [binding.wrap(f, self._mod.IFace2) for body in self._part_bodies() for f in body.GetFaces() or ()]
+        if lookups is not None:
+            lookups["faces"] = faces
+        return faces
+
+    def _find_edge_at(self, part_edges, point_mm, label: str, target=None):
         best, best_d = None, None
         for edge in part_edges:
             e = binding.wrap(edge, self._mod.IEdge)
@@ -5891,9 +5958,7 @@ class SolidWorksSession:
             line = self._silhouette_at(target, point_mm)
             if line is not None:
                 return line
-            face = next((binding.wrap(f, self._mod.IFace2) for body in self._part_bodies()
-                         for f in body.GetFaces() or ()
-                         if self._off_face_mm(binding.wrap(f, self._mod.IFace2), point_mm) <= self._EDGE_ON_TOLERANCE_MM),
+            face = next((f for f in self._part_faces() if self._off_face_mm(f, point_mm) <= self._EDGE_ON_TOLERANCE_MM),
                         None)
             if face is not None:  # a face seen edge-on, or a silhouette the view did not list: pick it on the sheet
                 x, y = self._sheet_point(target, point_mm)
@@ -5915,13 +5980,7 @@ class SolidWorksSession:
         """The view's silhouette line through a model point, or None. On 2020
         ISilhouetteEdge.GetStartPoint throws and GetCurve is an unbounded line
         (or None), so a point counts when it is on that line and on its face."""
-        lines = []
-        for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_SILHOUETTE) or ():
-            line = binding.wrap(handle, self._mod.ISilhouetteEdge)
-            curve = binding.wrap(line.GetCurve(), self._mod.ICurve)
-            face = binding.wrap(line.GetFace(), self._mod.IFace2)
-            if curve is not None and face is not None and curve.IsLine():
-                lines.append((line, curve.LineParams, face))
+        lines = self._silhouette_lines(target)
         # 2020 lists some silhouettes once and leaves others out (a cone showed only
         # its -x side, twice): the other side of a turned face, mirrored across its
         # axis, has the same lengths and angles
@@ -5937,6 +5996,22 @@ class SolidWorksSession:
                         and self._off_face_mm(face, point) <= self._EDGE_ON_TOLERANCE_MM):
                     return line
         return None
+
+    def _silhouette_lines(self, target) -> list:
+        """[(ISilhouetteEdge, line params, IFace2)] of a view's straight
+        silhouettes, listed once per view and make_drawing."""
+        lookups = self._lookups
+        cache = lookups["silhouettes"] if lookups is not None else {}
+        if target["name"] not in cache:
+            lines = []
+            for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_SILHOUETTE) or ():
+                line = binding.wrap(handle, self._mod.ISilhouetteEdge)
+                curve = binding.wrap(line.GetCurve(), self._mod.ICurve)
+                face = binding.wrap(line.GetFace(), self._mod.IFace2)
+                if curve is not None and face is not None and curve.IsLine():
+                    lines.append((line, curve.LineParams, face))
+            cache[target["name"]] = lines
+        return cache[target["name"]]
 
     def _turned_surface(self, face):
         """('cylinder' | 'cone', params) of a face, or None."""

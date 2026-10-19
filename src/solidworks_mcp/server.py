@@ -84,6 +84,11 @@ else:
     _COM_ERROR = ()  # an empty tuple matches no exception
 
 
+# Tools that are slow while healthy get more than the COM worker's 120 s:
+# make_drawing of a real 33-item shop drawing took 53-190 s on SOLIDWORKS 2020.
+_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0}
+
+
 async def _call(fn, *args, **kwargs) -> dict:
     """Run a session method on the COM thread and normalise errors to a result dict.
 
@@ -92,7 +97,10 @@ async def _call(fn, *args, **kwargs) -> dict:
     try:
         if _worker is None:
             return fn(*args, **kwargs)
-        return await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs))
+        name = getattr(fn, "__name__", "")
+        return await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs),
+                                  timeout_s=_CALL_TIMEOUT_S.get(name),
+                                  label=name if name.isidentifier() else "the call")
     except SolidWorksError as exc:
         return {"ok": False, "error": str(exc)}
     except _COM_ERROR as exc:
