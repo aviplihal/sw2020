@@ -23,7 +23,7 @@ import pythoncom
 import win32com.client
 import win32gui
 
-from . import __version__, binding, free_sketch
+from . import __version__, binding, case_paths, free_sketch
 from .constants import (
     FEATURE_ERRORS,
     DRAWING_FORMATS,
@@ -368,10 +368,11 @@ class SolidWorksSession:
                 "Is the file open or locked?"
             )
 
-    def save_part(self, path: str) -> dict:
-        """Save the current part to a native .sldprt file (silent)."""
+    def save_part(self, path: str | None = None) -> dict:
+        """Save the current part to a native .sldprt file (silent). With a
+        knowledge-base case open the server names the file (case_paths)."""
         self._require_model()
-        abs_path = os.path.abspath(path)
+        abs_path = os.path.abspath(case_paths.resolve("part", path))
         if not abs_path.lower().endswith(".sldprt"):
             abs_path += ".sldprt"
         self._write_via_saveas3(abs_path)
@@ -5514,15 +5515,17 @@ class SolidWorksSession:
                   for corner in itertools.product(*zip(*corners_mm))]
         return [min(t[i] for t in turned) for i in range(3)], [max(t[i] for t in turned) for i in range(3)]
 
-    def make_drawing(self, path: str) -> dict:
+    def make_drawing(self, path: str | None = None) -> dict:
         """A 2D drawing of the current part, saved as PDF or as an editable .slddrw.
 
         Front, top and right views in European (first angle) projection plus an
         isometric view, on an A4 sheet at the scale SolidWorks picks, with the
         model's own dimensions, each shown once. The drawing refers to the part's
         file, so the part must have been saved; unsaved changes show in a PDF
-        but not when a saved drawing is opened later.
+        but not when a saved drawing is opened later. With a knowledge-base case
+        open the server names the file (case_paths).
         """
+        path = case_paths.resolve("drawing", path)
         fmt = os.path.splitext(path)[1].lstrip(".").lower()
         if fmt not in DRAWING_FORMATS:
             raise SolidWorksError(f"A drawing is saved as {' or '.join(sorted(DRAWING_FORMATS))} (got '{fmt}').")

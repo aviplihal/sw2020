@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Shared (knowledge base and shop drawings)
+- `SolidWorksError` takes an optional `code` and `params`, a stable name and
+  the measured values behind a failure.
+- Exact inch ↔ millimetre helpers (`units.in_to_mm`, `units.mm_to_in`); a
+  value written as text (`".375"`) is converted exactly as written.
+- `save_part` and `make_drawing` take an optional `path`: with a
+  knowledge-base case open the server names the file, otherwise a path is
+  required as before.
+
 ## [0.16.0] — 2026-10-10
 
 ### Fixed

@@ -254,8 +254,8 @@ So while a case is open:
 
 The lookup is one function, `case_output_path(kind)` in `src/solidworks_mcp/case_paths.py`,
 returning `None` with no open case. It arrives as a stub in the shared commit (§15.1); the
-knowledge-base branch fills it in. Each wrapper calls it with one line; see §15.2 for who
-edits which wrapper.
+knowledge-base branch fills it in. `save_part` and `make_drawing` call
+`case_paths.resolve(kind, path)` as their first line; see §15.2 for who edits what.
 
 ## 7. Tool cards
 
@@ -501,8 +501,9 @@ One small commit, so both branches start from the same contract:
   SHOP-DRAWINGS.md §4.1 frozen. Changing the format afterwards needs agreement from both
   branches.
 - `make_drawing`'s and `save_part`'s `path` becomes optional in their signatures, and the
-  server wrappers call a stub `case_output_path(kind)` (new module `case_paths.py`) that
-  returns `None` (no case open).
+  session methods resolve it with `case_paths.resolve(kind, path)` (new module
+  `case_paths.py`), whose stub `case_output_path(kind)` returns `None` (no case open).
+  The server wrappers stay plain `_call(_session.make_drawing, path)`.
   With `None` and no `path`, the tools refuse as now ("give a path"). The knowledge-base
   branch later makes the stub return the case's paths; the drawings branch never has to
   touch it again.
@@ -515,7 +516,7 @@ One small commit, so both branches start from the same contract:
 |---|---|---|
 | `make_drawing` and drawing code in `session.py` | **Owns** | Never calls or edits it. At review it opens the saved SLDDRW and saves it as PDF with its own code |
 | Other modelling code in `session.py` | Doesn't touch | Error codes at raise sites; context probes (fillet, shell, …); `save_part` path handling |
-| `server.py` | Edits the `make_drawing` wrapper, keeping the `case_output_path` call from the shared commit; adds `check_drawing` | Hooks logging into `_call()`; adds `kb_*` wrappers **in one block at the end**; fills in `case_output_path` |
+| `server.py` | Edits the `make_drawing` wrapper; adds `check_drawing`. Keeps the `case_paths.resolve` line at the top of `make_drawing` in `session.py` | Hooks logging into `_call()`; adds `kb_*` wrappers **in one block at the end** |
 | `constants.py` | Paper size, projection values | Doesn't touch |
 | `drawing_spec.py` (new) | **Owns** | Doesn't import it; stores the spec as JSON |
 | `kb/` package (new) | Doesn't touch | **Owns** |

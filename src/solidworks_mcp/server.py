@@ -1020,8 +1020,11 @@ async def screenshot(path: str, view: str = "iso", zoom_mm: list | None = None,
 
 
 @mcp.tool()
-async def make_drawing(path: str) -> dict:
+async def make_drawing(path: str | None = None) -> dict:
     """Make a 2D drawing of the current part: a PDF, or an editable .slddrw.
+
+    With a knowledge-base case open, leave out `path`: the server saves the
+    case's .slddrw under its DN number. Otherwise `path` is required.
 
     Front, top and right views in European (first angle) projection plus an
     isometric view, on an A4 sheet at the scale SolidWorks picks, with the
@@ -1042,8 +1045,12 @@ async def close_part(save: bool = False) -> dict:
 
 
 @mcp.tool()
-async def save_part(path: str) -> dict:
-    """Save the current part to a native .sldprt file (so it can be reopened/edited)."""
+async def save_part(path: str | None = None) -> dict:
+    """Save the current part to a native .sldprt file (so it can be reopened/edited).
+
+    With a knowledge-base case open, leave out `path`: the server saves it under
+    the case's DN number. Otherwise `path` is required.
+    """
     return await _call(_session.save_part, path)
 
 
