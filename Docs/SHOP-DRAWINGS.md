@@ -56,9 +56,29 @@ the model, the drawing, and the final check.
 {
   "units": "in",
   "items": [
-    {"id": "D1", "kind": "dimension", "value": ".375", "decimals": 3,
-     "tolerance": {"plus": ".005", "minus": ".005"},
-     "view": "front", "between": "left face to bore centre", "status": "read"},
+    {"id": "D1", "kind": "dimension", "type": "linear", "value": ".375", "decimals": 3,
+     "tolerance": {"type": "symmetric", "plus": ".005"},
+     "view": "front", "between": "left face to bore centre", "status": "read",
+     "link": {"dimension": "D1@Sketch2"}},
+    {"id": "D2", "kind": "dimension", "type": "diameter", "value": null, "decimals": 4,
+     "tolerance": {"type": "limit", "upper": ".3755", "lower": ".3750"},
+     "view": "front", "between": "bore", "status": "read",
+     "link": {"dimension": "diameter@Sketch3"}},
+    {"id": "D3", "kind": "dimension", "type": "linear", "value": "2.000", "decimals": 3,
+     "tolerance": {"type": "basic"}, "prefix": "2X",
+     "view": "top", "between": "hole pattern spacing", "status": "read",
+     "link": {"dimension": "spacing@Sketch4"}},
+    {"id": "D4", "kind": "dimension", "type": "angle", "value": "30°", "decimals": 0,
+     "tolerance": {"type": "symmetric", "plus": "0°30'"},
+     "view": "front", "between": "chamfer face to top face", "status": "read",
+     "link": {"dimension": "angle@Chamfer1"}},
+    {"id": "D5", "kind": "dimension", "type": "linear", "value": "3.50", "decimals": 2,
+     "tolerance": null, "reference": true,
+     "view": "front", "between": "overall length", "status": "read",
+     "link": {"between": ["face:-x", "face:+x"]}},
+    {"id": "D6", "kind": "dimension", "type": "diameter", "value": ".500", "decimals": 3,
+     "tolerance": {"type": "fit", "hole": "H7", "shaft": null, "show_limits": true},
+     "view": "top", "between": "dowel hole", "status": "read"},
     {"id": "T1", "kind": "thread", "callout": "1/4-20 UNC-2B", "depth": ".50",
      "view": "top", "status": "read"},
     {"id": "H1", "kind": "hole", "callout": "Ø.266 THRU, ⌴ Ø.438 ↧ .25",
@@ -80,8 +100,41 @@ Rules:
 - **Values are strings exactly as written** (`".375"`, `".50"`), never floats: a trailing
   zero or a leading dot is part of what the drawing says. `decimals` is explicit **per
   dimension**, because one drawing can mix `.xx` and `.xxx`.
+- `type` says what a dimension measures: `linear`, `diameter`, `radius`, `angle` or
+  `chamfer` (a chamfer callout: `value` is the leg length, `angle` is its angle, e.g.
+  `".03"` and `"45°"`). Only `linear`, `diameter`, `radius` and a chamfer's leg are
+  converted to mm. Angles stay in degrees: the modelling tools take degrees (rule 3 in
+  `CLAUDE.md`), and `0°30'` is converted to `0.5`.
 - `tolerance` is `null` when the old drawing shows none on that dimension (the title-block
-  tolerance applies, which the user handles).
+  tolerance applies, which the user handles). Otherwise its `type` is one of:
+
+  | `type` | Drawn as | Fields |
+  |---|---|---|
+  | `symmetric` | `.375 ±.005` | `plus` |
+  | `bilateral` | `.375 +.005/-.002` (including `+.005/-.000`) | `plus`, `minus` |
+  | `limit` | `.3755/.3750`, stacked | `upper`, `lower`; the dimension's `value` is `null` because no nominal is written |
+  | `min` / `max` | `.375 MIN` | none |
+  | `basic` | `2.000` in a box, theoretically exact (§4.1.1) | none |
+  | `fit` | `Ø.500 H7`, or `H7/g6` | `hole`, `shaft` (either may be `null`), `show_limits`: also show the limits in brackets |
+
+- `reference: true` is a reference dimension, drawn in brackets `(3.50)` with no tolerance.
+  It is information only and is never inspected.
+- `prefix` and `suffix` are the text around the value, exactly as written: `"2X"`, `"4X"`,
+  `"TYP"`, `"THRU"`. `"4X"` is part of the dimension, not a separate note.
+- **`link` (optional, filled in while modelling, not when reading)** says which part of the
+  model the item belongs to, in the terms the other tools already use:
+  - `{"dimension": "width@Sketch1"}`: a model dimension, by the names the modelling tools
+    return. The drawing shows that dimension; the check (§6) finds it by its name.
+  - `{"between": ["face:-x", "hole:#2"]}`: no model dimension covers it, so the drawing adds
+    one between these entities (faces by direction or `#index`, holes, edges).
+  - `{"feature": "CBORE for 1/4"}` or `{"face": "+z"}`: where a callout, datum symbol, GD&T
+    frame or finish symbol is attached.
+
+  The reading fields (`view`, `between`, `feature`, `surface`) stay as written: they record
+  what the old drawing said, and the `link` records where it went in the model. An item with
+  no `link` is reported by `make_drawing` as "not placed", so nothing goes missing silently.
+  Once the links are filled in, Claude stores the spec again with `kb_update_spec`
+  (KNOWLEDGE-BASE.md §6.1).
 - `status` is `read` or `unreadable`. **Anything Claude cannot read with confidence is
   flagged `unreadable`, never guessed.**
 - `id`s are stable within the spec, so the check (§6) can name each item.
@@ -92,7 +145,52 @@ Rules:
   does **not** say which view the item goes in on the new drawing (§4.4).
 - A pure module **`drawing_spec.py`** validates this format and converts dimension values to
   mm through `units.py`. The knowledge base stores the spec as JSON and does not depend on
-  this module (§8.2).
+  this module (§8.2). Claude reaches it through the `read_drawing_spec` tool (§5).
+- **A limit dimension is modelled at the middle of its limits** (`.3750/.3755` → `.37525`
+  in = `9.53135` mm), calculated by `drawing_spec.py`. The STEP file then sits in the centre
+  of the tolerance band, which is what a CNC programmer working from it expects. The
+  drawing still shows the two limits exactly as written. A `min` or `max` dimension is
+  modelled at its written value. The same applies to a `bilateral` tolerance that is not
+  symmetric: the model sits at the middle of the band (`.375 +.005/-.000` → `.3775`), and
+  `read_drawing_spec` says so for each such dimension so the user sees it at review.
+
+#### 4.1.1 Basic dimensions
+
+A **basic dimension** (the value in a box) is a theoretically exact size or location. It has
+**no tolerance of its own**: the allowed variation comes entirely from a GD&T frame, such
+as a position or a profile tolerance. They always come in pairs:
+
+> 4X Ø.266 holes, located from datums B and C by basic `1.000` and `2.000`, with a
+> position frame `⌖ Ø.010 Ⓜ A B C`. Each hole centre may lie anywhere inside a Ø.010
+> circle (bigger when the hole is at its largest size) centred on the exact point
+> 1.000 / 2.000 from B and C.
+
+**What goes wrong without the box.** The format says `tolerance: null` means the
+title-block tolerance applies. A basic dimension written as a plain `"2.000"` with
+`tolerance: null` therefore becomes `2.000 ±.005` (say) from the title block, and the hole
+is then controlled twice:
+- **a ±.005 square zone** from the dimension, and **a Ø.010 round zone** from the frame.
+  The two disagree (the square's corners reach .007 from centre, the circle .005), so the
+  drawing contradicts itself. ASME Y14.5 does not allow it.
+- **The inspector cannot tell which one wins.** Some shops will inspect to the looser one,
+  some to the tighter. Parts that pass at one shop fail at another, and a part the
+  customer would reject can be passed.
+- **The MMC bonus disappears in practice**: Ⓜ lets the position zone grow as the hole
+  gets bigger, but the ±.005 on the location never grows, so the drawing is tighter than
+  the customer intended. Good parts get scrapped.
+
+The old drawing did not have this problem; it only appears if the box is lost while copying.
+So:
+- **Basic is a tolerance type** (`{"type": "basic"}`), never `null`. Reading the old
+  drawing, a boxed value is recorded as basic.
+- `make_drawing` draws it with SolidWorks' basic tolerance type, which draws the box and
+  stops the title-block tolerance from applying.
+- `read_drawing_spec` **warns** when the spec has a `position` or `profile` frame but no
+  basic dimensions, or basic dimensions but no frame. Either one usually means a box was
+  misread. It is a warning, not an error: an old drawing may have the box in a note
+  ("UNTOLERANCED DIMENSIONS ARE BASIC"), which the user confirms.
+- `check_drawing` reports a basic dimension that comes back without the box as `differs`,
+  even when the number matches.
 
 ### 4.2 The spec drives the model
 - The part is built from the spec's dimensions, converted to mm **by `drawing_spec.py`**.
@@ -142,6 +240,7 @@ the spec was lost in the re-layout.
 | Tool | Change |
 |---|---|
 | `make_drawing(path=None, spec=None, views=None)` | Default template as-is, third-angle, no isometric, inches, empty title block. `views`: the list Claude chose (standard orthographic views by direction; section views by cutting plane; detail views by a feature and scale). With a `spec`: apply precision, tolerances, datums, GD&T, callouts, finishes, notes. **Without either it still works** (front/top/right layout), so existing callers keep working. `path` is optional: with a knowledge-base case open, the server names the file (`DN17.SLDDRW` in the output folder) through `case_output_path` and refuses a different path (KNOWLEDGE-BASE.md §6.2). Without an open case a path is required, as now |
+| `read_drawing_spec(spec)` *(new, pure, needs no SolidWorks)* | Validates the spec (§4.1) and returns every dimension in the units the modelling tools take: mm for lengths, degrees for angles; for a limit or a one-sided tolerance, the upper, lower and middle values, and which one to model. Lists the problems found (unknown `type`, a `limit` with only one value, `decimals` that don't match the written value, items with no `link`, basic/GD&T warnings §4.1.1). This is the "drawing-spec tool" the job brief means when it says code does the conversion |
 | `check_drawing(path, spec)` *(new)* | Reads the saved drawing back and compares it with the spec (§6) |
 
 Following the usual pattern in `CLAUDE.md`: session method → server wrapper with a precise
@@ -252,7 +351,7 @@ One small commit, so both branches start from the same contract:
 |---|---|
 | D0 | Shared commit on `main` (§8.1) |
 | D1 | Layout: default template as-is, third-angle, no isometric, inches, empty title block |
-| D2 | `drawing_spec.py`: validate the format, inch → mm conversion (pure, testable anywhere) |
+| D2 | `drawing_spec.py` and the `read_drawing_spec` tool: validate the format, dimension and tolerance types, inch → mm conversion, middle-of-band values, basic/GD&T warnings (pure, testable anywhere) |
 | D3 | `views`: standard views by direction, then section views, then detail views |
 | D4 | Per-dimension precision and tolerances from the spec |
 | D5 | Datums and GD&T frames; thread and hole callouts; finish symbols; notes |
