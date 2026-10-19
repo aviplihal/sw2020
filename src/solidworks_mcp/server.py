@@ -123,8 +123,13 @@ def _log_call(fn, args, kwargs, result: dict, error: BaseException | None) -> di
         except (TypeError, ValueError):
             arguments = {"args": list(args), **kwargs}
         revision = getattr(_session, "sw_revision", None)
-        kb_log.record_call(fn.__name__, arguments, result, error,
-                           revision if isinstance(revision, str) else None)
+        event = kb_log.record_call(fn.__name__, arguments, result, error,
+                                   revision if isinstance(revision, str) else None)
+        if event is not None and not event["ok"]:
+            # the tool card's line for this failure, so the agent need not remember to look
+            hint = kb_log.hint_for(fn.__name__, event["signature"])
+            if hint:
+                result = {**result, "kb_hint": hint}
     except Exception as exc:  # noqa: BLE001 - the tool's own result matters more
         result = {**result, "kb_warning": f"The knowledge base did not log this call: {type(exc).__name__}: {exc}"}
     return result
@@ -1274,8 +1279,20 @@ def _kb():
         except ImportError as exc:
             raise SolidWorksError(f'The knowledge base needs the optional extra: pip install "solidworks-mcp[kb]" '
                                   f"({exc}).") from None
-        _kb_tools = CaseTools(kb_log.knowledge_base(), VoyageEmbedder())
+        _kb_tools = CaseTools(kb_log.knowledge_base(), VoyageEmbedder(), _tool_reference)
     return _kb_tools
+
+
+def _tool_reference(name: str) -> str | None:
+    """A modelling tool's 'How to call' line for its card: its signature and the
+    first line of its docstring, so the card cannot drift from the code."""
+    fn = globals().get(name)
+    if name.startswith("_") or name.startswith("kb_") or not inspect.iscoroutinefunction(fn):
+        return None
+    params = ", ".join(p.name if p.default is p.empty else f"{p.name}={p.default!r}"
+                       for p in inspect.signature(fn).parameters.values())
+    first = (inspect.getdoc(fn) or "").split("\n")[0]
+    return f"{name}({params}): {first}"
 
 
 async def _kb_call(method: str, *args):
@@ -1370,6 +1387,24 @@ async def kb_abandon_case(reason: str) -> dict:
     """Close the open case without finishing it (wrong file, job dropped); tell the
     user first. It is kept as DN17~1 and the DN can be ingested again."""
     return await _kb_call("abandon_case", reason)
+
+
+@mcp.tool()
+async def kb_tool_card(tool: str) -> dict:
+    """What is known about one modelling tool: when to use it, when not, how to call
+    it, and the failures seen in practice with their cause and fix (with counts,
+    the last case and versions). Read the cards of the tools you plan to use."""
+    return await _kb_call("tool_card", tool)
+
+
+@mcp.tool()
+async def kb_update_tool_card(tool: str, card: dict) -> dict:
+    """Store a tool's tidied card, as finalise asks: card = {"use_when": "...",
+    "dont_use_when": "...", "failures": {signature: "cause -> fix"}, "lessons": [...]}.
+    One line per text; at most 8 bullets and about 150 words, or it is refused.
+    Every failure in must_cover needs a text (give several the same text when they
+    share a cause). Counts and versions are added by the server; do not write them."""
+    return await _kb_call("update_tool_card", tool, card)
 
 
 @mcp.tool()

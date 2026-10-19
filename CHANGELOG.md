@@ -31,6 +31,13 @@ All notable changes to this project are documented here. This project follows
   AI, only once `SWMCP_VOYAGE_OPTED_OUT=1` confirms the account's data
   opt-out (until then a case is kept as *embedding pending*). Search merges
   keywords (SQLite FTS5) and vectors by reciprocal rank fusion.
+- Tool cards (`kb_tool_card`, `kb_update_tool_card`): one short card per
+  modelling tool, stored as fields. Claude writes the words; the server adds
+  the 'How to call' line from the tool's docstring and each failure's count,
+  last case and versions, and refuses a card over 8 bullets or 150 words, or
+  one that drops a frequent failure. A failure retires once an upgrade fixed
+  it (not seen since, and 3 successes after). An error result carries the
+  card's line for that failure as `kb_hint`.
 
 ## [0.16.0] — 2026-10-10
 

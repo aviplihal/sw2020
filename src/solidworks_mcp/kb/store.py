@@ -307,3 +307,32 @@ class KnowledgeBase:
     def error_codes(self, case_id: int) -> list[str]:
         return [r[0] for r in self._db.execute(
             "SELECT DISTINCT COALESCE(error_code, signature) FROM events WHERE case_id = ? AND ok = 0", (case_id,))]
+
+    # --- tool cards -------------------------------------------------------------
+
+    def card(self, tool: str) -> dict | None:
+        return _row(self._db.execute("SELECT * FROM tool_cards WHERE tool = ?", (tool,)).fetchone())
+
+    def set_card(self, tool: str, fields: dict, server_version: str | None, sw_revision: str | None) -> dict:
+        with self._lock, self._db:
+            self._db.execute("INSERT OR REPLACE INTO tool_cards VALUES (?, ?, ?, ?, ?)",
+                             (tool, _dump(fields), server_version, sw_revision, self._clock()))
+        return self.card(tool)
+
+    def latest_versions(self, tool: str) -> tuple | None:
+        """(server version, SOLIDWORKS revision) of the tool's most recent call."""
+        row = self._db.execute("SELECT server_version, sw_revision FROM events WHERE tool = ? "
+                               "ORDER BY id DESC LIMIT 1", (tool,)).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def successes_since(self, tool: str, signature: str) -> int:
+        """How often the tool worked after its last failure with `signature` (by log order:
+        timestamps are only to the second)."""
+        return self._db.execute(
+            "SELECT COUNT(*) FROM events WHERE tool = ? AND ok = 1 AND id > "
+            "(SELECT COALESCE(MAX(id), 0) FROM events WHERE tool = ? AND signature = ?)",
+            (tool, tool, signature)).fetchone()[0]
+
+    def case_tool_events(self, case_id: int, tool: str) -> list[dict]:
+        return [_row(r) for r in self._db.execute(
+            "SELECT * FROM events WHERE case_id = ? AND tool = ? ORDER BY seq", (case_id, tool))]

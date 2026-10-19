@@ -298,7 +298,11 @@ the workflow for an agent: [Docs/JOB-BRIEF.md](Docs/JOB-BRIEF.md).
 | `kb_search(text, like_case, filters, limit)` | Keyword + vector search, one line per case; approved cases first |
 | `kb_get_case(dn, include_timeline)` | One case in full, with its files and, on request, every modelling step |
 | `kb_abandon_case(reason)` | Close the open case without finishing it; its DN can be ingested again |
+| `kb_tool_card(tool)` | What is known about a modelling tool: when to use it, how to call it, failures seen with cause and fix |
+| `kb_update_tool_card(tool, card)` | Store a tool card Claude tidied; refused over 8 bullets / 150 words or if a frequent failure lost its text |
 | `kb_reembed_pending()` | Embed cases saved while Voyage was unavailable |
+
+A failing tool's error result carries `kb_hint`: its card's line for that failure, if there is one.
 
 | Environment variable | Meaning |
 |---|---|

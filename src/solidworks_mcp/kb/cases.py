@@ -10,9 +10,10 @@ import ntpath
 import os
 import shutil
 
+from .. import __version__
 from ..errors import SolidWorksError
+from . import cards, images, search
 from . import dn as dn_names
-from . import images, search
 from .embed import Embedder, EmbeddingUnavailable
 from .store import KnowledgeBase
 
@@ -64,9 +65,11 @@ def _measured(result: dict | None) -> dict | None:
 
 
 class CaseTools:
-    def __init__(self, kb: KnowledgeBase, embedder: Embedder) -> None:
+    def __init__(self, kb: KnowledgeBase, embedder: Embedder, tool_reference=None) -> None:
         self.kb = kb
         self.embedder = embedder
+        # tool name -> its 'How to call' line from server.py, or None for no such tool
+        self.tool_reference = tool_reference or (lambda tool: None)
 
     # --- ingest and read ----------------------------------------------------------
 
@@ -337,3 +340,52 @@ class CaseTools:
         number = case["number"]
         return {"ok": True, "abandoned": case["dn"],
                 "note": f"{dn_names.name(number)} is free again: ingest the right file to start it afresh."}
+
+    # --- tool cards -------------------------------------------------------------------
+
+    def _tool(self, tool: str) -> str:
+        reference = self.tool_reference(tool)
+        if reference is None or tool.startswith("kb_"):
+            raise SolidWorksError(f"No modelling tool is called '{tool}'.", code="KB_NO_SUCH_TOOL")
+        return reference
+
+    def _signature_list(self, rows) -> list:
+        return [{"signature": r["signature"], "count": r["count"], "error": r["sample"]} for r in rows]
+
+    def tool_card(self, tool: str) -> dict:
+        """One tool's card, and the failure signatures a rewrite keys its texts by."""
+        how_to_call = self._tool(tool)
+        card = self.kb.card(tool)
+        active = cards.active_signatures(self.kb, tool)
+        return {"ok": True, "tool": tool, "card": cards.render(tool, card, active, how_to_call),
+                "signatures": self._signature_list(active)}
+
+    def update_tool_card(self, tool: str, card: dict) -> dict:
+        """Store a tidied card's fields: refused over the cap, or when a frequent failure lost its text."""
+        how_to_call = self._tool(tool)
+        known = {row["signature"] for row in self.kb.error_signatures(tool)}
+        fields = cards.check(card, cards.must_cover(self.kb, tool), known)
+        server_version, sw_revision = self.kb.latest_versions(tool) or (__version__, None)
+        stored = self.kb.set_card(tool, fields, server_version, sw_revision)
+        return {"ok": True, "tool": tool,
+                "card": cards.render(tool, stored, cards.active_signatures(self.kb, tool), how_to_call)}
+
+    def _cards_to_tidy(self, case: dict) -> list:
+        """For finalise: each modelling tool the case used, its card, the failures the
+        rewrite must cover, and what happened to it in this case."""
+        packets = []
+        for tool in self.kb.tools_used(case["id"]):
+            if self.tool_reference(tool) is None:
+                continue
+            events = self.kb.case_tool_events(case["id"], tool)
+            failures = [{key: e[key] for key in ("seq", "error", "error_code", "error_params", "probe", "signature")
+                         if e[key] is not None} for e in events if not e["ok"]]
+            card = self.kb.card(tool)
+            packets.append({
+                "tool": tool,
+                "card": self.tool_card(tool)["card"],
+                "fields": (card or {}).get("fields") or {},
+                "must_cover": self._signature_list(cards.must_cover(self.kb, tool)),
+                "this_case": {"calls": len(events), "failures": failures},
+            })
+        return packets

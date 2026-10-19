@@ -9,7 +9,7 @@ into a warning in the call's result (Docs/KNOWLEDGE-BASE.md §10).
 import json
 
 from .. import __version__
-from . import config, signatures
+from . import cards, config, signatures
 from .store import KnowledgeBase
 
 # Tools that look but change nothing. They are logged too (what Claude looked
@@ -64,3 +64,8 @@ def record_call(tool: str, arguments: dict, result: dict, error: BaseException |
         tool, read_only=tool in READ_ONLY_TOOLS, arguments=arguments, result=_stored_result(result),
         error=message, error_code=code, error_params=params, signature=signature,
         server_version=__version__, sw_revision=sw_revision)
+
+
+def hint_for(tool: str, signature: str | None) -> str | None:
+    """The tool card's line for this failure (kb_hint), if the card has one."""
+    return cards.hint(knowledge_base().card(tool), signature)
