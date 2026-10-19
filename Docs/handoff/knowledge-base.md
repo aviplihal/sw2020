@@ -2,8 +2,8 @@ You are continuing the knowledge-base work on the SolidWorks MCP server (repo gi
 
 ## Branch
 - Work on **`feat/knowledge-base`**. Check it out first: `git fetch origin` then `git switch feat/knowledge-base`. Do not commit to `main`.
-- `shared/kb-drawings-contract` (commit `fdf5171`) is the shared base that the shop-drawings branch (`feat/shop-drawings`) starts from. Don't rewrite it. That branch is built by a separate session with its own prompt; it owns `make_drawing` and the new `check_drawing`, and it merges first.
-- The design docs come from `docs/kb-and-drawings-design`, and `feat/knowledge-base` already contains them.
+- K0, K1 and K3 are already merged into `main` (PR #2). Continue on `feat/knowledge-base`, which is level with `main`.
+- The shop-drawings branch (`feat/shop-drawings`) starts from `main`. It is built by a separate session with its own prompt; it owns `make_drawing` and the new `check_drawing`, and it merges next, before the rest of this branch.
 
 ## Read first
 1. `CLAUDE.md`: project rules (early binding, all COM on one thread, mm/deg at the boundary, fail loud, measure back).

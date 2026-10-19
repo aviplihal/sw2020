@@ -1,8 +1,8 @@
 You are building the shop-drawing support for the SolidWorks MCP server (repo github.com/aviplihal/sw2020), on the Windows machine where SOLIDWORKS 2020 runs. Nothing of this branch exists yet.
 
 ## Branch
-- `git fetch origin`, then create your branch from the shared base: `git switch -c feat/shop-drawings origin/shared/kb-drawings-contract`. Push it when the first commit is in.
-- `shared/kb-drawings-contract` (commit `fdf5171`) is the shared base the knowledge-base branch also starts from. It already contains step **D0**:
+- `git fetch origin`, then create your branch from `main`: `git switch -c feat/shop-drawings origin/main`. Push it when the first commit is in.
+- `main` already contains step **D0**, the shared base (commit `fdf5171`), the frozen spec format (SHOP-DRAWINGS.md §4.1) and the first part of the knowledge base (K0, K1, K3):
   - `SolidWorksError(message, code=None, params=None)`
   - `units.in_to_mm` / `mm_to_in` (exact, and a string such as `".375"` is converted as written)
   - `make_drawing(path=None)` and `save_part(path=None)`, with `case_paths.resolve(...)` as the first line of each
@@ -74,7 +74,7 @@ Use the highest-numbered variant that exists in typelib 28. When something is mi
 ## Rules
 - **Do Phase 1 of PROGRESS.md first, once:** `scripts/probe_connection.py`, `--selftest`, `pytest -m "not solidworks"`, full `pytest`. Save the baseline in the PROGRESS.md log. If the knowledge-base session already did it, reuse its results.
 - **There is one SolidWorks instance.** Never run integration tests while another session runs the knowledge-base branch's tests. Agree with the user who uses SolidWorks when.
-- **Merge order:** drawings merges first (SHOP-DRAWINGS.md §8.3), so keep `main`-bound changes self-contained. Don't bump the version. CHANGELOG entries go under `## [Unreleased]` → `### Shop drawings`. Edit only your own sections of README and guide. The README tool count is fixed by whichever branch merges second.
+- **Merge order:** drawings merges next, before the rest of the knowledge base (SHOP-DRAWINGS.md §8.3), so keep `main`-bound changes self-contained. Don't bump the version. CHANGELOG entries go under `## [Unreleased]` → `### Shop drawings`. Edit only your own sections of README and guide. The README tool count is fixed by whichever branch merges second.
 - **Follow the pattern in `CLAUDE.md` for every tool:** session method → wrapper with a precise docstring, args forwarded in order (`tests/test_logic.py` checks this) → pure tests plus `solidworks`-marked integration tests that measure back → README / guide / CHANGELOG / PROGRESS log.
 - **Commits** use Conventional Commits in plain words and end with the attribution line your environment gives.
 - **The drawing is a shop-floor document:** a wrong dimension is a scrapped part. Report test results as they are. If something couldn't be verified on 2020, say so.

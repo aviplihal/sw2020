@@ -318,9 +318,11 @@ One small commit, so both branches start from the same contract:
 - The README tool count is fixed by whichever branch merges second.
 
 ### 8.3 Merge order
-1. **Drawings merges first.** It is self-contained, and the knowledge-base workflow relies
-   on `make_drawing` with views and a spec, and on `check_drawing`.
-2. The knowledge-base branch rebases onto it, then one small follow-up commit (K6) makes
+1. **The knowledge base's first part is already on `main`** (K0, K1 and K3, merged
+   2026-10-19 as PR #2). It does not depend on the drawings work.
+2. **Drawings merges next.** It is self-contained, and the rest of the knowledge-base
+   workflow relies on `make_drawing` with views and a spec, and on `check_drawing`.
+3. The knowledge-base branch merges `main` in again, then one small follow-up commit (K6) makes
    finalise store `check_drawing`'s result for the saved `DN17.SLDDRW` against the stored
    spec, and review compare that read-back before and after your fixes. Until then,
    finalise and review record the part's measurements only.
