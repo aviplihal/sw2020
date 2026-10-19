@@ -1020,18 +1020,67 @@ async def screenshot(path: str, view: str = "iso", zoom_mm: list | None = None,
 
 
 @mcp.tool()
-async def make_drawing(path: str | None = None) -> dict:
-    """Make a 2D drawing of the current part: a PDF, or an editable .slddrw.
+async def make_drawing(path: str | None = None, spec: dict | None = None, views: list | None = None,
+                       placements: dict | None = None) -> dict:
+    """Make the shop drawing of the current part: an editable .slddrw (or a .pdf).
 
-    With a knowledge-base case open, leave out `path`: the server saves the
-    case's .slddrw under its DN number. Otherwise `path` is required.
+    A-size sheet with SolidWorks' stock ANSI title block (left empty for the
+    user), third-angle projection, inches, never an isometric view. Save the
+    part first (save_part, no unsaved changes): the drawing refers to its file.
+    With a knowledge-base case open, leave out `path`; otherwise give one.
 
-    Front, top and right views in European (first angle) projection plus an
-    isometric view, on an A4 sheet at the scale SolidWorks picks, with the
-    model's own dimensions, each shown once: a dimensioned sketch to print or
-    send. Save the part first (save_part): the drawing refers to its file.
+    Without spec/placements: front, top and right views with the model's own
+    dimensions (a quick dimensioned sketch).
+
+    views (optional; default front, top, right). The first is the drawing's
+    front view, the most descriptive one:
+      {"kind": "standard", "model_view": "front", "up": "-x"}
+        model_view: the model view it shows (front/back/top/bottom/left/right),
+        up: the model axis that points up on the sheet (e.g. "-x" lays a part
+        turned about model Y along the sheet). Then views projected from it:
+      {"kind": "standard", "direction": "right"}   top / bottom / left / right
+      {"kind": "section", "from": "front", "cut": "vertical", "label": "A",
+       "through_mm": [x, y, z]}   cutting line through that model point
+       (optional "flip": true to look the other way)
+      {"kind": "detail", "from": "front", "label": "B", "center_mm": [x, y, z],
+       "radius_mm": 4, "scale": "4:1"}
+    Each view gets an id: its direction, "section A", "detail B" (or "id").
+    The sheet scale is the largest standard one at which the views fit.
+
+    spec: the drawing spec (Docs/SHOP-DRAWINGS.md 4.1), values as written in
+    inches. Every read item except general notes needs a placement; items
+    flagged unreadable are refused (ask the user first). Notes without a
+    placement stack at the lower left.
+
+    placements: {spec id: where}, all points are MODEL points in mm on an edge
+    that shows in that view (list_edges):
+      dimension: {"view": "front", "measure": "horizontal"|"vertical"|"distance"
+        |"diameter"|"radius"|"angle", "points_mm": [[..], [..]] (one point for
+        a diameter/radius: on the circle; a circle seen edge-on gives its
+        diameter), optional "side": above/below/left/right and "offset_mm"
+        (paper distance from the view, default 10; stagger them)}.
+        The tool sets the spec's precision, fraction or limits and tolerance.
+      datum / gdt: {"view", "on": "D13"} on a placed dimension (a feature of
+        size) or thread/hole, or {"view", "point_mm": [..]} on a surface's edge.
+      finish, thread, hole, local note: {"view", "point_mm": [..]} (leader).
+    Each placed item is named after its spec id inside the drawing, so
+    check_drawing can find it. Call check_drawing next.
     """
-    return await _call(_session.make_drawing, path)
+    return await _call(_session.make_drawing, path, spec, views, placements)
+
+
+@mcp.tool()
+async def check_drawing(path: str, spec: dict) -> dict:
+    """Read a saved .slddrw back from SolidWorks and compare it with the spec.
+
+    One line per spec item: ok, missing, differs (what the drawing shows and
+    what the spec says; a dimension also differs when the model's measured
+    value is not the spec's, even if the shown text matches) or unreadable
+    (flagged when the old drawing was read). Also lists what is on the drawing
+    but not in the spec (the title block is left out). `clean` is true when
+    nothing is missing or different.
+    """
+    return await _call(_session.check_drawing, path, spec)
 
 
 @mcp.tool()

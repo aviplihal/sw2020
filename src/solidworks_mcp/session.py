@@ -23,7 +23,7 @@ import pythoncom
 import win32com.client
 import win32gui
 
-from . import __version__, binding, case_paths, free_sketch
+from . import __version__, binding, case_paths, drawing_spec, free_sketch
 from .constants import (
     FEATURE_ERRORS,
     DRAWING_FORMATS,
@@ -54,7 +54,6 @@ from .constants import (
     SW_DOC_DRAWING,
     SW_DOC_PART,
     SW_DONT_REBUILD_ACTIVE_DOC,
-    SW_DWG_PAPER_A4,
     SW_END_COND_BLIND,
     SW_END_COND_MID_PLANE,
     SW_END_COND_THROUGH_ALL,
@@ -142,7 +141,44 @@ from .errors import SolidWorksError
 from .mesh_tools import area, compare_sections, extents, load_mesh, section, simplify
 from .region_tools import swept_outline
 from .sketch_constraints import MAX_DIMENSIONED_VERTICES, SketchDefiner
-from .units import deg_to_rad, m_to_mm, mm_to_m
+from .constants import (  # shop drawings
+    SHEET_FORMAT_FILE,
+    SHEET_NOTES_AT_MM,
+    SHEET_SIZE_MM,
+    SHEET_VIEW_AREA_MM,
+    SW_ANGULAR_DIMENSION_TYPE,
+    SW_ANNOTATION_OWNER_TEMPLATE,
+    SW_ANNOTATION_TYPES,
+    SW_ARROW_CLOSED,
+    SW_DECIMAL,
+    SW_DETAIL_CIRCLE,
+    SW_DETAIL_STANDARD,
+    SW_DETAILING_ANSI,
+    SW_DIMENSION_TEXT_PREFIX,
+    SW_DWG_PAPER_A,
+    SW_DWG_TEMPLATE_CUSTOM,
+    SW_FRACTION,
+    SW_GCS,
+    SW_GCS_TOKENS,
+    SW_GTOL_MATERIAL,
+    SW_GTOL_MATERIAL_TOKENS,
+    SW_INCHES,
+    SW_LEADER_STRAIGHT,
+    SW_PREF_DIMENSION_STANDARD,
+    SW_PREF_DOUBLE_PRIME_MARK,
+    SW_PREF_SHEET_FORMAT_FOLDERS,
+    SW_PREF_UNIT_SYSTEM,
+    SW_PREF_UNITS_LINEAR,
+    SW_PREF_UNITS_LINEAR_DECIMALS,
+    SW_ROUND_HALF_AWAY,
+    SW_SECTION_CHANGE_DIRECTION,
+    SW_SF_MAX_ROUGHNESS,
+    SW_SF_SYMBOLS,
+    SW_TOLERANCE_NAMES,
+    SW_TOLERANCES,
+    SW_UNIT_SYSTEM_IPS,
+)
+from .units import deg_to_rad, in_to_mm, m_to_mm, mm_to_in, mm_to_m
 
 
 class SolidWorksSession:
@@ -5515,55 +5551,538 @@ class SolidWorksSession:
                   for corner in itertools.product(*zip(*corners_mm))]
         return [min(t[i] for t in turned) for i in range(3)], [max(t[i] for t in turned) for i in range(3)]
 
-    def make_drawing(self, path: str | None = None) -> dict:
-        """A 2D drawing of the current part, saved as PDF or as an editable .slddrw.
+    # --- shop drawings (Docs/SHOP-DRAWINGS.md) ----------------------------------
+    #
+    # make_drawing places what a drawing spec says on a clean drawing, and
+    # check_drawing reads the SAVED drawing back and compares it with the spec.
+    # Facts this code depends on, verified on SOLIDWORKS 2020 SP4 (28.4):
+    # - The default drawing template carries no sheet format; SetupSheet5 with a
+    #   custom format file gives the stock title block, and SheetFormatVisible
+    #   must be switched on or it does not show.
+    # - IView.Angle turns a view anticlockwise (radians); -90 deg lays a part
+    #   whose axis is model Y along the sheet.
+    # - IView.ModelToViewTransform's translation and scale are right, but
+    #   IMathPoint.MultiplyTransform with it ignores the view's rotation, so
+    #   model points are projected here from the orientation (drawing_spec).
+    # - A model IEdge can be selected in a view with IView.SelectEntity, then
+    #   dimensioned. A circle seen edge-on is dimensioned as a diameter with
+    #   AddVerticalDimension2/AddHorizontalDimension2 on that one edge (SolidWorks
+    #   adds the diameter prefix itself); AddDiameterDimension2 on it gives twice
+    #   the diameter. Two edge-on circles dimension centre to centre.
+    # - IAnnotation.SetName names a drawing annotation ('RD1' -> 'SPEC_D10'), so
+    #   the spec id travels inside the saved drawing.
 
-        Front, top and right views in European (first angle) projection plus an
-        isometric view, on an A4 sheet at the scale SolidWorks picks, with the
-        model's own dimensions, each shown once. The drawing refers to the part's
-        file, so the part must have been saved; unsaved changes show in a PDF
-        but not when a saved drawing is opened later. With a knowledge-base case
-        open the server names the file (case_paths).
+    _EDGE_ON_TOLERANCE_MM = 0.01
+
+    def make_drawing(self, path: str | None = None, spec: dict | None = None, views: list | None = None,
+                     placements: dict | None = None) -> dict:
+        """A shop drawing of the current part, saved as .slddrw (or .pdf).
+
+        An A-size sheet with SolidWorks' stock ANSI title block (left empty),
+        third-angle projection, inches, never an isometric view. Without a spec
+        it shows front, top and right views with the model's own dimensions.
+        With a spec (drawing_spec, §4.1) and placements it places every read
+        item of the spec where the placements say and nothing else. The part
+        must be saved, with no unsaved changes: the drawing refers to its file.
         """
         path = case_paths.resolve("drawing", path)
         fmt = os.path.splitext(path)[1].lstrip(".").lower()
         if fmt not in DRAWING_FORMATS:
             raise SolidWorksError(f"A drawing is saved as {' or '.join(sorted(DRAWING_FORMATS))} (got '{fmt}').")
+        checked = drawing_spec.validate(spec) if spec is not None else None
+        plan = drawing_spec.validate_views(views)
+        view_ids = {v["id"] for v in plan}
+        if checked is None and placements:
+            raise SolidWorksError("placements go with a spec: give the spec too.")
+        places = drawing_spec.validate_placements(placements, checked, view_ids) if checked else {}
         self._require_part()
-        part_path = self._model.GetPathName()
+        part = self._model
+        part_path = part.GetPathName()
         if not part_path:
             raise SolidWorksError("Save the part first (save_part): the drawing refers to its file.")
-        template = self._sw.GetUserPreferenceStringValue(SW_PREF_DEFAULT_TEMPLATE_DRAWING)
-        drawing = binding.wrap(self._sw.NewDocument(template, SW_DWG_PAPER_A4, 0.0, 0.0), self._mod.IModelDoc2)
-        if drawing is None:
-            raise SolidWorksError(f"SolidWorks could not start a drawing from the template '{template}'.")
+        if part.GetSaveFlag():
+            raise SolidWorksError("The part has unsaved changes. Save it first (save_part): the drawing shows "
+                                  "the part's file, and a reopened drawing would show the old shape.")
+        front = plan[0]
+        orient = drawing_spec.view_orientations(front["model_view"], front["up"])
+        box = self._bounding_box()
+        if box is None:
+            raise SolidWorksError("The part has no solid body to draw.")
+        notes = [i for i in (checked or {"items": []})["items"]
+                 if i["kind"] == "note" and i["status"] == "read" and i["id"] not in places]
+        x0, y0, x1, y1 = SHEET_VIEW_AREA_MM
+        notes_height = sum(len(drawing_spec.to_sw_text(n["text"]).splitlines()) for n in notes) * 5.0
+        lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0 + notes_height + (4 if notes else 0), x1, y1])
+        doc, drawing = self._new_shop_drawing()
         try:
-            sheets = binding.wrap(drawing, self._mod.IDrawingDoc)
-            if not sheets.Create1stAngleViews2(part_path):
-                raise SolidWorksError("SolidWorks could not place the front, top and right views.")
-            iso = binding.wrap(sheets.CreateDrawViewFromModelView3(part_path, "*Isometric", 0.24, 0.16, 0.0),
-                               self._mod.IView)
-            if iso is None:
-                raise SolidWorksError("SolidWorks could not place the isometric view.")
-            iso.UseSheetScale = True
-            # DuplicateDims True leaves out repeats: each dimension in one view
-            dimensions = sheets.InsertModelAnnotations3(SW_IMPORT_ENTIRE_MODEL, SW_INSERT_DIMENSIONS,
-                                                        True, True, False, False) or ()
-            views = []
-            view = binding.wrap(sheets.GetFirstView(), self._mod.IView)  # the sheet itself comes first
-            view = binding.wrap(view.GetNextView(), self._mod.IView)
-            while view is not None:
-                views.append(view.GetName2())
-                view = binding.wrap(view.GetNextView(), self._mod.IView)
-            scale = binding.wrap(sheets.GetCurrentSheet(), self._mod.ISheet).GetProperties2()[2:4]
+            made = self._place_views(doc, drawing, part_path, plan, orient, lay, box)
+            if checked is None:
+                # DuplicateDims True leaves out repeats: each dimension in one view
+                placed = {"model_dimensions": len(drawing.InsertModelAnnotations3(
+                    SW_IMPORT_ENTIRE_MODEL, SW_INSERT_DIMENSIONS, True, True, False, False) or ())}
+            else:
+                placed = self._place_spec(doc, drawing, checked, places, made, notes)
+            doc.ClearSelection2(True)
+            doc.EditRebuild3()
             abs_path = os.path.abspath(path)
-            self._write_via_saveas3(abs_path, drawing)
+            self._write_via_saveas3(abs_path, doc)
         finally:
             # saved, the drawing is named after the part ('holed_box - Sheet1'),
             # so the title it started with no longer closes it (verified)
-            self._sw.CloseDoc(drawing.GetTitle())
-        return {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path), "views": views,
-                "dimensions": len(dimensions), "scale": f"{scale[0]:g}:{scale[1]:g}"}
+            self._sw.CloseDoc(doc.GetTitle())
+            self._sw.ActivateDoc3(part.GetTitle(), False, SW_DONT_REBUILD_ACTIVE_DOC, 0)
+        result = {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path),
+                  "views": {vid: info["name"] for vid, info in made.items()},
+                  "scale": f"{lay['scale'][0]}:{lay['scale'][1]}", **placed,
+                  "note": "The drawing refers to the part by file name: rename the two together with "
+                          "SolidWorks' Pack and Go, never in Explorer."}
+        if checked is not None:
+            result["unreadable"] = [i["id"] for i in checked["items"] if i["status"] == "unreadable"]
+            result["next"] = "check_drawing reads the saved drawing back and compares it with the spec."
+        return result
+
+    def _new_shop_drawing(self):
+        """A new drawing from the default template on an A-size sheet with the
+        stock ANSI title block, third angle, in inches."""
+        sw = self._sw
+        template = sw.GetUserPreferenceStringValue(SW_PREF_DEFAULT_TEMPLATE_DRAWING)
+        folders = [f.strip() for f in (sw.GetUserPreferenceStringValue(SW_PREF_SHEET_FORMAT_FOLDERS) or "").split(";")]
+        sheet_format = next((os.path.join(f, SHEET_FORMAT_FILE) for f in folders
+                             if f and os.path.isfile(os.path.join(f, SHEET_FORMAT_FILE))), None)
+        if sheet_format is None:
+            raise SolidWorksError(f"No sheet format '{SHEET_FORMAT_FILE}' in SolidWorks' sheet format folders "
+                                  f"({'; '.join(f for f in folders if f) or 'none set'}).")
+        doc = binding.wrap(sw.NewDocument(template, SW_DWG_PAPER_A, 0.0, 0.0), self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not start a drawing from the template '{template}'.")
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        sheet = binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet)
+        width, height = (mm_to_m(c) for c in SHEET_SIZE_MM)
+        if not drawing.SetupSheet5(sheet.GetName(), SW_DWG_PAPER_A, SW_DWG_TEMPLATE_CUSTOM, 1.0, 1.0, False,
+                                   sheet_format, width, height, "Default", True):
+            self._sw.CloseDoc(doc.GetTitle())
+            raise SolidWorksError(f"SolidWorks could not set up the sheet with '{sheet_format}'.")
+        binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).SheetFormatVisible = True
+        ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+        for pref, value in ((SW_PREF_UNIT_SYSTEM, SW_UNIT_SYSTEM_IPS), (SW_PREF_UNITS_LINEAR, SW_INCHES),
+                            (SW_PREF_DIMENSION_STANDARD, SW_DETAILING_ANSI)):
+            ext.SetUserPreferenceInteger(pref, 0, value)
+        ext.SetUserPreferenceToggle(SW_PREF_DOUBLE_PRIME_MARK, 0, False)  # no " after fractions (ANSI)
+        return doc, drawing
+
+    # --- views ------------------------------------------------------------------
+
+    def _place_views(self, doc, drawing, part_path, plan, orient, lay, box) -> dict:
+        """Create the planned views at the layout's scale and centres. Returns
+        {id: {name, view, orientation}}; standard views first, then sections and
+        details, which are cut from views made before them."""
+        num, den = lay["scale"]
+        sheet = binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet)
+        props = list(sheet.GetProperties2())
+        made = {}
+        for view in plan:
+            cx, cy = (mm_to_m(c) for c in lay["centres_mm"][view["id"]])
+            if view["kind"] == "standard":
+                o = orient[view["direction"]]
+                handle = drawing.CreateDrawViewFromModelView3(part_path, f"*{o['model_view'].capitalize()}", cx, cy, 0.0)
+                iview = binding.wrap(handle, self._mod.IView)
+                if iview is None:
+                    raise SolidWorksError(f"SolidWorks could not place the {view['id']} view.")
+                iview.UseSheetScale = False
+                iview.ScaleRatio = (float(num), float(den))
+                if o["angle_deg"]:
+                    iview.Angle = math.radians(o["angle_deg"])
+            elif view["kind"] == "section":
+                iview = self._section_view(doc, drawing, made[view["from"]], view, cx, cy)
+                o = made[view["from"]]["orientation"]
+            else:
+                iview = self._detail_view(doc, drawing, made[view["from"]], view, cx, cy)
+                o = made[view["from"]]["orientation"]
+            self._move_view(iview, cx, cy)
+            made[view["id"]] = {"name": iview.GetName2(), "view": iview, "orientation": o, "kind": view["kind"]}
+        props[2:4] = [float(num), float(den)]
+        sheet.SetProperties2(*props)
+        doc.EditRebuild3()
+        for view in plan:  # a rebuild can move views made from others: put them back
+            self._move_view(made[view["id"]]["view"], *(mm_to_m(c) for c in lay["centres_mm"][view["id"]]))
+        return made
+
+    def _move_view(self, iview, x_m: float, y_m: float) -> None:
+        """IView.Position takes a VARIANT array of doubles: a Python tuple is
+        dropped silently (verified), so the move is read back."""
+        iview.Position = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [x_m, y_m])
+        got = iview.Position
+        if math.dist(got[:2], (x_m, y_m)) > 1e-5:
+            raise SolidWorksError(f"Could not move {iview.GetName2()} to ({m_to_mm(x_m):.1f}, {m_to_mm(y_m):.1f}) mm.")
+
+    def _sheet_point(self, made_view, point_mm) -> tuple:
+        """A model point on the sheet (mm) in this view: the view's own origin
+        and scale, with the rotation from its orientation (see the notes above)."""
+        iview = made_view["view"]
+        data = binding.wrap(iview.ModelToViewTransform, self._mod.IMathTransform).ArrayData
+        tx, ty, scale = m_to_mm(data[9]), m_to_mm(data[10]), data[12]
+        o = made_view["orientation"]
+        return (tx + scale * drawing_spec._dot(point_mm, o["right"]),
+                ty + scale * drawing_spec._dot(point_mm, o["up"]))
+
+    def _outline_mm(self, made_view) -> list:
+        return [m_to_mm(c) for c in made_view["view"].GetOutline()]
+
+    def _section_view(self, doc, drawing, parent, view, cx, cy):
+        """A section through view['through_mm'], cut by a line across the parent."""
+        px, py = self._sheet_point(parent, view["through_mm"])
+        ox0, oy0, ox1, oy1 = self._outline_mm(parent)
+        if view["cut"] == "vertical":
+            ends = (px, oy0 - 3, px, oy1 + 3)
+        else:
+            ends = (ox0 - 3, py, ox1 + 3, py)
+        if not drawing.ActivateView(parent["name"]):
+            raise SolidWorksError(f"Could not activate {parent['name']} to cut a section.")
+        sketch = binding.wrap(doc.SketchManager, self._mod.ISketchManager)
+        line = sketch.CreateLine(*(mm_to_m(c) for c in ends[:2]), 0.0, *(mm_to_m(c) for c in ends[2:]), 0.0)
+        if line is None:
+            raise SolidWorksError(f"Could not draw the cutting line for {view['id']}.")
+        doc.ClearSelection2(True)
+        binding.wrap(line, self._mod.ISketchSegment).Select4(False, None)
+        options = SW_SECTION_CHANGE_DIRECTION if view["flip"] else 0
+        iview = binding.wrap(drawing.CreateSectionViewAt5(cx, cy, 0.0, view["label"], options, None, 0.0),
+                             self._mod.IView)
+        if iview is None:
+            raise SolidWorksError(f"SolidWorks could not make section {view['label']}-{view['label']}.")
+        return iview
+
+    def _detail_view(self, doc, drawing, parent, view, cx, cy):
+        """A detail view of the circle around view['center_mm'] on the parent."""
+        px, py = self._sheet_point(parent, view["center_mm"])
+        scale = binding.wrap(parent["view"].ModelToViewTransform, self._mod.IMathTransform).ArrayData[12]
+        radius = view["radius_mm"] * scale
+        if not drawing.ActivateView(parent["name"]):
+            raise SolidWorksError(f"Could not activate {parent['name']} to draw the detail circle.")
+        sketch = binding.wrap(doc.SketchManager, self._mod.ISketchManager)
+        circle = sketch.CreateCircle(mm_to_m(px), mm_to_m(py), 0.0, mm_to_m(px + radius), mm_to_m(py), 0.0)
+        if circle is None:
+            raise SolidWorksError(f"Could not draw the detail circle for {view['id']}.")
+        doc.ClearSelection2(True)
+        binding.wrap(circle, self._mod.ISketchSegment).Select4(False, None)
+        num, den = view["scale"]
+        iview = binding.wrap(drawing.CreateDetailViewAt4(cx, cy, 0.0, SW_DETAIL_STANDARD, float(num), float(den),
+                                                         view["label"], SW_DETAIL_CIRCLE, True, False, False, 5),
+                             self._mod.IView)
+        if iview is None:
+            raise SolidWorksError(f"SolidWorks could not make detail {view['label']}.")
+        return iview
+
+    # --- spec items -------------------------------------------------------------
+
+    def _place_spec(self, doc, drawing, checked, places, made, notes) -> dict:
+        """Place every placed spec item; general notes stack in the notes block."""
+        items = {i["id"]: i for i in checked["items"]}
+        order = {"dimension": 0, "thread": 1, "hole": 1, "datum": 2, "gdt": 2, "finish": 3, "note": 4}
+        annotations, text_at, out = {}, {}, {"placed": []}
+        part_edges = list(self._solid_body().GetEdges() or ())
+        for sid in sorted(places, key=lambda s: order[items[s]["kind"]]):
+            item, place = items[sid], places[sid]
+            target = made.get(place["view"])
+            doc.ClearSelection2(True)
+            if item["kind"] == "dimension":
+                annotations[sid], text_at[sid] = self._place_dimension(doc, target, item, place, part_edges)
+            elif item["kind"] in ("datum", "gdt"):
+                hosts = {k: v for k, v in annotations.items() if items[k]["kind"] == "dimension"}
+                host_points = {k: p["point_mm"] for k, p in places.items() if "point_mm" in p}
+                annotations[sid] = self._place_frame(doc, drawing, target, item, place, hosts, text_at, host_points,
+                                                     part_edges)
+            elif item["kind"] == "finish":
+                annotations[sid] = self._place_finish(doc, target, item, place, part_edges)
+            else:
+                text = (drawing_spec.thread_text(item) if item["kind"] == "thread" else
+                        item["callout"] if item["kind"] == "hole" else item["text"])
+                annotations[sid] = self._place_note(doc, target, text, place, part_edges)
+            annotation = binding.wrap(annotations[sid].GetAnnotation(), self._mod.IAnnotation)
+            if not annotation.SetName(drawing_spec.annotation_name(sid)):
+                raise SolidWorksError(f"Could not name the annotation for {sid}.")
+            out["placed"].append(sid)
+        x, y = SHEET_NOTES_AT_MM
+        for item in reversed(notes):  # the first note on top
+            doc.ClearSelection2(True)
+            drawing.ActivateSheet(binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).GetName())
+            note = binding.wrap(doc.InsertNote(drawing_spec.to_sw_text(item["text"])), self._mod.INote)
+            if note is None:
+                raise SolidWorksError(f"SolidWorks could not place note {item['id']}.")
+            lines = len(item["text"].splitlines())
+            y += 5.0 * lines
+            annotation = binding.wrap(note.GetAnnotation(), self._mod.IAnnotation)
+            annotation.SetPosition2(mm_to_m(x), mm_to_m(y), 0.0)
+            annotation.SetName(drawing_spec.annotation_name(item["id"]))
+            out["placed"].append(item["id"])
+        return out
+
+    def _edge_at(self, part_edges, point_mm, label: str):
+        """The part edge through a model point (within 0.01 mm)."""
+        best, best_d = None, None
+        for edge in part_edges:
+            e = binding.wrap(edge, self._mod.IEdge)
+            near = e.GetClosestPointOn(*(mm_to_m(c) for c in point_mm))
+            if not near:
+                continue
+            d = math.dist(point_mm, [m_to_mm(c) for c in near[:3]])
+            if best_d is None or d < best_d:
+                best, best_d = e, d
+        if best is None or best_d > self._EDGE_ON_TOLERANCE_MM:
+            raise SolidWorksError(f"{label}: no edge of the part passes through "
+                                  f"({', '.join(f'{c:g}' for c in point_mm)}) mm"
+                                  + (f"; the nearest is {best_d:.3f} mm away" if best_d is not None else "")
+                                  + ". Give a point on an edge (list_edges).")
+        return best
+
+    def _select_in(self, target, edge, append: bool, label: str) -> None:
+        if not target["view"].SelectEntity(edge, append):
+            raise SolidWorksError(f"{label}: SolidWorks could not select that edge in view {target['name']}.")
+
+    def _circle_of(self, edge):
+        """(centre mm, axis, radius mm) of a circular edge, or None."""
+        curve = binding.wrap(edge.GetCurve(), self._mod.ICurve)
+        if not curve.IsCircle():
+            return None
+        p = curve.CircleParams
+        return [m_to_mm(c) for c in p[0:3]], tuple(p[3:6]), m_to_mm(p[6])
+
+    def _place_dimension(self, doc, target, item, place, part_edges):
+        sid, measure = item["id"], place["measure"]
+        edges = [self._edge_at(part_edges, p, f"{sid} point {n + 1}") for n, p in enumerate(place["points_mm"])]
+        sheet_pts = [self._sheet_point(target, p) for p in place["points_mm"]]
+        ox0, oy0, ox1, oy1 = self._outline_mm(target)
+        mx = sum(p[0] for p in sheet_pts) / len(sheet_pts)
+        my = sum(p[1] for p in sheet_pts) / len(sheet_pts)
+        off, side = place["offset_mm"], place.get("side")
+        upper = side == "above" if side in ("above", "below") else my >= (oy0 + oy1) / 2
+        right = side == "right" if side in ("left", "right") else mx >= (ox0 + ox1) / 2
+        above = oy1 + off if upper else oy0 - off  # the text's height for a dimension across the view
+        beside = ox1 + off if right else ox0 - off
+        for n, edge in enumerate(edges):
+            self._select_in(target, edge, n > 0, sid)
+        spot = (mx, above)
+        if measure in ("diameter", "radius"):
+            circle = self._circle_of(edges[0])
+            if circle is None:
+                raise SolidWorksError(f"{sid}: a {measure} needs a point on a circular edge.")
+            centre, axis, _ = circle
+            towards = target["orientation"]["towards_viewer"]
+            along = abs(drawing_spec._dot(axis, towards))
+            if along > 0.999:  # the circle faces the viewer
+                add = doc.AddDiameterDimension2 if measure == "diameter" else doc.AddRadialDimension2
+                cx, cy = self._sheet_point(target, centre)
+                spot = (cx + off, cy + off)
+                handle = add(mm_to_m(cx + off), mm_to_m(cy + off), 0.0)
+            elif along < 0.001 and measure == "diameter":  # seen edge-on, as a line
+                if abs(drawing_spec._dot(axis, target["orientation"]["right"])) > 0.999:
+                    handle = doc.AddVerticalDimension2(mm_to_m(mx), mm_to_m(above), 0.0)
+                else:
+                    spot = (beside, my)
+                    handle = doc.AddHorizontalDimension2(mm_to_m(beside), mm_to_m(my), 0.0)
+            else:
+                raise SolidWorksError(f"{sid}: the circle is seen at a slant in {target['name']}; dimension its "
+                                      "diameter in a view that shows it face-on or edge-on.")
+        elif measure == "horizontal":
+            handle = doc.AddHorizontalDimension2(mm_to_m(mx), mm_to_m(above), 0.0)
+        elif measure == "vertical":
+            spot = (beside, my)
+            handle = doc.AddVerticalDimension2(mm_to_m(beside), mm_to_m(my), 0.0)
+        else:  # distance or angle: SolidWorks chooses from the selection
+            handle = doc.AddDimension2(mm_to_m(mx), mm_to_m(above), 0.0)
+        dd = binding.wrap(handle, self._mod.IDisplayDimension)
+        if dd is None:
+            raise SolidWorksError(f"SolidWorks could not add dimension {sid} ({measure}) in {target['name']}.")
+        self._format_dimension(dd, item)
+        return dd, tuple(mm_to_m(c) for c in spot)
+
+    def _format_dimension(self, dd, item) -> None:
+        """Show a placed dimension as the spec says: inches or degrees, places or
+        a fraction, and its tolerance. Limits are set from the measured value so
+        they show exactly the spec's two numbers."""
+        sid, show = item["id"], drawing_spec.display_settings(item)
+        dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)
+        if not show["angle"]:
+            base = SW_FRACTION if show["fraction"] else SW_DECIMAL
+            dd.SetUnits2(False, SW_INCHES, base, drawing_spec.FRACTION_DENOMINATOR, True, SW_ROUND_HALF_AWAY)
+        places = show["decimals"]
+        tol_places = show.get("tol_decimals", places)
+        dd.SetPrecision3(places, places, tol_places, tol_places)
+        tolerance = binding.wrap(dim.Tolerance, self._mod.IDimensionTolerance)
+        tolerance.Type = SW_TOLERANCES[show["tolerance"]]
+        if show["tolerance"] == "limits":
+            value_in = mm_to_in(m_to_mm(dim.SystemValue))
+            low, high = show["lower_in"] - value_in, show["upper_in"] - value_in
+            if not tolerance.SetValues(mm_to_m(in_to_mm(low)), mm_to_m(in_to_mm(high))):
+                raise SolidWorksError(f"Could not set the limits of {sid}.")
+        elif show["tolerance"] in ("bilateral", "symmetric"):
+            unit = math.radians if show["angle"] else (lambda v: mm_to_m(in_to_mm(v)))
+            if not tolerance.SetValues(-unit(show["minus_in"]), unit(show["plus_in"])):
+                raise SolidWorksError(f"Could not set the tolerance of {sid}.")
+
+    def _annotation_spot(self, target, point_mm, offset_mm=12.0) -> tuple:
+        """Where a leader note goes: off the view outline, on the point's side."""
+        x, y = self._sheet_point(target, point_mm)
+        ox0, oy0, ox1, oy1 = self._outline_mm(target)
+        ny = oy1 + offset_mm if y >= (oy0 + oy1) / 2 else oy0 - offset_mm
+        return mm_to_m(x + offset_mm / 2), mm_to_m(ny)
+
+    def _place_frame(self, doc, drawing, target, item, place, hosts, text_at, host_points, part_edges):
+        """A datum feature symbol or a feature control frame, on a placed
+        dimension's annotation (a feature of size) or on an edge."""
+        sid = item["id"]
+        if "on" in place and place["on"] in hosts:  # a feature of size: on its dimension
+            dim = binding.wrap(hosts[place["on"]].GetDimension2(0), self._mod.IDimension)
+            ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+            drawing.ActivateView(target["name"])  # else the symbol lands on the sheet, not in the view
+            # IAnnotation.Select3 refuses a dimension; selecting it by name works (verified).
+            # The pick point is where the symbol attaches: at the dimension's text.
+            x, y = list(binding.wrap(hosts[place["on"]].GetAnnotation(), self._mod.IAnnotation).GetPosition())[:2]
+            if not ext.SelectByID2(dim.FullName, "DIMENSION", x, y, 0.0, False, 0, None, 0):
+                raise SolidWorksError(f"{sid}: could not select dimension {place['on']} to attach to.")
+            spot = None
+        elif "on" in place:  # a thread or hole callout: on the edge its leader points at
+            point = host_points[place["on"]]
+            self._select_in(target, self._edge_at(part_edges, point, sid), False, sid)
+            spot = self._annotation_spot(target, point, 24.0)
+        else:
+            self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid), False, sid)
+            spot = self._annotation_spot(target, place["point_mm"])
+        if item["kind"] == "datum":
+            made = binding.wrap(doc.InsertDatumTag2(), self._mod.IDatumTag)
+            if made is None:
+                raise SolidWorksError(f"SolidWorks could not place datum {item['label']} ({sid}).")
+            if made.GetLabel() != item["label"] and not made.SetLabel(item["label"]):
+                raise SolidWorksError(f"SolidWorks placed datum {made.GetLabel()!r} and would not relabel it "
+                                      f"{item['label']} ({sid}).")
+        else:
+            made = binding.wrap(doc.InsertGtol(), self._mod.IGtol)
+            if made is None:
+                raise SolidWorksError(f"SolidWorks could not place the feature control frame {sid}.")
+            tol = item["tolerance"].strip()
+            diameter = tol[:1] in ("Ø", "⌀")
+            tol = tol.lstrip("Ø⌀").strip()
+            datums = list(item["datums"]) + [""] * (3 - len(item["datums"]))
+            # SetFrameSymbols2 takes the symbols as TEXT on 2020 and stores a number
+            # as a literal ('24'); SetFrameSymbols with the enum gives <GTOL-CONC> (verified)
+            made.SetFrameSymbols(1, SW_GCS[item["characteristic"]], diameter, SW_GTOL_MATERIAL[item["modifier"]],
+                                 False, 0, 0, 0, 0)
+            if not made.SetFrameValues2(1, tol, "", *datums):
+                raise SolidWorksError(f"SolidWorks did not take the values of frame {sid}.")
+        if spot is not None:
+            binding.wrap(made.GetAnnotation(), self._mod.IAnnotation).SetPosition2(*spot, 0.0)
+        return made
+
+    def _place_finish(self, doc, target, item, place, part_edges):
+        sid = item["id"]
+        self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid), False, sid)
+        x, y = self._annotation_spot(target, place["point_mm"])
+        ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+        made = binding.wrap(ext.InsertSurfaceFinishSymbol3(SW_SF_SYMBOLS[item["symbol"]], SW_LEADER_STRAIGHT, x, y,
+                                                           0.0, 0, SW_ARROW_CLOSED, "", "", "", "", item["value"],
+                                                           "", ""), self._mod.ISFSymbol)
+        if made is None:
+            raise SolidWorksError(f"SolidWorks could not place the finish symbol {sid}.")
+        return made
+
+    def _place_note(self, doc, target, text, place, part_edges):
+        """A note with a leader to an edge: thread and hole callouts, local notes."""
+        sid = place.get("view")
+        self._select_in(target, self._edge_at(part_edges, place["point_mm"], text[:20]), False, str(sid))
+        note = binding.wrap(doc.InsertNote(drawing_spec.to_sw_text(text)), self._mod.INote)
+        if note is None:
+            raise SolidWorksError(f"SolidWorks could not place the note '{text}'.")
+        binding.wrap(note.GetAnnotation(), self._mod.IAnnotation).SetPosition2(
+            *self._annotation_spot(target, place["point_mm"]), 0.0)
+        return note
+
+    # --- the check --------------------------------------------------------------
+
+    def check_drawing(self, path: str, spec: dict) -> dict:
+        """Read a saved .slddrw back from SolidWorks and compare it with the spec:
+        one line per spec item (ok / missing / differs / unreadable) and what is
+        on the drawing but not in the spec. Leaves the current part current."""
+        abs_path = os.path.abspath(path)
+        if not abs_path.lower().endswith(".slddrw") or not os.path.isfile(abs_path):
+            raise SolidWorksError(f"check_drawing reads a saved .slddrw (got '{path}').")
+        drawing_spec.validate(spec)
+        sw = self._ensure()
+        title = os.path.basename(abs_path)
+        already = any(os.path.normcase(d.GetPathName()) == os.path.normcase(abs_path) for d in self._open_documents())
+        result = sw.OpenDoc6(abs_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
+        doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not open the drawing {abs_path}.")
+        try:
+            read = self._read_drawing(doc)
+        finally:
+            if not already:
+                sw.CloseDoc(doc.GetTitle() or title)
+        return {**drawing_spec.compare(spec, read), "path": abs_path}
+
+    def _read_drawing(self, doc) -> dict:
+        """Every dimension, note, datum, frame and finish symbol on the drawing,
+        as SolidWorks has them (drawing_spec.compare's input)."""
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+        doc_places = ext.GetUserPreferenceInteger(SW_PREF_UNITS_LINEAR_DECIMALS, 0)
+        read = {"dimensions": [], "notes": [], "datums": [], "gtols": [], "finishes": []}
+        view = binding.wrap(drawing.GetFirstView(), self._mod.IView)  # the sheet first, then its views
+        while view is not None:
+            vname = view.GetName2()
+            for handle in view.GetAnnotations() or ():
+                annotation = binding.wrap(handle, self._mod.IAnnotation)
+                kind = SW_ANNOTATION_TYPES.get(annotation.GetType())
+                if kind is None or annotation.OwnerType == SW_ANNOTATION_OWNER_TEMPLATE:
+                    continue  # the title block's own notes belong to the sheet format
+                entry = {"name": annotation.GetName(), "view": vname}
+                specific = annotation.GetSpecificAnnotation()
+                if kind == "dimension":
+                    read["dimensions"].append({**entry, **self._read_dimension(
+                        binding.wrap(specific, self._mod.IDisplayDimension), doc_places)})
+                elif kind == "note":
+                    read["notes"].append({**entry, "text": binding.wrap(specific, self._mod.INote).GetText()})
+                elif kind == "datum":
+                    read["datums"].append({**entry, "label": binding.wrap(specific, self._mod.IDatumTag).GetLabel()})
+                elif kind == "gtol":
+                    read["gtols"].append({**entry, **self._read_gtol(binding.wrap(specific, self._mod.IGtol))})
+                else:
+                    symbol = binding.wrap(specific, self._mod.ISFSymbol)
+                    names = {v: k for k, v in SW_SF_SYMBOLS.items()}
+                    read["finishes"].append({**entry, "symbol": names.get(symbol.GetSymbol(), symbol.GetSymbol()),
+                                             "value": symbol.GetText(SW_SF_MAX_ROUGHNESS)})
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        return read
+
+    def _read_dimension(self, dd, doc_places: int) -> dict:
+        dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)
+        angle = dd.Type2 == SW_ANGULAR_DIMENSION_TYPE
+        value = math.degrees(dim.SystemValue) if angle else mm_to_in(m_to_mm(dim.SystemValue))
+        places = dd.GetPrimaryPrecision2()
+        tol_places = dd.GetPrimaryTolPrecision2()
+        out = {"value": value, "angle": angle, "decimals": doc_places if places < 0 else places,
+               "fraction": (not dd.GetUseDocUnits()) and dd.GetFractionBase() == SW_FRACTION,
+               "denominator": dd.GetFractionValue(), "prefix": drawing_spec.from_sw_text(dd.GetText(SW_DIMENSION_TEXT_PREFIX) or "")}
+        tolerance = binding.wrap(dim.Tolerance, self._mod.IDimensionTolerance)
+        kind = SW_TOLERANCE_NAMES.get(tolerance.Type, f"type {tolerance.Type}")
+        out["tolerance"] = kind
+        if kind != "none":
+            convert = math.degrees if angle else (lambda v: mm_to_in(m_to_mm(v)))
+            out.update(tol_min=convert(tolerance.GetMinValue()), tol_max=convert(tolerance.GetMaxValue()),
+                       tol_decimals=out["decimals"] if tol_places < 0 else tol_places)
+        out["shown"] = out["prefix"] + drawing_spec.shown_text(out)
+        return out
+
+    def _read_gtol(self, gtol) -> dict:
+        """One frame read back: its symbols come as note tokens ('<GTOL-CONC>'),
+        the diameter signs separately (GetFrameDiameterSymbols)."""
+        values = list(gtol.GetFrameValues(1) or ("", "", "", "", ""))
+        symbols = list(gtol.GetFrameSymbols2(1) or ("", ""))
+        diameter = bool((list(gtol.GetFrameDiameterSymbols(1) or (False,)) or [False])[0])
+        gcs, material = symbols[0], symbols[1] if len(symbols) > 1 else ""
+        tolerance = ("Ø" if diameter else "") + drawing_spec.from_sw_text(values[0] or "")
+        return {"characteristic": SW_GCS_TOKENS.get(gcs, gcs), "tolerance": tolerance,
+                "modifier": SW_GTOL_MATERIAL_TOKENS.get(material, material or None),
+                "datums": [d for d in values[2:5] if d]}
 
     # --- assemblies -----------------------------------------------------------
     #

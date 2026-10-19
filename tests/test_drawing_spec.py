@@ -213,9 +213,10 @@ def test_default_views_are_front_top_right():
 
 
 @pytest.mark.parametrize("views, message", [
-    ([{"kind": "standard", "direction": "top"}], "first view is the front"),
+    ([{"kind": "standard", "direction": "top"}], "first view is the drawing's front"),
     ([{"kind": "isometric"}], "No isometric"),
-    ([{"kind": "standard", "direction": "front"}, {"kind": "standard", "direction": "back"}], "projected"),
+    ([{"kind": "standard", "direction": "front"}, {"kind": "standard", "direction": "back"}], "top, bottom, left or right"),
+    ([{"kind": "standard", "model_view": "front", "up": "+z"}], "line of sight"),
     ([{"kind": "standard", "direction": "front"},
       {"kind": "section", "from": "top", "cut": "vertical", "label": "A", "through_mm": [0, 0, 0]}], "earlier view"),
     ([{"kind": "standard", "direction": "front"},
@@ -295,3 +296,35 @@ def test_compare_reports_ok_missing_differs_unreadable_and_extras():
                       "N1": "ok", "D7": "unreadable"}
     assert out["clean"] is False
     assert out["not_in_spec"] == [{"group": "dimensions", "name": "RD9", "view": "Drawing View1", "shown": "1.000"}]
+
+
+# --- orientation and layout --------------------------------------------------------------
+
+def test_the_natural_front_projects_to_the_standard_views():
+    o = ds.view_orientations()
+    assert {k: (v["model_view"], v["angle_deg"]) for k, v in o.items()} == {
+        "front": ("front", 0.0), "top": ("top", 0.0), "bottom": ("bottom", 0.0),
+        "right": ("right", 0.0), "left": ("left", 0.0)}
+
+
+def test_a_shaft_along_y_drawn_lying_down():
+    """DTN6 is turned about the model's Y axis; on the drawing it lies along the sheet."""
+    o = ds.view_orientations("front", "-x")  # model -X up: model +Y points to the sheet's right
+    assert o["front"]["right"] == (0, 1, 0)
+    assert (o["front"]["model_view"], o["front"]["angle_deg"]) == ("front", -90.0)  # turned clockwise
+    # the right view looks at the end of the shaft, from +Y
+    assert o["right"]["towards_viewer"] == (0, 1, 0) and o["right"]["model_view"] == "top"
+
+
+def test_extent_and_layout_pick_the_largest_scale_that_fits():
+    views = ds.validate_views([{"kind": "standard", "model_view": "front", "up": "-x"},
+                               {"kind": "standard", "direction": "right"}])
+    o = ds.view_orientations("front", "-x")
+    size = [20.0, 150.8, 20.0]  # a shaft along Y
+    assert ds.view_extent(size, o["front"]) == (150.8, 20.0)
+    out = ds.layout(views, o, size, [12.7, 63.5, 266.7, 203.2])
+    assert out["scale"] == (1, 1)
+    (fx, fy), (rx, ry) = out["centres_mm"]["front"], out["centres_mm"]["right"]
+    assert fy == ry and rx > fx  # third angle: the right view to the right, on the same row
+    big = ds.layout(views, o, [200, 800, 200], [12.7, 63.5, 266.7, 203.2])
+    assert big["scale"] == (1, 5)  # 200 + 50 at 1:4 plus gaps is wider than 254

@@ -441,6 +441,139 @@ DEFAULT_VIEWS = [{"kind": "standard", "direction": "front"}, {"kind": "standard"
                  {"kind": "standard", "direction": "right"}]
 
 
+# SolidWorks' standard model views: the direction the viewer looks FROM, and the
+# model axis that points up on the sheet.
+MODEL_VIEWS = {
+    "front": ((0, 0, 1), (0, 1, 0)), "back": ((0, 0, -1), (0, 1, 0)),
+    "top": ((0, 1, 0), (0, 0, -1)), "bottom": ((0, -1, 0), (0, 0, 1)),
+    "right": ((1, 0, 0), (0, 1, 0)), "left": ((-1, 0, 0), (0, 1, 0)),
+}
+AXES = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+z": (0, 0, 1), "-z": (0, 0, -1)}
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _neg(a):
+    return tuple(-x for x in a)
+
+
+def view_orientations(front: str = "front", up: str | None = None) -> dict:
+    """For the drawing's front view (a model view, optionally turned so model axis
+    `up` points up) and its third-angle projections: which model view each drawing
+    view shows, and by how many degrees it is turned anticlockwise on the sheet.
+    Also each view's sheet-right and sheet-up model axes. Pure."""
+    d_front, natural_up = MODEL_VIEWS[front]
+    u = AXES[up] if up else natural_up
+    if _dot(u, d_front):
+        raise SolidWorksError(f"up {up!r} points along the {front} view's line of sight; give an axis across it.")
+    r = _cross(u, d_front)
+    wanted = {"front": (d_front, u), "top": (u, _neg(d_front)), "bottom": (_neg(u), d_front),
+              "right": (r, u), "left": (_neg(r), u)}
+    out = {}
+    for name, (d, up_axis) in wanted.items():
+        model_view = next(m for m, (md, _) in MODEL_VIEWS.items() if md == d)
+        up0 = MODEL_VIEWS[model_view][1]
+        right0 = _cross(up0, d)
+        phi = math.degrees(math.atan2(_dot(up_axis, up0), _dot(up_axis, right0)))
+        angle = (90 - phi + 180) % 360 - 180
+        out[name] = {"model_view": model_view, "angle_deg": 0.0 if abs(angle) < 1e-9 else angle + 0.0,
+                     "right": _cross(up_axis, d), "up": up_axis, "towards_viewer": d}
+    return out
+
+
+def view_extent(size_mm, orientation) -> tuple:
+    """(width, height) in mm at 1:1 of a box of size_mm seen in that orientation."""
+    return (sum(abs(a) * s for a, s in zip(orientation["right"], size_mm)),
+            sum(abs(a) * s for a, s in zip(orientation["up"], size_mm)))
+
+
+SCALES = ((4, 1), (2, 1), (1, 1), (1, 2), (1, 4), (1, 5), (1, 10), (1, 20))
+VIEW_GAP_MM = 25.0  # paper between views, room for the dimensions on both
+EDGE_MM = 12.0  # paper between the views and the edge of the drawing area
+
+
+def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
+    """Sheet scale and view centres for checked `views` in `area_mm`
+    ([x0, y0, x1, y1] on the sheet, mm). Third-angle grid around the front view:
+    top above, bottom below, left and right beside; sections cut vertically go
+    in further columns on the front's row, horizontal cuts above/below their
+    parent's column; detail views in a last column. Largest scale that fits."""
+    cells = {}  # view id -> (col, row)
+    for view in views:
+        if view["kind"] == "standard":
+            cells[view["id"]] = {"front": (0, 0), "top": (0, -1), "bottom": (0, 1),
+                                 "left": (-1, 0), "right": (1, 0)}[view["direction"]]
+    extra_col = max([c for c, _ in cells.values()] + [0]) + 1
+    for view in views:
+        if view["kind"] == "section":
+            col, row = cells[view["from"]]
+            if view["cut"] == "vertical":
+                cells[view["id"]] = (extra_col, row)
+                extra_col += 1
+            else:
+                free = [r for r in (row + 1, row - 1) if (col, r) not in cells.values()]
+                if not free:
+                    raise SolidWorksError(f"No room above or below {view['from']!r} for {view['id']!r}; "
+                                          "cut vertically, or leave out the top/bottom view.")
+                cells[view["id"]] = (col, free[0])
+    details = [v for v in views if v["kind"] == "detail"]
+    for n, view in enumerate(details):
+        cells[view["id"]] = (extra_col, n - (len(details) - 1) // 2)
+
+    def extent(view, scale):
+        if view["kind"] == "detail":
+            side = 2 * view["radius_mm"] * view["scale"][0] / view["scale"][1]
+            return side, side
+        if view["kind"] == "section":
+            parent = next(v for v in views if v["id"] == view["from"])
+            key = parent.get("direction", "front")
+            side = "right" if view["cut"] == "vertical" else "top"
+            w, h = view_extent(size_mm, _turned(orientations, key, side))
+        else:
+            w, h = view_extent(size_mm, orientations[view["direction"]])
+        return w * scale, h * scale
+
+    x0, y0, x1, y1 = area_mm
+    for num, den in SCALES:
+        scale = num / den
+        cols, rows = {}, {}
+        for view in views:
+            w, h = extent(view, scale)
+            col, row = cells[view["id"]]
+            cols[col] = max(cols.get(col, 0), w)
+            rows[row] = max(rows.get(row, 0), h)
+        width = sum(cols.values()) + VIEW_GAP_MM * (len(cols) - 1) + 2 * EDGE_MM
+        height = sum(rows.values()) + VIEW_GAP_MM * (len(rows) - 1) + 2 * EDGE_MM
+        if width <= x1 - x0 and height <= y1 - y0:
+            break
+    else:
+        raise SolidWorksError("The views do not fit the sheet even at 1:20.")
+    left = x0 + (x1 - x0 - width) / 2 + EDGE_MM
+    col_x, x = {}, left
+    for col in sorted(cols):
+        col_x[col] = x + cols[col] / 2
+        x += cols[col] + VIEW_GAP_MM
+    top = y1 - (y1 - y0 - height) / 2 - EDGE_MM
+    row_y, y = {}, top
+    for row in sorted(rows):  # row -1 (top view) is highest on the sheet
+        row_y[row] = y - rows[row] / 2
+        y -= rows[row] + VIEW_GAP_MM
+    return {"scale": (num, den), "centres_mm": {v["id"]: (round(col_x[cells[v["id"]][0]], 3),
+                                                          round(row_y[cells[v["id"]][1]], 3)) for v in views}}
+
+
+def _turned(orientations, parent: str, side: str) -> dict:
+    """The orientation of a view projected from `parent` towards `side`; for
+    the front it is that standard view, otherwise approximated by the front's."""
+    return orientations[side] if parent == "front" else orientations.get(parent, orientations["front"])
+
+
 def _point(value, label) -> list:
     try:
         point = [float(c) for c in value]
@@ -469,16 +602,27 @@ def validate_views(views) -> list:
         if not isinstance(view, dict):
             raise SolidWorksError(f"{where} is not an object.")
         kind = view.get("kind")
-        if kind == "standard":
+        if kind == "standard" and n == 0:
+            allowed = {"kind", "direction", "model_view", "up", "id"}
+            if view.get("direction", "front") != "front":
+                raise SolidWorksError("The first view is the drawing's front view (direction \"front\"), the most "
+                                      "descriptive one. Choose what it shows with model_view and up.")
+            model_view = view.get("model_view", "front")
+            if model_view not in MODEL_VIEWS:
+                raise SolidWorksError(f"{where}: model_view is one of {', '.join(MODEL_VIEWS)}.")
+            up = view.get("up")
+            if up is not None and up not in AXES:
+                raise SolidWorksError(f"{where}: up is the model axis that points up on the sheet: {', '.join(AXES)}.")
+            view_orientations(model_view, up)  # refuses an up along the line of sight
+            standard.add("front")
+            entry = {"kind": kind, "direction": "front", "model_view": model_view, "up": up,
+                     "id": view.get("id") or "front"}
+        elif kind == "standard":
             allowed = {"kind", "direction", "id"}
             direction = view.get("direction")
-            if direction not in STANDARD_DIRECTIONS:
-                raise SolidWorksError(f"{where}: direction is one of {', '.join(STANDARD_DIRECTIONS)}.")
-            if n == 0 and direction != "front":
-                raise SolidWorksError("The first view is the front view (direction \"front\"): the most "
-                                      "descriptive one. Orient the part so its best view is the model's front.")
-            if n > 0 and direction not in THIRD_ANGLE_SIDE:
-                raise SolidWorksError(f"{where}: projected views are top, bottom, left or right of the front view.")
+            if direction not in THIRD_ANGLE_SIDE:
+                raise SolidWorksError(f"{where}: a projected view's direction is top, bottom, left or right "
+                                      "(where it sits from the front view, third angle).")
             if direction in standard:
                 raise SolidWorksError(f"{where}: there is already a {direction} view.")
             standard.add(direction)
@@ -546,7 +690,9 @@ def validate_placements(placements, checked_spec: dict, view_ids) -> dict:
             raise SolidWorksError(f"{where}: view is one of the view ids {', '.join(sorted(view_ids))}.")
         entry = {"view": view}
         if kind == "dimension":
-            allowed = {"view", "measure", "points_mm", "offset_mm"}
+            allowed = {"view", "measure", "points_mm", "offset_mm", "side"}
+            if place.get("side") not in (None, "above", "below", "left", "right"):
+                raise SolidWorksError(f"{where}: side is above, below, left or right of the view.")
             measure = place.get("measure")
             if measure not in MEASURES:
                 raise SolidWorksError(f"{where}: measure is one of {', '.join(MEASURES)}.")
@@ -561,7 +707,7 @@ def validate_placements(placements, checked_spec: dict, view_ids) -> dict:
             offset = place.get("offset_mm", 10.0)
             if not isinstance(offset, (int, float)) or isinstance(offset, bool):
                 raise SolidWorksError(f"{where}: offset_mm is the distance from the part to the dimension text on paper.")
-            entry.update(measure=measure, offset_mm=float(offset),
+            entry.update(measure=measure, offset_mm=float(offset), side=place.get("side"),
                          points_mm=[_point(p, f"{where}: points_mm[{i}]") for i, p in enumerate(points)])
         elif kind in ("datum", "gdt"):
             allowed = {"view", "on", "point_mm"}

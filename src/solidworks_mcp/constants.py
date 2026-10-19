@@ -250,11 +250,62 @@ SW_SAVE_AS_OPTIONS_SILENT = 1
 SW_VIEW_ISOMETRIC = 7
 VIEWS = {"front": 1, "back": 2, "left": 3, "right": 4, "top": 5, "bottom": 6, "iso": SW_VIEW_ISOMETRIC}
 
-# Drawings (make_drawing): an A4 sheet (swDwgPaperSizes_e) with the model's
-# dimensions (IDrawingDoc.InsertModelAnnotations3: swImportModelItemsSource_e,
-# swInsertAnnotation_e dimensions + those marked for drawings).
-SW_DWG_PAPER_A4 = 6
+# Drawings (make_drawing / check_drawing). Every value below was read from the
+# SOLIDWORKS 2020 swconst.tlb (typelib v28.0); several differ from web docs
+# for later releases (swTolFITWITHTOL is 8 here, not 9).
+# A shop drawing is an A-size landscape sheet (swDwgPaperSizes_e) with
+# SolidWorks' stock ANSI sheet format, set up through IDrawingDoc.SetupSheet5
+# with a custom format file (swDwgTemplates_e): the user's default drawing
+# template on 2020 carries no sheet format of its own (verified).
+SW_DWG_PAPER_A = 0
+SW_DWG_TEMPLATE_CUSTOM = 12
+SHEET_FORMAT_FILE = "a - landscape.slddrt"
+SHEET_SIZE_MM = (279.4, 215.9)
+# Free drawing area inside that format's border, above its title block and the
+# proprietary box (measured on the stock 2020 format), and where notes start.
+SHEET_VIEW_AREA_MM = (16.0, 64.0, 262.0, 199.0)
+SHEET_NOTES_AT_MM = (16.0, 64.0)
+SW_PREF_SHEET_FORMAT_FOLDERS = 7            # swUserPreferenceStringValue_e.swFileLocationsSheetFormat
+SW_PREF_UNIT_SYSTEM = 263                   # swUserPreferenceIntegerValue_e
+SW_PREF_UNITS_LINEAR = 47
+SW_PREF_UNITS_LINEAR_DECIMALS = 49
+SW_PREF_DIMENSION_STANDARD = 13
+SW_PREF_DOUBLE_PRIME_MARK = 410             # swUserPreferenceToggle_e: the " after inch fractions
+SW_UNIT_SYSTEM_IPS = 3                      # swUnitSystem_e
+SW_INCHES = 3                               # swLengthUnit_e
+SW_DETAILING_ANSI = 1                       # swDetailingStandard_e
+SW_DECIMAL, SW_FRACTION = 1, 2              # swFractionDisplay_e
+SW_ROUND_HALF_AWAY = 0                      # swUnitsDecimalRounding_e
+SW_TOLERANCES = {"none": 0, "bilateral": 2, "limits": 3, "symmetric": 4}   # swTolType_e
+SW_TOLERANCE_NAMES = {0: "none", 1: "basic", 2: "bilateral", 3: "limits", 4: "symmetric", 5: "min", 6: "max"}
+SW_DIMENSION_TEXT_PREFIX = 1                # swDimensionTextParts_e
+SW_ANGULAR_DIMENSION_TYPE = 3               # swDimensionType_e
+SW_ANNOTATION_TYPES = {2: "datum", 4: "dimension", 5: "gtol", 6: "note", 7: "finish"}   # swAnnotationType_e
+SW_ANNOTATION_OWNER_TEMPLATE = 2           # swAnnotationOwner_e: the sheet format (title block)
+SW_GCS = {  # swGtolGeomCharSymbol_e
+    "symmetry": 13, "straightness": 14, "flatness": 15, "circularity": 16, "cylindricity": 17,
+    "profile of a line": 18, "profile of a surface": 19, "angularity": 20, "perpendicularity": 21,
+    "parallelism": 22, "position": 23, "concentricity": 24, "circular runout": 25, "total runout": 26,
+}
+SW_GTOL_MATERIAL = {None: 0, "MMC": 1, "RFS": 2, "LMC": 3}      # swGtolMatCondition_e
+# What IGtol.GetFrameSymbols2 gives back on 2020 for those (read, not documented)
+SW_GCS_TOKENS = {
+    "<GTOL-SYMMETRY>": "symmetry", "<GTOL-STRAIGHT>": "straightness", "<GTOL-FLAT>": "flatness",
+    "<GTOL-CIRC>": "circularity", "<GTOL-CYL>": "cylindricity", "<GTOL-LPROF>": "profile of a line",
+    "<GTOL-SPROF>": "profile of a surface", "<GTOL-ANGULAR>": "angularity", "<GTOL-PERP>": "perpendicularity",
+    "<GTOL-PARA>": "parallelism", "<GTOL-POSI>": "position", "<GTOL-CONC>": "concentricity",
+    "<GTOL-SRUN>": "circular runout", "<GTOL-TRUN>": "total runout",
+}
+SW_GTOL_MATERIAL_TOKENS = {"<MOD-MMC>": "MMC", "<MOD-FMC>": "RFS", "<MOD-LMC>": "LMC"}
+SW_SF_SYMBOLS = {"basic": 0, "machined": 1, "no removal": 2}    # swSFSymType_e
+SW_SF_MAX_ROUGHNESS = 5                     # swSurfaceFinishSymbolText_e
+SW_LEADER_STRAIGHT = 1                      # swLeaderStyle_e
+SW_ARROW_CLOSED = 1                         # swArrowStyle_e
+SW_SECTION_CHANGE_DIRECTION = 4             # swCreateSectionViewAtOptions_e
+SW_DETAIL_STANDARD = 0                      # swDetViewStyle_e
+SW_DETAIL_CIRCLE = 1                        # swDetCircleShowType_e
 SW_IMPORT_ENTIRE_MODEL = 0
+# swInsertAnnotation_e: dimensions + those marked for drawings (no spec given)
 SW_INSERT_DIMENSIONS = 8 | 32768
 DRAWING_FORMATS = {"pdf", "slddrw"}
 
