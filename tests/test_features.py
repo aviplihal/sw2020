@@ -874,6 +874,23 @@ def test_screenshot_leaves_the_planes_out(part, tmp_path, monkeypatch):
     assert extension.GetUserPreferenceToggle(SW_TOGGLE_DISPLAY_PLANES, 0) is True, "the part's setting changed"
 
 
+def test_screenshot_saves_a_view_that_draws(part, tmp_path, monkeypatch):
+    """Tests and tool calls run with the view stilled (_quiet_ui). export, called
+    by screenshot, stilled it again just before SaveAs3, and SOLIDWORKS 2020 then
+    saved a blank white image of the right size, so `bytes > 0` did not see it."""
+    part.add_box(40, 20, 10)
+    at_save, write = [], part._write_via_saveas3
+
+    def watched(*args):
+        at_save.append(bool(shown_view(part).EnableGraphicsUpdate))
+        return write(*args)
+
+    monkeypatch.setattr(part, "_write_via_saveas3", watched)
+    part.screenshot(str(tmp_path / "drawn.png"))
+    assert at_save == [True], "the view could not draw when the picture was saved"
+    assert not shown_view(part).EnableGraphicsUpdate, "the view should be stilled again after the screenshot"
+
+
 # --- fully defined sketches: the returned dimensions drive the geometry --------
 # The part fixture already fails any test whose sketches are under-defined; these
 # prove the dimensions are the right ones: changing one gives the volume a hand
