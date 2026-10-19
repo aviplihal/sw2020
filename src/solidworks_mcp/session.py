@@ -5458,7 +5458,13 @@ class SolidWorksSession:
                     shown[toggle] = bool(extension.GetUserPreferenceToggle(toggle, 0))
                     extension.SetUserPreferenceToggle(toggle, 0, False)
                 model.GraphicsRedraw2()
-            return self._take_screenshot(model, path, ext, key, zoom_mm, rotation)
+            # export's _require_model would still the view again (_quiet) just
+            # before SaveAs3, and an undrawn view saves as a blank white image
+            depth, self._quiet_depth = self._quiet_depth, 0
+            try:
+                return self._take_screenshot(model, path, ext, key, zoom_mm, rotation)
+            finally:
+                self._quiet_depth = depth
         finally:
             for toggle, value in shown.items():
                 extension.SetUserPreferenceToggle(toggle, 0, value)
