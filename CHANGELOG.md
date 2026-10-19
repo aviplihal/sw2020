@@ -14,6 +14,26 @@ All notable changes to this project are documented here. This project follows
   knowledge-base case open the server names the file, otherwise a path is
   required as before.
 
+### Shop drawings
+- `make_drawing(path, spec, views, placements)` makes a shop drawing: the
+  default drawing template on an A-size sheet with SolidWorks' stock ANSI
+  title block (left empty), third-angle projection, inches, never an
+  isometric view. `views` chooses the front view (and how it is turned) and
+  the projected, section and detail views. With a drawing spec, each spec
+  dimension is placed between model edges or silhouettes at the spec's
+  places, fraction, limits or tolerance; datums, feature control frames,
+  thread and hole callouts, finish symbols and notes are placed too, each
+  named after its spec id inside the drawing. Without a spec it still makes
+  front, top and right views with the model's own dimensions.
+- `check_drawing(path, spec)` reads a saved drawing back and lists every spec
+  item as ok, missing, differs (both values) or unreadable, plus what is on
+  the drawing and not in the spec. A dimension also differs when the model
+  behind it is not the spec's value.
+- `drawing_spec`: validates the drawing-spec format and reads inch values
+  exactly as written (`.375`, `5 15/16`, `.500/.498`, `45°`).
+- A failed tool call no longer marks the part as changed when there was
+  nothing to undo.
+
 ## [0.16.0] — 2026-10-10
 
 ### Fixed

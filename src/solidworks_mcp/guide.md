@@ -248,10 +248,10 @@ stray drag in SolidWorks can change the part.
   bodies the tools act on the first. A file holding an assembly opens with
   `open_assembly` instead: its parts come in as components at their places,
   ready for `list_components` and `add_mate`.
-- **Drawings**: `make_drawing("part.pdf")` puts front, top and right views
-  (first angle) and an isometric view on A4 with the model's own dimensions,
-  each shown once, so a fully dimensioned part gives a complete sketch to
-  print or send; `.slddrw` keeps it editable. Save the part first.
+- **Drawings**: `make_drawing("part.slddrw")` without a spec puts front, top
+  and right views (third angle, inches, A-size sheet) with the model's own
+  dimensions: a quick dimensioned sketch. A shop drawing from an old drawing
+  is made with a spec and placements: see section 8. Save the part first.
 - **Open documents**: `list_documents` lists what SolidWorks has open;
   `activate_document(title)` makes one current again, also a new part that was
   never saved (after `open_part` and `close_part` on another).
@@ -370,3 +370,57 @@ a proven battery socket:
 - Tools failing in ways this guide does not explain? Ask the user to run
   `uvx solidworks-mcp --selftest` with SolidWorks open: it shows which tool
   areas work on their installation and ends with where to report it.
+
+## 8. Shop drawings from an old drawing
+
+The job (Docs/JOB-BRIEF.md): an old inch drawing comes in, you model the part
+and make a clean drawing that the shop machines from. **The views are yours to
+choose; the information must be the old drawing's, all of it.** A wrong or
+missing dimension is a scrapped part.
+
+### Model it the way the old drawing is dimensioned
+- Build from the spec's numbers, converted by code (`drawing_spec` /
+  `units.in_to_mm`), never in your head. 1 in = 25.4 mm exactly.
+- Use the old drawing's datums and reference edges: put the origin on the
+  datum the lengths run from (DTN6: the journal end), so the edges you
+  dimension between are where the drawing says.
+- Model a toleranced size at a value inside its limits (DTN6's Ø.500/.498
+  bearing at .499). Model fractions exactly (15/16 = 23.8125 mm).
+
+### Drafting habits (SHOP-DRAWINGS.md §4.4)
+- **Fewest views that fully describe the part.** A turned part: one view along
+  its axis plus an end view if it has flats or holes.
+- **The front view is the most descriptive one**, the part in its natural or
+  machined position: a shaft lies along the sheet. Choose it with
+  `model_view` and `up` (a part turned about model Y: `"up": "-x"`).
+- **Section views for internal features** instead of hidden lines; **detail
+  views** for features too small to dimension at sheet scale.
+- **Dimension each feature once, where it shows its true shape**, never to a
+  hidden line, and from the same datums as the old drawing.
+- Dimensions outside the outline, grouped, not crossing: give `side` and
+  stagger `offset_mm` (10, 18, 26, …) for dimensions on the same side.
+- **Never an isometric view** (the tool refuses one).
+
+### Placing the spec
+- Every read spec item needs a placement except general notes (they stack at
+  the lower left). Items flagged `unreadable` are refused: ask the user, update
+  the spec, then place them.
+- Points are model points in mm on an edge as that view shows it: `list_edges`
+  gives lines' ends and circles; for a circle, a point on it (centre + radius
+  along an axis across it). A point on the side of a cone or cylinder (its
+  silhouette in that view) works too.
+- A diameter on a turned part: `measure: "diameter"` with one point on a circle
+  seen edge-on. A length along it: `"horizontal"` between two such circles.
+- A datum on a feature of size (a diameter) goes `"on"` its dimension, the way
+  an old `-A-` under a size dimension meant; a frame on a thread or hole goes
+  `"on"` that callout.
+- Then call `check_drawing(path, spec)`. Fix every `missing` and `differs` and
+  make the drawing again. `differs` on a dimension can mean the drawing shows
+  the wrong text **or the model is wrong**: it compares the measured model
+  value with the spec too.
+
+### Renaming the files: Pack and Go
+A `.slddrw` points to its part by file name. Never rename `DN17.SLDPRT` in
+Explorer: the drawing loses it. Rename both with SolidWorks' **Pack and Go**
+(File → Pack and Go, with a new name or prefix), or rename the part, open the
+drawing, point it at the renamed part and save.

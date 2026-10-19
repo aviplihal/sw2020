@@ -248,7 +248,8 @@ The server speaks MCP over **stdio**.
 | `check_printability(up, overhang_deg, min_wall_mm)` | For a print direction: overhanging faces (area, worst lean, centre), bed contact, height; with `min_wall_mm` the walls thinner than that |
 | `export(path, file_format, quality, deviation_mm, angle_deg, per_component)` | STEP/STL/IGES/Parasolid/3MF (silent; verifies file). STL/3MF tessellation: `quality` `coarse`/`fine`, or explicit `deviation_mm`+`angle_deg`; an assembly's STL as one file or one per component |
 | `screenshot(path, view, zoom_mm, show_planes, from_dir)` | PNG/JPG/TIF from a standard view (`iso`, `front`, `top`, …) or any direction, zoomed to fit or onto a region; planes and axes left out unless asked for |
-| `make_drawing(path)` | 2D drawing as PDF or editable `.slddrw`: front, top, right (first angle) and isometric views on A4 with the model's own dimensions, each once |
+| `make_drawing(path, spec, views, placements)` | Shop drawing as editable `.slddrw` or PDF: A-size sheet with the stock ANSI title block, third angle, inches, no isometric. With a drawing spec: every dimension at its own precision, fraction, limits or tolerance, datums, GD&T frames, thread/hole callouts, finish symbols and notes, in the views you choose (including section and detail views). Without one: front, top and right with the model's own dimensions |
+| `check_drawing(path, spec)` | Read a saved drawing back and compare it with the spec: ok / missing / differs / unreadable per item, plus anything not in the spec |
 | `save_part(path)` / `open_part(path)` | Save to / open a native `.sldprt`; `open_part` also imports STEP, IGES and Parasolid files as a part to build on |
 | `close_part(save)` | Close the current part or assembly; without one, SolidWorks' active document if it is saved |
 | `list_documents` / `activate_document(title)` | The open documents (path, type, unsaved changes) / make one current again, also one never saved |

@@ -138,3 +138,58 @@ remove the workaround.
 ## Log
 
 _(Add dated entries here as the phases are worked through.)_
+
+### 2026-10-19 — Shop drawings on 2020 (branch `feat/shop-drawings`)
+
+Verified on SOLIDWORKS 2020 SP4 (28.4.0) through the file-queue bridge (never from the
+Claude app's own shell). Enum values were read from the 2020 `swconst.tlb` (typelib 28.0)
+with `sw_bridge\dump_swconst.py`. Phase 1 (probe, `--selftest`, full pytest) was **not** run
+by this branch: pytest against SolidWorks is not run from the Claude app on this machine.
+
+API findings (all used in `session.py`'s shop-drawing section):
+- The default drawing template (`templates\Drawing.DRWDOT`) has **no sheet format**: through
+  the API a new drawing gets a bare sheet. `IDrawingDoc.SetupSheet5(name, swDwgPaperAsize,
+  swDwgTemplateCustom, 1, 1, FirstAngle=False, "<...>\a - landscape.slddrt", w, h, "Default",
+  True)` attaches the stock format; **`ISheet.SheetFormatVisible = True`** is needed or the
+  title block does not show. The format folder is `swFileLocationsSheetFormat` (7).
+- `swTolFITWITHTOL` is 8 on 2020 (`swTolFIT` and `swTolMETRIC` are both 7).
+- **`IView.Position` and `IView.ScaleRatio` need a VARIANT array of doubles**; a Python tuple
+  is dropped without an error. For a detail view, `Position` is not the centre of its
+  outline (69, 152 mm for a view drawn round 275, 127): move views by their outline.
+- `IView.Angle` (radians) turns a view anticlockwise. `ModelToViewTransform`'s translation
+  (ArrayData[9:11]) and scale ([12]) are right, but `IMathPoint.MultiplyTransform` with it
+  ignored the rotation; rows of [0:9] map a model vector to the sheet as `p · R`.
+- With a view active, `SketchManager.CreateLine/CreateCircle` take the view's **sketch**
+  coordinates: model scale, from the view centre, turned with the view
+  (`ISketch.ModelToSketchTransform`: sketch = scale · (sheet · R) + t). Sheet coordinates
+  cut a turned view the wrong way.
+- A model `IEdge` is selected in a view with `IView.SelectEntity`, then dimensioned with
+  `AddHorizontalDimension2` / `AddVerticalDimension2` / `AddDimension2`. A circle seen edge-on
+  gives its diameter with the Ø prefix from Add{Vertical,Horizontal}Dimension2;
+  **`AddDiameterDimension2` on it gives twice the diameter**. Two edge-on circles dimension
+  centre to centre.
+- `IView.GetVisibleEntities2(None, swViewEntityType_SilhouetteEdge=4)` lists silhouettes, but
+  **`ISilhouetteEdge.GetStartPoint` throws**, `GetCurve` is an unbounded line or None, and the
+  list is incomplete (a cone gave only its −x side, twice). `Select2` works.
+- `IAnnotation.SetName("SPEC_D10")` names a drawing annotation, and the name survives save
+  and reopen. `IAnnotation.OwnerType == 2` marks the sheet format's own notes.
+- `IAnnotation.Select3` refuses a dimension; `SelectByID2(dimension.FullName, "DIMENSION",
+  x, y, ...)` selects it, and **the pick point is where a datum attaches** ((0, 0) put the
+  datum at the sheet's edge). Activate the view first or the datum lands on the sheet.
+- **`IGtol.SetFrameSymbols2` takes the symbols as text** on 2020 and stored the enum number
+  `24` as literal text (no symbol shown); `SetFrameSymbols` with `swGtolGeomCharSymbol_e`
+  works. `GetFrameSymbols2` reads back tokens: `<GTOL-CONC>`, `<GTOL-POSI>`, `<MOD-MMC>`,
+  `<MOD-FMC>` (for RFS), …; the diameter sign comes from `GetFrameDiameterSymbols`.
+- Fractions show an inch mark (`5 15/16"`) unless the document toggle
+  `swDoublePrimeMark` (410) is off.
+- `IDisplayDimension.SupplementaryAngle()` returns True and changes nothing; the angle shown
+  is the one whose sector holds the text, so the text is placed in the spec angle's sector.
+- `InsertSurfaceFinishSymbol3` returns the `ISFSymbol`; `InsertDatumTag2`, `InsertGtol`,
+  `InsertNote` attach to the selected entity. `CreateSectionViewAt5` and
+  `CreateDetailViewAt4` work with a selected sketch line / circle.
+- A section view stays aligned with its parent; only the free axis moves.
+- Saving a never-saved drawing with section and detail views as PDF ran for minutes (the
+  bridge timed out at 120 s); saved as `.slddrw` first, the PDF took 0.3 s.
+- A drawing has its part's title (`DTN6`), so `CloseDoc(title)` is ambiguous: close by path.
+- The guard's rollback rebuilt the part after any failed call (`ForceRebuild3`), which marked
+  it changed even when nothing was undone; it now rebuilds only when it removed something.
