@@ -574,6 +574,40 @@ def _turned(orientations, parent: str, side: str) -> dict:
     return orientations[side] if parent == "front" else orientations.get(parent, orientations["front"])
 
 
+def angle_text_spot(line1, line2, nominal_deg: float, distance_mm: float, away_from=None) -> tuple:
+    """Where an angle dimension's text goes so it shows `nominal_deg`: two
+    sheet lines ((x, y), (dx, dy)) make four angles, and SolidWorks shows the
+    one whose sector holds the text. The point is on that sector's bisector,
+    distance_mm from where the lines meet. Pure."""
+    (p1, d1), (p2, d2) = line1, line2
+    d1, d2 = _unit2(d1), _unit2(d2)
+    cross = d1[0] * d2[1] - d1[1] * d2[0]
+    if abs(cross) < 1e-9:
+        raise SolidWorksError("The two lines of an angle are parallel on the sheet.")
+    t = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / cross
+    meet = (p1[0] + t * d1[0], p1[1] + t * d1[1])
+    sectors = []
+    for a in (d1, (-d1[0], -d1[1])):
+        for b in (d2, (-d2[0], -d2[1])):
+            angle = math.degrees(math.acos(max(-1.0, min(1.0, a[0] * b[0] + a[1] * b[1]))))
+            bisector = _unit2((a[0] + b[0], a[1] + b[1]))
+            sectors.append((abs(angle - nominal_deg), angle, bisector))
+    fits = [s for s in sectors if s[0] <= 1e-3]
+    if not fits:
+        shown = sorted({round(s[1], 3) for s in sectors})
+        raise SolidWorksError(f"The lines meet at {' or '.join(f'{a:g}' for a in shown)} deg, not {nominal_deg:g}.")
+    spots = [(meet[0] + distance_mm * b[0], meet[1] + distance_mm * b[1]) for _, _, b in fits]
+    if away_from is None:
+        return spots[0]
+    # two opposite sectors show the same angle: the one pointing away from the part
+    return max(spots, key=lambda p: math.dist(p, away_from))
+
+
+def _unit2(v) -> tuple:
+    n = math.hypot(*v)
+    return v[0] / n, v[1] / n
+
+
 def _point(value, label) -> list:
     try:
         point = [float(c) for c in value]

@@ -4,6 +4,7 @@ comparison check_drawing makes."""
 
 import copy
 import json
+import math
 import os
 from fractions import Fraction
 
@@ -328,3 +329,18 @@ def test_extent_and_layout_pick_the_largest_scale_that_fits():
     assert fy == ry and rx > fx  # third angle: the right view to the right, on the same row
     big = ds.layout(views, o, [200, 800, 200], [12.7, 63.5, 266.7, 203.2])
     assert big["scale"] == (1, 5)  # 200 + 50 at 1:4 plus gaps is wider than 254
+
+
+def test_the_angle_text_goes_in_the_sector_of_the_spec_angle():
+    """A 45 deg bevel came out 135 when SolidWorks chose the side of the text."""
+    vertical = ((0.0, 0.0), (0.0, 1.0))
+    bevel = ((5.0, 5.0), (1.0, 1.0))  # a 45 deg line through the origin
+    x, y = ds.angle_text_spot(vertical, bevel, 45, 10)
+    assert math.isclose(math.degrees(math.atan2(y, x)), 67.5) and math.isclose(math.hypot(x, y), 10)
+    x, y = ds.angle_text_spot(vertical, bevel, 135, 10)
+    assert math.isclose(math.degrees(math.atan2(y, x)), 157.5)
+    with pytest.raises(SolidWorksError, match="not 30"):
+        ds.angle_text_spot(vertical, bevel, 30, 10)
+    # the opposite sector shows the same 45 deg: take the one away from the part
+    x, y = ds.angle_text_spot(vertical, bevel, 45, 10, away_from=(3, 6))
+    assert math.isclose(math.degrees(math.atan2(y, x)), -112.5)

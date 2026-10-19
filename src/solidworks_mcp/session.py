@@ -177,6 +177,7 @@ from .constants import (  # shop drawings
     SW_TOLERANCE_NAMES,
     SW_TOLERANCES,
     SW_UNIT_SYSTEM_IPS,
+    SW_VIEW_ENTITY_SILHOUETTE,
 )
 from .units import deg_to_rad, in_to_mm, m_to_mm, mm_to_in, mm_to_m
 
@@ -3995,8 +3996,11 @@ class SolidWorksSession:
         """Delete what the history gained since `before`, newest first; returns
         the names that could not be removed."""
         model = self._require_model()
+        added = [f for f in self._history() if f.Name not in before]
+        if not added:
+            return []  # nothing to undo: a rebuild would only mark the part changed (a failed drawing did)
         extension = binding.wrap(model.Extension, self._mod.IModelDocExtension)
-        for feat in reversed([f for f in self._history() if f.Name not in before]):
+        for feat in reversed(added):
             model.ClearSelection2(True)
             if feat.Select2(False, 0):
                 extension.DeleteSelection2(SW_DELETE_ABSORBED)
@@ -5614,6 +5618,7 @@ class SolidWorksSession:
         notes_height = sum(len(drawing_spec.to_sw_text(n["text"]).splitlines()) for n in notes) * 5.0
         lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0 + notes_height + (4 if notes else 0), x1, y1])
         doc, drawing = self._new_shop_drawing()
+        closed = False
         try:
             made = self._place_views(doc, drawing, part_path, plan, orient, lay, box)
             if checked is None:
@@ -5625,11 +5630,24 @@ class SolidWorksSession:
             doc.ClearSelection2(True)
             doc.EditRebuild3()
             abs_path = os.path.abspath(path)
-            self._write_via_saveas3(abs_path, doc)
+            if fmt == "pdf":
+                # a never-saved drawing with section/detail views took minutes to
+                # print to PDF on 2020; saved first, it took 0.3 s (verified)
+                with tempfile.TemporaryDirectory() as folder:
+                    # named like the PDF: the title block shows the file name
+                    stem = os.path.splitext(os.path.basename(abs_path))[0]
+                    self._write_via_saveas3(os.path.join(folder, f"{stem}.slddrw"), doc)
+                    self._write_via_saveas3(abs_path, doc)
+                    self._sw.CloseDoc(doc.GetPathName())  # lets go of the temporary file
+                    closed = True
+            else:
+                self._write_via_saveas3(abs_path, doc)
         finally:
             # saved, the drawing is named after the part ('holed_box - Sheet1'),
             # so the title it started with no longer closes it (verified)
-            self._sw.CloseDoc(doc.GetTitle())
+            if not closed:
+                # by path once saved: a drawing has its part's title, so the title is ambiguous
+                self._sw.CloseDoc(doc.GetPathName() or doc.GetTitle())
             self._sw.ActivateDoc3(part.GetTitle(), False, SW_DONT_REBUILD_ACTIVE_DOC, 0)
         result = {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path),
                   "views": {vid: info["name"] for vid, info in made.items()},
@@ -5689,7 +5707,9 @@ class SolidWorksSession:
                 if iview is None:
                     raise SolidWorksError(f"SolidWorks could not place the {view['id']} view.")
                 iview.UseSheetScale = False
-                iview.ScaleRatio = (float(num), float(den))
+                iview.ScaleRatio = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [float(num), float(den)])
+                if list(iview.ScaleRatio)[:2] != [num, den]:
+                    raise SolidWorksError(f"Could not set the {view['id']} view to {num}:{den}.")
                 if o["angle_deg"]:
                     iview.Angle = math.radians(o["angle_deg"])
             elif view["kind"] == "section":
@@ -5698,22 +5718,34 @@ class SolidWorksSession:
             else:
                 iview = self._detail_view(doc, drawing, made[view["from"]], view, cx, cy)
                 o = made[view["from"]]["orientation"]
-            self._move_view(iview, cx, cy)
+            free = {"vertical": "x", "horizontal": "y"}.get(view.get("cut"), "xy")
+            self._move_view(iview, cx, cy, free)
             made[view["id"]] = {"name": iview.GetName2(), "view": iview, "orientation": o, "kind": view["kind"]}
         props[2:4] = [float(num), float(den)]
         sheet.SetProperties2(*props)
         doc.EditRebuild3()
         for view in plan:  # a rebuild can move views made from others: put them back
-            self._move_view(made[view["id"]]["view"], *(mm_to_m(c) for c in lay["centres_mm"][view["id"]]))
+            self._move_view(made[view["id"]]["view"], *(mm_to_m(c) for c in lay["centres_mm"][view["id"]]),
+                            {"vertical": "x", "horizontal": "y"}.get(view.get("cut"), "xy"))
         return made
 
-    def _move_view(self, iview, x_m: float, y_m: float) -> None:
-        """IView.Position takes a VARIANT array of doubles: a Python tuple is
-        dropped silently (verified), so the move is read back."""
-        iview.Position = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [x_m, y_m])
-        got = iview.Position
-        if math.dist(got[:2], (x_m, y_m)) > 1e-5:
-            raise SolidWorksError(f"Could not move {iview.GetName2()} to ({m_to_mm(x_m):.1f}, {m_to_mm(y_m):.1f}) mm.")
+    def _move_view(self, iview, x_m: float, y_m: float, free: str = "xy") -> None:
+        """Put the centre of the view's outline at (x, y). IView.Position takes a
+        VARIANT array of doubles (a Python tuple is dropped silently), and it is
+        not the outline's centre for a detail view (verified: 69, 152 for a view
+        drawn round 275, 127), so the view is moved by the difference and the
+        outline read back. A section view stays aligned with its parent: only
+        its `free` axis moves."""
+        def centre():
+            x0, y0, x1, y1 = iview.GetOutline()
+            return (x0 + x1) / 2, (y0 + y1) / 2
+        pos, now = list(iview.Position)[:2], centre()
+        new = [p + (w - c if axis in free else 0.0) for p, w, c, axis in zip(pos, (x_m, y_m), now, "xy")]
+        iview.Position = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, new)
+        got = centre()
+        if any(abs(g - w) > 5e-4 for g, w, axis in zip(got, (x_m, y_m), "xy") if axis in free):
+            raise SolidWorksError(f"Could not move {iview.GetName2()} to ({m_to_mm(x_m):.1f}, {m_to_mm(y_m):.1f}) mm; "
+                                  f"it stays at ({m_to_mm(got[0]):.1f}, {m_to_mm(got[1]):.1f}).")
 
     def _sheet_point(self, made_view, point_mm) -> tuple:
         """A model point on the sheet (mm) in this view: the view's own origin
@@ -5725,6 +5757,18 @@ class SolidWorksSession:
         return (tx + scale * drawing_spec._dot(point_mm, o["right"]),
                 ty + scale * drawing_spec._dot(point_mm, o["up"]))
 
+    def _view_sketch_point(self, made_view, x_mm: float, y_mm: float) -> tuple:
+        """A sheet point (mm) in the view's own sketch (m), where SketchManager
+        draws while the view is active: at model scale, from the view's centre,
+        turned with the view. ISketch.ModelToSketchTransform maps sheet to sketch
+        as sketch = scale * (sheet . R) + t, with R's rows in ArrayData[0:9]
+        (verified: a vertical line on a view turned -90 deg cut across the part)."""
+        data = binding.wrap(binding.wrap(made_view["view"].GetSketch(), self._mod.ISketch).ModelToSketchTransform,
+                            self._mod.IMathTransform).ArrayData
+        x, y = mm_to_m(x_mm), mm_to_m(y_mm)
+        return (data[12] * (x * data[0] + y * data[3]) + data[9],
+                data[12] * (x * data[1] + y * data[4]) + data[10])
+
     def _outline_mm(self, made_view) -> list:
         return [m_to_mm(c) for c in made_view["view"].GetOutline()]
 
@@ -5733,13 +5777,14 @@ class SolidWorksSession:
         px, py = self._sheet_point(parent, view["through_mm"])
         ox0, oy0, ox1, oy1 = self._outline_mm(parent)
         if view["cut"] == "vertical":
-            ends = (px, oy0 - 3, px, oy1 + 3)
+            ends = ((px, oy0 - 3), (px, oy1 + 3))
         else:
-            ends = (ox0 - 3, py, ox1 + 3, py)
+            ends = ((ox0 - 3, py), (ox1 + 3, py))
         if not drawing.ActivateView(parent["name"]):
             raise SolidWorksError(f"Could not activate {parent['name']} to cut a section.")
+        (x1, y1), (x2, y2) = (self._view_sketch_point(parent, *e) for e in ends)
         sketch = binding.wrap(doc.SketchManager, self._mod.ISketchManager)
-        line = sketch.CreateLine(*(mm_to_m(c) for c in ends[:2]), 0.0, *(mm_to_m(c) for c in ends[2:]), 0.0)
+        line = sketch.CreateLine(x1, y1, 0.0, x2, y2, 0.0)
         if line is None:
             raise SolidWorksError(f"Could not draw the cutting line for {view['id']}.")
         doc.ClearSelection2(True)
@@ -5754,12 +5799,12 @@ class SolidWorksSession:
     def _detail_view(self, doc, drawing, parent, view, cx, cy):
         """A detail view of the circle around view['center_mm'] on the parent."""
         px, py = self._sheet_point(parent, view["center_mm"])
-        scale = binding.wrap(parent["view"].ModelToViewTransform, self._mod.IMathTransform).ArrayData[12]
-        radius = view["radius_mm"] * scale
         if not drawing.ActivateView(parent["name"]):
             raise SolidWorksError(f"Could not activate {parent['name']} to draw the detail circle.")
+        cx, cy = self._view_sketch_point(parent, px, py)
         sketch = binding.wrap(doc.SketchManager, self._mod.ISketchManager)
-        circle = sketch.CreateCircle(mm_to_m(px), mm_to_m(py), 0.0, mm_to_m(px + radius), mm_to_m(py), 0.0)
+        # the view's sketch is at model scale: the radius goes in as it is on the part
+        circle = sketch.CreateCircle(cx, cy, 0.0, cx + mm_to_m(view["radius_mm"]), cy, 0.0)
         if circle is None:
             raise SolidWorksError(f"Could not draw the detail circle for {view['id']}.")
         doc.ClearSelection2(True)
@@ -5796,7 +5841,7 @@ class SolidWorksSession:
             else:
                 text = (drawing_spec.thread_text(item) if item["kind"] == "thread" else
                         item["callout"] if item["kind"] == "hole" else item["text"])
-                annotations[sid] = self._place_note(doc, target, text, place, part_edges)
+                annotations[sid] = self._place_note(doc, target, sid, text, place, part_edges)
             annotation = binding.wrap(annotations[sid].GetAnnotation(), self._mod.IAnnotation)
             if not annotation.SetName(drawing_spec.annotation_name(sid)):
                 raise SolidWorksError(f"Could not name the annotation for {sid}.")
@@ -5816,8 +5861,10 @@ class SolidWorksSession:
             out["placed"].append(item["id"])
         return out
 
-    def _edge_at(self, part_edges, point_mm, label: str):
-        """The part edge through a model point (within 0.01 mm)."""
+    def _edge_at(self, part_edges, point_mm, label: str, target=None):
+        """The part edge through a model point (within 0.01 mm); with a target
+        view, else the view's silhouette line through it (the side of a cone or
+        cylinder, which is no model edge). Returns an IEdge or an ISilhouetteEdge."""
         best, best_d = None, None
         for edge in part_edges:
             e = binding.wrap(edge, self._mod.IEdge)
@@ -5827,14 +5874,71 @@ class SolidWorksSession:
             d = math.dist(point_mm, [m_to_mm(c) for c in near[:3]])
             if best_d is None or d < best_d:
                 best, best_d = e, d
+        if (best is None or best_d > self._EDGE_ON_TOLERANCE_MM) and target is not None:
+            line = self._silhouette_at(target, point_mm)
+            if line is not None:
+                return line
         if best is None or best_d > self._EDGE_ON_TOLERANCE_MM:
             raise SolidWorksError(f"{label}: no edge of the part passes through "
                                   f"({', '.join(f'{c:g}' for c in point_mm)}) mm"
                                   + (f"; the nearest is {best_d:.3f} mm away" if best_d is not None else "")
-                                  + ". Give a point on an edge (list_edges).")
+                                  + ", and no silhouette line in that view does. Give a point on an edge "
+                                  "(list_edges) or on the outline of a curved surface as the view shows it.")
         return best
 
+    def _silhouette_at(self, target, point_mm):
+        """The view's silhouette line through a model point, or None. On 2020
+        ISilhouetteEdge.GetStartPoint throws and GetCurve is an unbounded line
+        (or None), so a point counts when it is on that line and on its face."""
+        lines = []
+        for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_SILHOUETTE) or ():
+            line = binding.wrap(handle, self._mod.ISilhouetteEdge)
+            curve = binding.wrap(line.GetCurve(), self._mod.ICurve)
+            face = binding.wrap(line.GetFace(), self._mod.IFace2)
+            if curve is not None and face is not None and curve.IsLine():
+                lines.append((line, curve.LineParams, face))
+        # 2020 lists some silhouettes once and leaves others out (a cone showed only
+        # its -x side, twice): the other side of a turned face, mirrored across its
+        # axis, has the same lengths and angles
+        candidates = [point_mm] + [self._mirrored_on_turned_face(face, point_mm) for _, _, face in lines
+                                   if self._off_face_mm(face, point_mm) <= self._EDGE_ON_TOLERANCE_MM]
+        for point in filter(None, candidates):
+            for line, params, face in lines:
+                root, direction = [m_to_mm(c) for c in params[0:3]], params[3:6]
+                far = [r + 1000.0 * d for r, d in zip(root, direction)]
+                near = [r - 1000.0 * d for r, d in zip(root, direction)]
+                if (self._off_segment_mm(point, near, far) <= self._EDGE_ON_TOLERANCE_MM
+                        and self._off_face_mm(face, point) <= self._EDGE_ON_TOLERANCE_MM):
+                    return line
+        return None
+
+    def _mirrored_on_turned_face(self, face, point_mm):
+        """A point mirrored across the axis of the cone or cylinder it lies on, or None."""
+        surface = binding.wrap(face.GetSurface(), self._mod.ISurface)
+        if surface.IsCylinder():
+            params = surface.CylinderParams
+        elif surface.IsCone():
+            params = surface.ConeParams
+        else:
+            return None
+        origin, axis = [m_to_mm(c) for c in params[0:3]], params[3:6]
+        along = sum((p - o) * a for p, o, a in zip(point_mm, origin, axis))
+        foot = [o + along * a for o, a in zip(origin, axis)]
+        return [2 * f - p for f, p in zip(foot, point_mm)]
+
+    @staticmethod
+    def _off_segment_mm(p, a, b) -> float:
+        """Distance from point p to segment ab; pure."""
+        ab = [y - x for x, y in zip(a, b)]
+        length2 = sum(c * c for c in ab)
+        t = 0.0 if not length2 else max(0.0, min(1.0, sum((q - x) * c for q, x, c in zip(p, a, ab)) / length2))
+        return math.dist(p, [x + t * c for x, c in zip(a, ab)])
+
     def _select_in(self, target, edge, append: bool, label: str) -> None:
+        if isinstance(edge, self._mod.ISilhouetteEdge):
+            if not edge.Select2(append, None):
+                raise SolidWorksError(f"{label}: SolidWorks could not select that silhouette in {target['name']}.")
+            return
         if not target["view"].SelectEntity(edge, append):
             raise SolidWorksError(f"{label}: SolidWorks could not select that edge in view {target['name']}.")
 
@@ -5848,7 +5952,7 @@ class SolidWorksSession:
 
     def _place_dimension(self, doc, target, item, place, part_edges):
         sid, measure = item["id"], place["measure"]
-        edges = [self._edge_at(part_edges, p, f"{sid} point {n + 1}") for n, p in enumerate(place["points_mm"])]
+        edges = [self._edge_at(part_edges, p, f"{sid} point {n + 1}", target) for n, p in enumerate(place["points_mm"])]
         sheet_pts = [self._sheet_point(target, p) for p in place["points_mm"]]
         ox0, oy0, ox1, oy1 = self._outline_mm(target)
         mx = sum(p[0] for p in sheet_pts) / len(sheet_pts)
@@ -5862,7 +5966,7 @@ class SolidWorksSession:
             self._select_in(target, edge, n > 0, sid)
         spot = (mx, above)
         if measure in ("diameter", "radius"):
-            circle = self._circle_of(edges[0])
+            circle = None if isinstance(edges[0], self._mod.ISilhouetteEdge) else self._circle_of(edges[0])
             if circle is None:
                 raise SolidWorksError(f"{sid}: a {measure} needs a point on a circular edge.")
             centre, axis, _ = circle
@@ -5887,7 +5991,12 @@ class SolidWorksSession:
         elif measure == "vertical":
             spot = (beside, my)
             handle = doc.AddVerticalDimension2(mm_to_m(beside), mm_to_m(my), 0.0)
-        else:  # distance or angle: SolidWorks chooses from the selection
+        elif measure == "angle":  # the text's sector decides which of the four angles shows
+            lines = [self._sheet_line(target, e, p) for e, p in zip(edges, place["points_mm"])]
+            spot = drawing_spec.angle_text_spot(*lines, float(item["parsed"].nominal), off + 8.0,
+                                                ((ox0 + ox1) / 2, (oy0 + oy1) / 2))
+            handle = doc.AddDimension2(mm_to_m(spot[0]), mm_to_m(spot[1]), 0.0)
+        else:  # distance: SolidWorks chooses from the selection
             handle = doc.AddDimension2(mm_to_m(mx), mm_to_m(above), 0.0)
         dd = binding.wrap(handle, self._mod.IDisplayDimension)
         if dd is None:
@@ -5901,6 +6010,8 @@ class SolidWorksSession:
         they show exactly the spec's two numbers."""
         sid, show = item["id"], drawing_spec.display_settings(item)
         dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)
+        if show["angle"]:
+            self._pick_angle(dd, dim, float(item["parsed"].nominal), sid)
         if not show["angle"]:
             base = SW_FRACTION if show["fraction"] else SW_DECIMAL
             dd.SetUnits2(False, SW_INCHES, base, drawing_spec.FRACTION_DENOMINATOR, True, SW_ROUND_HALF_AWAY)
@@ -5918,6 +6029,42 @@ class SolidWorksSession:
             unit = math.radians if show["angle"] else (lambda v: mm_to_m(in_to_mm(v)))
             if not tolerance.SetValues(-unit(show["minus_in"]), unit(show["plus_in"])):
                 raise SolidWorksError(f"Could not set the tolerance of {sid}.")
+
+    def _sheet_line(self, target, entity, point_mm) -> tuple:
+        """The sheet line ((x, y), (dx, dy)) an edge or silhouette shows as in the
+        view: a straight one along its direction, a circle seen edge-on across
+        its axis."""
+        o = target["orientation"]
+        flat = lambda v: (drawing_spec._dot(v, o["right"]), drawing_spec._dot(v, o["up"]))
+        at = self._sheet_point(target, point_mm)
+        curve = binding.wrap(entity.GetCurve(), self._mod.ICurve)
+        if curve is not None and curve.IsLine():
+            return at, flat(curve.LineParams[3:6])
+        circle = None if isinstance(entity, self._mod.ISilhouetteEdge) else self._circle_of(entity)
+        if circle is not None:
+            ax, ay = flat(circle[1])
+            if math.hypot(ax, ay) > 0.999:  # seen edge-on
+                return at, (-ay, ax)
+        raise SolidWorksError("An angle is measured between lines as the view shows them: straight edges, "
+                              "silhouettes, or circles seen edge-on.")
+
+    def _pick_angle(self, dd, dim, nominal_deg: float, sid: str) -> None:
+        """Two lines make four angles; SolidWorks shows the one on the side the
+        text landed (a 45 deg bevel came out 135, verified). Turn it to the
+        spec's angle; when none of the four is it, the geometry is wrong."""
+        flips = {180 - nominal_deg: dd.SupplementaryAngle, 360 - nominal_deg: dd.ExplementaryAngle,
+                 180 + nominal_deg: dd.VerticallyOppositeAngle}
+        shown = math.degrees(dim.SystemValue)
+        for other, flip in flips.items():
+            if abs(shown - nominal_deg) < 1e-6:
+                return
+            if abs(shown - other) < 1e-6:
+                flip()
+                shown = math.degrees(dim.SystemValue)
+                break
+        if abs(shown - nominal_deg) > 1e-6:
+            raise SolidWorksError(f"{sid}: the two lines meet at {shown:g} deg (or its supplement), not the spec's "
+                                  f"{nominal_deg:g}: check the model or the points.")
 
     def _annotation_spot(self, target, point_mm, offset_mm=12.0) -> tuple:
         """Where a leader note goes: off the view outline, on the point's side."""
@@ -5942,10 +6089,10 @@ class SolidWorksSession:
             spot = None
         elif "on" in place:  # a thread or hole callout: on the edge its leader points at
             point = host_points[place["on"]]
-            self._select_in(target, self._edge_at(part_edges, point, sid), False, sid)
+            self._select_in(target, self._edge_at(part_edges, point, sid, target), False, sid)
             spot = self._annotation_spot(target, point, 24.0)
         else:
-            self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid), False, sid)
+            self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid)
             spot = self._annotation_spot(target, place["point_mm"])
         if item["kind"] == "datum":
             made = binding.wrap(doc.InsertDatumTag2(), self._mod.IDatumTag)
@@ -5974,7 +6121,7 @@ class SolidWorksSession:
 
     def _place_finish(self, doc, target, item, place, part_edges):
         sid = item["id"]
-        self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid), False, sid)
+        self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid)
         x, y = self._annotation_spot(target, place["point_mm"])
         ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
         made = binding.wrap(ext.InsertSurfaceFinishSymbol3(SW_SF_SYMBOLS[item["symbol"]], SW_LEADER_STRAIGHT, x, y,
@@ -5984,10 +6131,9 @@ class SolidWorksSession:
             raise SolidWorksError(f"SolidWorks could not place the finish symbol {sid}.")
         return made
 
-    def _place_note(self, doc, target, text, place, part_edges):
+    def _place_note(self, doc, target, sid, text, place, part_edges):
         """A note with a leader to an edge: thread and hole callouts, local notes."""
-        sid = place.get("view")
-        self._select_in(target, self._edge_at(part_edges, place["point_mm"], text[:20]), False, str(sid))
+        self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid)
         note = binding.wrap(doc.InsertNote(drawing_spec.to_sw_text(text)), self._mod.INote)
         if note is None:
             raise SolidWorksError(f"SolidWorks could not place the note '{text}'.")
@@ -6016,7 +6162,8 @@ class SolidWorksSession:
             read = self._read_drawing(doc)
         finally:
             if not already:
-                sw.CloseDoc(doc.GetTitle() or title)
+                # by path: a drawing has its part's title ('DTN6'), so the title is ambiguous
+                sw.CloseDoc(doc.GetPathName() or title)
         return {**drawing_spec.compare(spec, read), "path": abs_path}
 
     def _read_drawing(self, doc) -> dict:
@@ -6040,7 +6187,9 @@ class SolidWorksSession:
                     read["dimensions"].append({**entry, **self._read_dimension(
                         binding.wrap(specific, self._mod.IDisplayDimension), doc_places)})
                 elif kind == "note":
-                    read["notes"].append({**entry, "text": binding.wrap(specific, self._mod.INote).GetText()})
+                    text = binding.wrap(specific, self._mod.INote).GetText() or ""
+                    if text.strip():  # a section or detail view's own label reads back blank
+                        read["notes"].append({**entry, "text": text})
                 elif kind == "datum":
                     read["datums"].append({**entry, "label": binding.wrap(specific, self._mod.IDatumTag).GetLabel()})
                 elif kind == "gtol":
