@@ -424,7 +424,7 @@ class _GoneSolidWorks:
         self.hresult = hresult
 
     def __getattr__(self, name):
-        raise pythoncom.com_error(self.hresult, "De RPC-server is niet beschikbaar.", None, None)
+        raise pythoncom.com_error(self.hresult, "The RPC server is unavailable.", None, None)
 
 
 class _RunningSolidWorks:
