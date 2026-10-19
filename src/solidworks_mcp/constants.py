@@ -305,6 +305,9 @@ SW_SECTION_CHANGE_DIRECTION = 4             # swCreateSectionViewAtOptions_e
 SW_DETAIL_STANDARD = 0                      # swDetViewStyle_e
 SW_DETAIL_CIRCLE = 1                        # swDetCircleShowType_e
 SW_VIEW_ENTITY_SILHOUETTE = 4               # swViewEntityType_e: IView.GetVisibleEntities2
+# swSelectType_e: what a pick on a drawing sheet may land on for a leader: an edge, a face,
+# a silhouette (picked by position, a silhouette comes back as its face)
+SW_SEL_PART_GEOMETRY = {1, 2, 46}
 SW_IMPORT_ENTIRE_MODEL = 0
 # swInsertAnnotation_e: dimensions + those marked for drawings (no spec given)
 SW_INSERT_DIMENSIONS = 8 | 32768

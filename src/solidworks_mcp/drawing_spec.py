@@ -46,6 +46,7 @@ GDT_MODIFIERS = ("MMC", "LMC", "RFS")
 FINISH_SYMBOLS = ("basic", "machined", "no removal")
 FRACTION_DENOMINATOR = 64  # the finest inch fraction a drawing shows
 EXACT_IN = 5e-6  # a model value this close to the spec's is the same value
+EXACT_DEG = 1e-3  # the same for an angle (0.001 deg: 4 millionths of an inch over a quarter inch)
 
 # Symbols as written in a spec, and SolidWorks' note tokens for them.
 _SYMBOLS = (("Ø", "<MOD-DIAM>"), ("⌀", "<MOD-DIAM>"), ("°", "<MOD-DEG>"), ("±", "<MOD-PM>"),
@@ -389,7 +390,7 @@ def compare_dimension(item, read: dict) -> dict:
     if value.format == "limits":
         if not value.lower - EXACT_IN <= actual <= value.upper + EXACT_IN:
             notes.append(f"the model measures {float(actual):.5f}, outside {value.text}")
-    elif abs(actual - value.nominal) > EXACT_IN:
+    elif abs(actual - value.nominal) > (EXACT_DEG if value.kind == "angle" else EXACT_IN):
         unit = "°" if value.kind == "angle" else " in"
         notes.append(f"the model measures {float(actual):.5f}{unit}, spec nominal {float(value.nominal):.5f}{unit}")
     if (value.kind == "angle") != bool(read.get("angle")):
@@ -523,8 +524,9 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
                                           "cut vertically, or leave out the top/bottom view.")
                 cells[view["id"]] = (col, free[0])
     details = [v for v in views if v["kind"] == "detail"]
+    below = 1 + max([r for _, r in cells.values()] + [0])  # a free row under everything: details go there
     for n, view in enumerate(details):
-        cells[view["id"]] = (extra_col, n - (len(details) - 1) // 2)
+        cells[view["id"]] = (n, below)
 
     def extent(view, scale):
         if view["kind"] == "detail":
@@ -564,6 +566,8 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
     for row in sorted(rows):  # row -1 (top view) is highest on the sheet
         row_y[row] = y - rows[row] / 2
         y -= rows[row] + VIEW_GAP_MM
+    if details:  # the detail row sits at the bottom of the area: the dimensions under the views need the room
+        row_y[below] = y0 + EDGE_MM + rows[below] / 2
     return {"scale": (num, den), "centres_mm": {v["id"]: (round(col_x[cells[v["id"]][0]], 3),
                                                           round(row_y[cells[v["id"]][1]], 3)) for v in views}}
 
@@ -575,6 +579,11 @@ def _turned(orientations, parent: str, side: str) -> dict:
 
 
 def angle_text_spot(line1, line2, nominal_deg: float, distance_mm: float, away_from=None) -> tuple:
+    """The first of angle_text_spots: the most likely place for the text."""
+    return angle_text_spots(line1, line2, nominal_deg, distance_mm, away_from)[0]
+
+
+def angle_text_spots(line1, line2, nominal_deg: float, distance_mm: float, away_from=None) -> list:
     """Where an angle dimension's text goes so it shows `nominal_deg`: two
     sheet lines ((x, y), (dx, dy)) make four angles, and SolidWorks shows the
     one whose sector holds the text. The point is on that sector's bisector,
@@ -596,11 +605,13 @@ def angle_text_spot(line1, line2, nominal_deg: float, distance_mm: float, away_f
     if not fits:
         shown = sorted({round(s[1], 3) for s in sectors})
         raise SolidWorksError(f"The lines meet at {' or '.join(f'{a:g}' for a in shown)} deg, not {nominal_deg:g}.")
-    spots = [(meet[0] + distance_mm * b[0], meet[1] + distance_mm * b[1]) for _, _, b in fits]
-    if away_from is None:
-        return spots[0]
-    # two opposite sectors show the same angle: the one pointing away from the part
-    return max(spots, key=lambda p: math.dist(p, away_from))
+    # each sector that shows the angle, near and further out; SolidWorks does not
+    # always measure the sector the text is in (it gave 225 for 45 on DTN6), so
+    # the caller tries them in turn
+    spots = [(meet[0] + r * b[0], meet[1] + r * b[1]) for r in (distance_mm, 2 * distance_mm) for _, _, b in fits]
+    if away_from is not None:  # two opposite sectors show the same angle: away from the part first
+        spots.sort(key=lambda p: -math.dist(p, away_from))
+    return spots
 
 
 def _unit2(v) -> tuple:
@@ -845,3 +856,40 @@ def gdt_frame_text(characteristic, tolerance, modifier, datums) -> str:
     """One readable line for a feature control frame: 'position | Ø.010 MMC | A | B | C'."""
     cells = [str(characteristic), f"{tolerance} {modifier}".strip() if modifier else str(tolerance), *datums]
     return " | ".join(cells)
+
+
+CHAR_MM = 2.2  # the width of a note character on the stock A-size format (3 mm text)
+LINE_MM = 6.0  # one line of note text, with its gap
+
+
+class TextSlots:
+    """Keeps leader notes, finish symbols and frames from landing on each other:
+    per view and side (above / below), the paper lines the dimensions use and
+    which stretches of each line further out are taken. Pure."""
+
+    def __init__(self, area_mm=None) -> None:
+        self.floor, self.taken, self.area = {}, {}, area_mm
+
+    def reserve(self, view: str, side: str, offset_mm: float) -> None:
+        """A dimension's text this far off the view: leader text goes further out."""
+        key = (view, side)
+        self.floor[key] = max(self.floor.get(key, 0.0), offset_mm)
+
+    def place(self, view: str, side: str, x_mm: float, edge_mm: float, width_mm: float,
+              lines: int = 1) -> tuple:
+        """(x, y) for a text `width_mm` wide that starts at x, on the first free
+        line beyond the view's edge (edge_mm: its top for 'above', bottom for 'below')."""
+        if self.area is not None:  # keep the text on the drawing area: left of its right edge
+            x_mm = max(self.area[0], min(x_mm, self.area[2] - width_mm))
+        sign = 1 if side == "above" else -1
+        base = self.floor.get((view, side), 0.0) + 8.0
+        level = 0
+        while True:
+            used = self.taken.setdefault((view, side, level), [])
+            span = (x_mm, x_mm + width_mm)
+            if all(span[1] + 3 <= a or b + 3 <= span[0] for a, b in used):
+                used.append(span)
+                for extra in range(1, lines):  # a text of several lines takes the lines beyond too
+                    self.taken.setdefault((view, side, level + extra), []).append(span)
+                return x_mm, edge_mm + sign * (base + LINE_MM * (level + lines - 1 if sign > 0 else level))
+            level += 1

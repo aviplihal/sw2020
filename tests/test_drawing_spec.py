@@ -148,7 +148,7 @@ def test_the_first_real_spec_validates():
     with open(DTN6, encoding="utf-8") as f:
         spec = json.load(f)
     out = ds.summary(spec)
-    assert {u["id"] for u in out["unreadable"]} == {"D7", "D17", "B?", "G1"}
+    assert all(u["kind"] for u in out["unreadable"])  # which ones changes as the user answers
     mm = {d["id"]: d.get("mm") for d in out["dimensions"]}
     assert mm["D1"] == 150.8125 and mm["D13"] == 12.7 and mm["D10"] == 9.525
 
@@ -344,3 +344,30 @@ def test_the_angle_text_goes_in_the_sector_of_the_spec_angle():
     # the opposite sector shows the same 45 deg: take the one away from the part
     x, y = ds.angle_text_spot(vertical, bevel, 45, 10, away_from=(3, 6))
     assert math.isclose(math.degrees(math.atan2(y, x)), -112.5)
+
+
+def test_an_angle_is_exact_to_a_thousandth_of_a_degree():
+    """DTN6's 30 deg chamfer measured 29.9999 from a radius entered as 5.42076 mm."""
+    item = first(dim("30°"))
+    assert ds.compare_dimension(item, {"value": 29.9999, "angle": True})["status"] == "ok"
+    assert ds.compare_dimension(item, {"value": 29.99, "angle": True})["status"] == "differs"
+
+
+def test_leader_texts_do_not_land_on_each_other():
+    slots = ds.TextSlots()
+    slots.reserve("v", "above", 18)  # dimensions up to 18 mm above the view
+    a = slots.place("v", "above", 50, 100, 40)
+    b = slots.place("v", "above", 60, 100, 20)  # overlaps a: the next line out
+    c = slots.place("v", "above", 120, 100, 20)  # clear of a: same line
+    assert a[1] == c[1] == 100 + 18 + 8 and b[1] == a[1] + ds.LINE_MM
+    assert slots.place("v", "below", 50, 80, 40)[1] == 80 - 8  # below: nothing reserved there
+
+
+def test_detail_views_go_in_a_row_below():
+    views = ds.validate_views([{"kind": "standard", "model_view": "front", "up": "-x"},
+                               {"kind": "standard", "direction": "right"},
+                               {"kind": "detail", "from": "front", "label": "B", "center_mm": [6, 128, 0],
+                                "radius_mm": 4, "scale": "4:1"}])
+    out = ds.layout(views, ds.view_orientations("front", "-x"), [20, 150.8, 20], [16, 64, 262, 199])
+    (fx, fy), (dx, dy) = out["centres_mm"]["front"], out["centres_mm"]["detail B"]
+    assert out["scale"] == (1, 1) and dy < fy

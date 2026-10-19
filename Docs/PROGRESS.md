@@ -193,3 +193,23 @@ API findings (all used in `session.py`'s shop-drawing section):
 - A drawing has its part's title (`DTN6`), so `CloseDoc(title)` is ambiguous: close by path.
 - The guard's rollback rebuilt the part after any failed call (`ForceRebuild3`), which marked
   it changed even when nothing was undone; it now rebuilds only when it removed something.
+
+### 2026-10-19 (later) — The real DTN6 job (33 items)
+
+- An angle placed with its text in the right sector still came out reflex (225 for 45): the
+  tool now tries each spot in a sector of the spec's angle and deletes a dimension that shows
+  another angle (`DeleteSelection2`; `EditDelete` is void, so success is read back from
+  `IView.GetDisplayDimensionCount`).
+- The silhouette list differs from drawing to drawing: in one 1:1 drawing it held neither side
+  of DTN6's bearing cylinder, in another both. A detail view lists silhouettes with no curve
+  and no face. Picked by position on the sheet (`SelectByID2("", "", x, y)`) a silhouette comes
+  back as its face, or as the drawing view: fine for a leader, useless for a dimension. A
+  centerline (`InsertCenterLine2`) selected by name with a silhouette gave a linear dimension,
+  not an angle. So an angle to the side of a cone or cylinder works only when 2020 lists that
+  silhouette; DTN6's 30° chamfer (from the axis) could not be placed reliably.
+- Leader texts now stack on separate lines and keep to the drawing area; detail views go in
+  a row at the bottom; a second datum on one dimension sits beside the first.
+- **SOLIDWORKS 2020 crashed** during a make_drawing run of the DTN6 job copy (16:44). That run
+  included a GraphicsRedraw2 + EditRebuild3 retry inside the quiet-UI guard (removed since,
+  it did not help). The crash is not explained; the last layout changes were not run on
+  SolidWorks after it.
