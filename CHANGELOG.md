@@ -14,6 +14,17 @@ All notable changes to this project are documented here. This project follows
   knowledge-base case open the server names the file, otherwise a path is
   required as before.
 
+### Knowledge base
+- Every tool call is logged to a local knowledge base (SQLite in WAL mode,
+  `%LOCALAPPDATA%\solidworks-mcp\kb`, or `SWMCP_KB_DIR`): its arguments,
+  result or error, the error's signature, and the server and SOLIDWORKS
+  versions. A logging failure never breaks a call; it shows as `kb_warning`.
+- Cases (one per drawing, by DN number) with their lifecycle; one is open at
+  a time, and it survives a server restart.
+- Failures are grouped by signature: the error's code, else its text with
+  names, numbers and paths replaced. Fillet, full round, chamfer and shell
+  failures carry codes.
+
 ## [0.16.0] — 2026-10-10
 
 ### Fixed

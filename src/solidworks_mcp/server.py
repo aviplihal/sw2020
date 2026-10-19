@@ -7,12 +7,14 @@ rather than getting an opaque stack trace.
 """
 
 import argparse
+import inspect
 import sys
 from importlib import resources
 
 from mcp.server.fastmcp import FastMCP
 
 from .errors import SolidWorksError
+from .kb import log as kb_log
 from .selftest import main as run_selftest
 
 # Shown to the model by every MCP client at connect time, so keep it short; the
@@ -66,6 +68,7 @@ class _NoSolidWorks:
             raise SolidWorksError(
                 f"SolidWorks MCP only works on Windows with SolidWorks installed (this is {sys.platform})."
             )
+        unavailable.__name__ = name  # the tool's name in the knowledge-base log
         return unavailable
 
 
@@ -88,21 +91,43 @@ async def _call(fn, *args, **kwargs) -> dict:
     """Run a session method on the COM thread and normalise errors to a result dict.
 
     It runs guarded: a call that fails leaves the current part as it was.
+    With SolidWorks there, every call is logged to the knowledge base (_log_call).
     """
+    error = None
     try:
         if _worker is None:
-            return fn(*args, **kwargs)
-        return await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs))
+            result = fn(*args, **kwargs)
+        else:
+            result = await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs))
     except SolidWorksError as exc:
-        return {"ok": False, "error": str(exc)}
+        error, result = exc, {"ok": False, "error": str(exc)}
     except _COM_ERROR as exc:
         # Extract the human-readable description if SolidWorks supplied one;
         # raw HRESULT tuples are useless as a correction-loop signal.
         info = getattr(exc, "excepinfo", None)
         desc = info[2] if info and len(info) > 2 and info[2] else getattr(exc, "strerror", None)
-        return {"ok": False, "error": f"SolidWorks COM error: {desc or exc}"}
+        error, result = exc, {"ok": False, "error": f"SolidWorks COM error: {desc or exc}"}
     except Exception as exc:  # noqa: BLE001 - never leak a stack trace to the agent
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        error, result = exc, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if _worker is None:  # not Windows: nothing ran, nothing to learn from
+        return result
+    return _log_call(fn, args, kwargs, result, error)
+
+
+def _log_call(fn, args, kwargs, result: dict, error: BaseException | None) -> dict:
+    """Record the call in the knowledge base. A logging failure never breaks the
+    call, but it is reported in the result, not swallowed."""
+    try:
+        try:
+            arguments = dict(inspect.signature(fn).bind(*args, **kwargs).arguments)
+        except (TypeError, ValueError):
+            arguments = {"args": list(args), **kwargs}
+        revision = getattr(_session, "sw_revision", None)
+        kb_log.record_call(fn.__name__, arguments, result, error,
+                           revision if isinstance(revision, str) else None)
+    except Exception as exc:  # noqa: BLE001 - the tool's own result matters more
+        result = {**result, "kb_warning": f"The knowledge base did not log this call: {type(exc).__name__}: {exc}"}
+    return result
 
 
 @mcp.tool()
