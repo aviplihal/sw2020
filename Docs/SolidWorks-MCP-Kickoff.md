@@ -1,119 +1,119 @@
 # SolidWorks MCP Connector — Kickoff Brief
 
-> Plak dit in een nieuwe Claude Code-sessie als startcontext. Het beschrijft *wat* we bouwen, *hoe* de architectuur eruitziet, een concrete eerste set tools, de verificatie-loop, en de bekende valkuilen — zodat je niet vanaf nul de SolidWorks-API hoeft te ontdekken.
+> Paste this into a new Claude Code session as starting context. It describes *what* we are building, *what* the architecture looks like, a concrete first set of tools, the verification loop, and the known pitfalls — so you don't have to discover the SolidWorks API from scratch.
 
-## 1. Doel
+## 1. Goal
 
-Bouw een MCP-server (Python) die een **lokaal draaiende SolidWorks-instantie** aanstuurt via de COM-API, zodat een AI-agent parametrische modellen kan opbouwen, meten en exporteren. De kern van het project is niet alleen "geometrie maken", maar een **closed loop**: bouwen → meten/verifiëren → vergelijken met requirements → corrigeren → herhalen.
+Build an MCP server (Python) that drives a **locally running SolidWorks instance** through the COM API, so an AI agent can build, measure and export parametric models. The core of the project is not just "making geometry" but a **closed loop**: build → measure/verify → compare with requirements → correct → repeat.
 
-### Waarom dit kansrijk is
-Parametrische CAD levert *harde, verifieerbare signalen* (rebuild errors, mass properties, measure, interference checks). Dat maakt een agentische correctie-loop realistisch — anders dan bij puur visueel mesh-werk waar de enige feedback "het ziet er ongeveer goed uit" is.
+### Why this is promising
+Parametric CAD provides *hard, verifiable signals* (rebuild errors, mass properties, measure, interference checks). That makes an agentic correction loop realistic — unlike purely visual mesh work, where the only feedback is "it looks about right".
 
-### Scope v0 (bewust klein)
-Eén onderdeel (part) kunnen opbouwen met de meest voorkomende features, en jezelf kunnen verifiëren. Assemblies, drawings en simulatie komen later.
+### Scope v0 (deliberately small)
+Be able to build a single part with the most common features, and verify it yourself. Assemblies, drawings and simulation come later.
 
-## 2. Technische stack
+## 2. Technical stack
 
-- **Taal:** Python 3.11+
-- **SolidWorks-koppeling:** `pywin32` (`win32com.client`) — COM/OLE Automation
-- **MCP:** officiële Python MCP SDK (`mcp` package), stdio transport
-- **Omgeving:** Windows, met SolidWorks geïnstalleerd en een actieve licentie. Geen cloud — alles lokaal.
+- **Language:** Python 3.11+
+- **SolidWorks link:** `pywin32` (`win32com.client`) — COM/OLE Automation
+- **MCP:** official Python MCP SDK (`mcp` package), stdio transport
+- **Environment:** Windows, with SolidWorks installed and an active licence. No cloud — everything local.
 
-### Verbinding maken met SolidWorks
+### Connecting to SolidWorks
 ```python
 import win32com.client
 import pythoncom
 
-# Pak een draaiende instance, of start er een
+# Grab a running instance, or start one
 try:
     swApp = win32com.client.GetActiveObject("SldWorks.Application")
 except pythoncom.com_error:
     swApp = win32com.client.Dispatch("SldWorks.Application")
 
-swApp.Visible = True  # tijdens ontwikkeling: zien wat er gebeurt
+swApp.Visible = True  # during development: see what is happening
 ```
 
-> Tip: gebruik `win32com.client.gencache.EnsureDispatch("SldWorks.Application")` voor early-binding en betere autocompletion van constanten. De `swconst` enums (bv. `swDocPART`, `swSketchManager` opties) zitten in de typelibrary.
+> Tip: use `win32com.client.gencache.EnsureDispatch("SldWorks.Application")` for early binding and better autocompletion of constants. The `swconst` enums (e.g. `swDocPART`, `swSketchManager` options) are in the type library.
 
-## 3. Architectuurprincipes
+## 3. Architecture principles
 
-1. **Eén COM-sessie, single-threaded.** De SolidWorks-API is stateful en niet thread-safe. Serialiseer alle calls. MCP stdio is sowieso sequentieel — houd het zo.
-2. **Defensief met state.** Selectie, actieve document en context bepalen of een operatie slaagt. Neem nooit aan dat de juiste doc/selectie actief is — zet die expliciet in elke tool.
-3. **Idempotent waar mogelijk + naamgeving.** Geef features en sketches expliciete namen (`feature.Name = "..."`) zodat latere tools ze betrouwbaar terugvinden i.p.v. via selectie-volgorde.
-4. **Elke mutatie retourneert verificatie.** Een tool die iets bouwt, geeft ook terug: rebuild-status, foutmeldingen, en (waar relevant) de gewijzigde mass properties. De loop leeft van die feedback.
-5. **Faal luid en gestructureerd.** Vang COM-errors, geef leesbare boodschappen terug i.p.v. stack traces. Een mislukte rebuild is geen crash maar een resultaat dat de agent moet kunnen lezen.
+1. **One COM session, single-threaded.** The SolidWorks API is stateful and not thread-safe. Serialise all calls. MCP stdio is sequential anyway — keep it that way.
+2. **Defensive about state.** Selection, the active document and context determine whether an operation succeeds. Never assume the right doc/selection is active — set it explicitly in every tool.
+3. **Idempotent where possible + naming.** Give features and sketches explicit names (`feature.Name = "..."`) so later tools can find them reliably instead of relying on selection order.
+4. **Every mutation returns verification.** A tool that builds something also returns: rebuild status, error messages, and (where relevant) the changed mass properties. The loop lives on that feedback.
+5. **Fail loud and structured.** Catch COM errors and return readable messages instead of stack traces. A failed rebuild is not a crash but a result the agent must be able to read.
 
-## 4. Eerste set tools (v0)
+## 4. First set of tools (v0)
 
-| Tool | Doel | Belangrijkste API-aanknopingspunten |
+| Tool | Purpose | Key API entry points |
 |---|---|---|
-| `connect` / `get_status` | Verbind met/inspecteer SolidWorks; rapporteer actieve doc | `GetActiveObject`, `swApp.ActiveDoc` |
-| `new_part` | Maak een nieuw leeg part-document | `swApp.NewDocument` (part template path) |
-| `open_part` / `save_part` | Open/sla op | `swApp.OpenDoc6`, `model.SaveAs3` |
-| `create_sketch` | Start sketch op een gekozen vlak (Front/Top/Right of face) | `model.SketchManager`, `SelectByID2` op het vlak |
-| `add_extrude` | Extrude de actieve/benoemde sketch | `FeatureManager.FeatureExtrusion3` |
-| `add_revolve` | Revolve rond as | `FeatureManager.FeatureRevolve2` |
-| `add_fillet` | Fillet op geselecteerde edges | `FeatureManager.FeatureFillet3` |
-| `set_dimension` | Wijzig een benoemde maat (parametrisch!) | `model.Parameter("D1@Sketch1").SystemValue` |
-| `set_equation` | Voeg/zet equation toe | `model.GetEquationMgr` |
-| `rebuild` | Forceer rebuild en lees fouten | `model.ForceRebuild3`, `model.GetFeatureCount` + error-check |
-| `get_mass_properties` | Volume, massa, zwaartepunt, bounding box | `model.Extension.CreateMassProperty` |
-| `measure` | Afstand/hoek tussen selecties | `model.Extension.CreateMeasure` |
-| `check_interference` (later) | Botsingen in assembly | `InterferenceDetectionMgr` |
-| `screenshot` | Render viewport naar PNG voor visuele check | `model.SaveAs3` naar `.png`, of `model.ActiveView` capture |
-| `export` | Exporteer naar STEP/STL | `model.SaveAs3` met juiste extensie/opties |
+| `connect` / `get_status` | Connect to/inspect SolidWorks; report the active doc | `GetActiveObject`, `swApp.ActiveDoc` |
+| `new_part` | Create a new empty part document | `swApp.NewDocument` (part template path) |
+| `open_part` / `save_part` | Open/save | `swApp.OpenDoc6`, `model.SaveAs3` |
+| `create_sketch` | Start a sketch on a chosen plane (Front/Top/Right or a face) | `model.SketchManager`, `SelectByID2` on the plane |
+| `add_extrude` | Extrude the active/named sketch | `FeatureManager.FeatureExtrusion3` |
+| `add_revolve` | Revolve about an axis | `FeatureManager.FeatureRevolve2` |
+| `add_fillet` | Fillet on selected edges | `FeatureManager.FeatureFillet3` |
+| `set_dimension` | Change a named dimension (parametric!) | `model.Parameter("D1@Sketch1").SystemValue` |
+| `set_equation` | Add/set an equation | `model.GetEquationMgr` |
+| `rebuild` | Force a rebuild and read errors | `model.ForceRebuild3`, `model.GetFeatureCount` + error check |
+| `get_mass_properties` | Volume, mass, centre of mass, bounding box | `model.Extension.CreateMassProperty` |
+| `measure` | Distance/angle between selections | `model.Extension.CreateMeasure` |
+| `check_interference` (later) | Collisions in an assembly | `InterferenceDetectionMgr` |
+| `screenshot` | Render the viewport to PNG for a visual check | `model.SaveAs3` to `.png`, or `model.ActiveView` capture |
+| `export` | Export to STEP/STL | `model.SaveAs3` with the right extension/options |
 
-> Eenheden: SolidWorks API werkt intern in **meters** (en radialen voor hoeken), ongeacht de document-units. Reken expliciet om (bv. mm → m) en documenteer dat in elke tool, dit is een klassieke bug-bron.
+> Units: the SolidWorks API works internally in **metres** (and radians for angles), regardless of the document units. Convert explicitly (e.g. mm → m) and document that in every tool; this is a classic source of bugs.
 
-## 5. De verificatie-loop (het hart van het project)
+## 5. The verification loop (the heart of the project)
 
-Na elke bouwstap moet de agent kunnen vaststellen of het resultaat klopt. Bouw de loop rond deze signalen:
+After every build step the agent must be able to determine whether the result is correct. Build the loop around these signals:
 
-1. **Rebuild-status** — faalde een feature? Is een sketch onderbepaald (dangling)?
-2. **Mass properties** — vergelijk volume/massa/zwaartepunt met de verwachte spec.
-3. **Measure** — verifieer kritische maten, wanddiktes, afstanden tegen de requirements.
-4. **Bounding box** — past het binnen het beoogde gabarit / printbed?
-5. **Visuele check** — screenshot teruglezen voor grove fouten (verkeerde oriëntatie, ontbrekende feature).
-6. **(Later) Interference/FEA** — assembly-botsingen of sterkte.
+1. **Rebuild status** — did a feature fail? Is a sketch under-defined (dangling)?
+2. **Mass properties** — compare volume/mass/centre of mass with the expected spec.
+3. **Measure** — verify critical dimensions, wall thicknesses and distances against the requirements.
+4. **Bounding box** — does it fit within the intended envelope / print bed?
+5. **Visual check** — read back a screenshot for gross errors (wrong orientation, missing feature).
+6. **(Later) Interference/FEA** — assembly collisions or strength.
 
-Een typische iteratie:
+A typical iteration:
 ```
-intentie + requirements
-  → bouw feature via API
-  → rebuild + lees fouten
-  → meet (mass props / measure / bbox)
-  → vergelijk met spec
-  → wijk af? → set_dimension / pas feature aan → herhaal
-  → akkoord? → export STEP/STL
+intent + requirements
+  → build feature via API
+  → rebuild + read errors
+  → measure (mass props / measure / bbox)
+  → compare with spec
+  → deviates? → set_dimension / adjust feature → repeat
+  → OK? → export STEP/STL
 ```
 
-## 6. Bekende valkuilen (vooraf weten = tijd besparen)
+## 6. Known pitfalls (knowing them up front saves time)
 
-- **COM is stateful & single-threaded.** Selecties en actieve doc bepalen succes. Zet ze expliciet; reset selectie met `model.ClearSelection2(True)` tussen operaties.
-- **Eenheden:** API in meters/radialen, niet in de document-units. Veelvoorkomende stille fout.
-- **`SelectByID2` is fragiel.** Selecteren op naam/coördinaat is gevoelig. Benoem geometrie en gebruik waar mogelijk de FeatureManager-tree i.p.v. ruimtelijke selectie.
-- **Booleans op return-waarden.** Veel API-calls geven `False`/`None` bij falen zonder exception. Controleer return-waarden actief.
-- **Templates vereisen een pad.** `NewDocument`/`NewPart` heeft een geldig part-template nodig; haal het standaardpad op via `swApp.GetUserPreferenceStringValue(swDefaultTemplatePart)`.
-- **Versie-afhankelijke API-namen.** Veel functies hebben genummerde varianten (`...3`, `...6`). Gebruik de nieuwste die jouw SolidWorks-versie ondersteunt.
-- **Design intent ≠ geldige geometrie.** Een AI maakt makkelijk *geldige* geometrie; een feature-tree die *robuust mee-update* bij maatwijzigingen is de hogere lat. Houd sketches volledig bepaald en bouw relaties bewust op.
-- **Visuele verificatie is niet onfeilbaar.** Gebruik screenshots als aanvulling, niet als enige waarheid.
+- **COM is stateful & single-threaded.** Selections and the active doc determine success. Set them explicitly; reset the selection with `model.ClearSelection2(True)` between operations.
+- **Units:** the API uses metres/radians, not the document units. A common silent error.
+- **`SelectByID2` is fragile.** Selecting by name/coordinate is sensitive. Name your geometry and use the FeatureManager tree instead of spatial selection where possible.
+- **Booleans on return values.** Many API calls return `False`/`None` on failure without raising an exception. Check return values actively.
+- **Templates require a path.** `NewDocument`/`NewPart` needs a valid part template; get the default path via `swApp.GetUserPreferenceStringValue(swDefaultTemplatePart)`.
+- **Version-dependent API names.** Many functions have numbered variants (`...3`, `...6`). Use the newest one your SolidWorks version supports.
+- **Design intent ≠ valid geometry.** An AI easily makes *valid* geometry; a feature tree that *updates robustly* when dimensions change is the higher bar. Keep sketches fully defined and build relations deliberately.
+- **Visual verification is not infallible.** Use screenshots as a supplement, not as the only source of truth.
 
-## 7. Voorgestelde milestones
+## 7. Proposed milestones
 
-- **M0 — Verbinding:** `connect`/`get_status` werkt; agent kan een draaiende SolidWorks zien en de actieve doc rapporteren.
-- **M1 — Eén blok:** `new_part` → `create_sketch` (rechthoek) → `add_extrude` → `get_mass_properties`. Volume klopt met handberekening.
-- **M2 — Parametrisch:** `set_dimension` wijzigt een maat, `rebuild`, mass properties veranderen voorspelbaar. Dit bewijst de parametrische loop.
-- **M3 — Verificatie-loop:** agent krijgt een spec ("blok 40×20×10 mm, gat Ø8 centraal"), bouwt, meet, corrigeert tot het klopt, exporteert STL.
-- **M4 — Uitbreiding:** revolve, fillet, equations, meerdere features; screenshot-verificatie.
-- **M5 — Later:** assemblies, interference detection, drawings, SolidWorks Simulation (FEA) in de loop.
+- **M0 — Connection:** `connect`/`get_status` works; the agent can see a running SolidWorks and report the active doc.
+- **M1 — One block:** `new_part` → `create_sketch` (rectangle) → `add_extrude` → `get_mass_properties`. The volume matches a hand calculation.
+- **M2 — Parametric:** `set_dimension` changes a dimension, `rebuild`, mass properties change predictably. This proves the parametric loop.
+- **M3 — Verification loop:** the agent gets a spec ("block 40×20×10 mm, Ø8 hole in the centre"), builds, measures, corrects until it is right, exports STL.
+- **M4 — Expansion:** revolve, fillet, equations, multiple features; screenshot verification.
+- **M5 — Later:** assemblies, interference detection, drawings, SolidWorks Simulation (FEA) in the loop.
 
-## 8. Tips voor de Claude Code-sessie
+## 8. Tips for the Claude Code session
 
-- Zet `swApp.Visible = True` zodat je elke stap live in SolidWorks ziet — onmisbaar bij het debuggen van de loop.
-- Begin met M0–M1 volledig werkend voordat je tools toevoegt. Het skelet (verbinding + bouwen + meten) draagt al de rest.
-- Log elke COM-call en return-waarde tijdens ontwikkeling; de API faalt vaak stil.
-- Houd één klein testpart als referentie waarmee je `measure`/`mass_properties` valideert tegen bekende waarden.
-- Raadpleeg de officiële **SOLIDWORKS API Help** voor exacte signaturen; de genummerde functievarianten verschillen per versie.
+- Set `swApp.Visible = True` so you can watch every step live in SolidWorks — indispensable when debugging the loop.
+- Get M0–M1 fully working before adding tools. The skeleton (connect + build + measure) carries everything else.
+- Log every COM call and return value during development; the API often fails silently.
+- Keep one small test part as a reference to validate `measure`/`mass_properties` against known values.
+- Consult the official **SOLIDWORKS API Help** for exact signatures; the numbered function variants differ between versions.
 
 ---
-*Opgesteld als startdocument voor het SolidWorks-MCP-project. Pas scope en milestones gerust aan op je eigen prioriteiten.*
+*Written as the starting document for the SolidWorks MCP project. Feel free to adjust the scope and milestones to your own priorities.*

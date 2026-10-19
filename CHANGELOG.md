@@ -3,6 +3,42 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Shared (knowledge base and shop drawings)
+- `SolidWorksError` takes an optional `code` and `params`, a stable name and
+  the measured values behind a failure.
+- Exact inch ↔ millimetre helpers (`units.in_to_mm`, `units.mm_to_in`); a
+  value written as text (`".375"`) is converted exactly as written.
+- `save_part` and `make_drawing` take an optional `path`: with a
+  knowledge-base case open the server names the file, otherwise a path is
+  required as before.
+
+### Knowledge base
+- Every tool call is logged to a local knowledge base (SQLite in WAL mode,
+  `%LOCALAPPDATA%\solidworks-mcp\kb`, or `SWMCP_KB_DIR`): its arguments,
+  result or error, the error's signature, and the server and SOLIDWORKS
+  versions. A logging failure never breaks a call; it shows as `kb_warning`.
+- Cases (one per drawing, by DN number) with their lifecycle; one is open at
+  a time, and it survives a server restart.
+- Failures are grouped by signature: the error's code, else its text with
+  names, numbers and paths replaced. Fillet, full round, chamfer and shell
+  failures carry codes.
+- Knowledge-base tools (optional extra `solidworks-mcp[kb]`): `kb_ingest_drawing`,
+  `kb_view_region`, `kb_describe_case`, `kb_update_spec`, `kb_search`,
+  `kb_get_case`, `kb_abandon_case`, `kb_reembed_pending`. Drawings are
+  rendered with pypdfium2; views and descriptions are embedded with Voyage
+  AI, only once `SWMCP_VOYAGE_OPTED_OUT=1` confirms the account's data
+  opt-out (until then a case is kept as *embedding pending*). Search merges
+  keywords (SQLite FTS5) and vectors by reciprocal rank fusion.
+- Tool cards (`kb_tool_card`, `kb_update_tool_card`): one short card per
+  modelling tool, stored as fields. Claude writes the words; the server adds
+  the 'How to call' line from the tool's docstring and each failure's count,
+  last case and versions, and refuses a card over 8 bullets or 150 words, or
+  one that drops a frequent failure. A failure retires once an upgrade fixed
+  it (not seen since, and 3 successes after). An error result carries the
+  card's line for that failure as `kb_hint`.
+
 ## [0.16.0] — 2026-10-10
 
 ### Fixed

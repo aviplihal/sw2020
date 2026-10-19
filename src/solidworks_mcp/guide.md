@@ -304,6 +304,17 @@ stray drag in SolidWorks can change the part.
   `set_dimension` (names from `read_sketch` or `list_dimensions`). Their
   planes work by name in `add_mirror` and `cut_profile_through_plane`.
 
+### Old drawing jobs: the knowledge base
+
+For a job that starts from an old drawing (`DN17.pdf`), follow Docs/JOB-BRIEF.md.
+In short: `kb_ingest_drawing`; read **every** value from zoomed regions
+(`kb_view_region`), never from the overview; `kb_describe_case` with the drawing
+spec; ask the user about each unreadable item and store the answers with
+`kb_update_spec`; look at the similar cases it returns (`kb_get_case` with
+`include_timeline` shows how one was built). Approved cases are trustworthy; the
+others carry a caution. When a case is open, save the part and drawing without a
+path: the server names them from the DN number.
+
 ## 5. 3D printing
 
 - Leave a gap of about 0.2-0.4 mm between printed parts that slide together,

@@ -23,7 +23,7 @@ import pythoncom
 import win32com.client
 import win32gui
 
-from . import __version__, binding, free_sketch
+from . import __version__, binding, case_paths, free_sketch
 from .constants import (
     FEATURE_ERRORS,
     DRAWING_FORMATS,
@@ -154,6 +154,7 @@ class SolidWorksSession:
         self._model = None    # current IModelDoc2
         self._quiet_depth = 0  # inside _quiet_ui
         self._to_wake = []     # (document, [(object, property)]) to switch back on after it
+        self.sw_revision = None  # e.g. '28.5.0', read at connect; logged with every tool call
 
     # --- connection -----------------------------------------------------------
 
@@ -166,6 +167,7 @@ class SolidWorksSession:
         """Attach to the running SolidWorks instance and configure it for automation."""
         self._sw = binding.connect()
         self._mod = binding.module()
+        self.sw_revision = str(self._revision())
         self._configure_for_automation()
         return self.get_status()
 
@@ -368,10 +370,11 @@ class SolidWorksSession:
                 "Is the file open or locked?"
             )
 
-    def save_part(self, path: str) -> dict:
-        """Save the current part to a native .sldprt file (silent)."""
+    def save_part(self, path: str | None = None) -> dict:
+        """Save the current part to a native .sldprt file (silent). With a
+        knowledge-base case open the server names the file (case_paths)."""
         self._require_model()
-        abs_path = os.path.abspath(path)
+        abs_path = os.path.abspath(case_paths.resolve("part", path))
         if not abs_path.lower().endswith(".sldprt"):
             abs_path += ".sldprt"
         self._write_via_saveas3(abs_path)
@@ -2961,25 +2964,31 @@ class SolidWorksSession:
         """
         model = self._require_model()
         if radius_mm <= 0:
-            raise SolidWorksError(f"radius must be > 0 (got {radius_mm}).")
+            raise SolidWorksError(f"radius must be > 0 (got {radius_mm}).", code="FILLET_BAD_RADIUS",
+                                  params={"radius_mm": radius_mm})
 
         body = self._solid_body()
         edge_count = self._select_edges(body, edges)
         if edge_count == 0:
-            raise SolidWorksError(f"No edges found for selector '{edges}'.")
+            raise SolidWorksError(f"No edges found for selector '{edges}'.", code="EDGES_NOT_FOUND",
+                                  params={"edges": edges})
         skipped = 0
         if skip_shorter_mm is not None:
             skipped = self._deselect_short_edges(skip_shorter_mm)
             edge_count -= skipped
             if edge_count == 0:
-                raise SolidWorksError(f"Every edge of '{edges}' is shorter than {skip_shorter_mm:g} mm.")
+                raise SolidWorksError(f"Every edge of '{edges}' is shorter than {skip_shorter_mm:g} mm.",
+                                      code="EDGES_ALL_TOO_SHORT",
+                                      params={"edges": edges, "skip_shorter_mm": skip_shorter_mm})
         if radii_at_mm:
             return self._variable_fillet(radius_mm, radii_at_mm, edge_count, name)
 
         selected = self._selected_objects()
         fillet = self._uniform_fillet(radius_mm, tangent_propagation)
         if fillet is None:
-            raise SolidWorksError(self._fillet_refusal(radius_mm, selected, tangent_propagation))
+            raise SolidWorksError(self._fillet_refusal(radius_mm, selected, tangent_propagation),
+                                  code="FILLET_REFUSED", params={"radius_mm": radius_mm, "edges": len(selected),
+                                                                 "tangent_propagation": tangent_propagation})
         result = self._finish_feature(fillet, name, edges_filleted=edge_count)
         if skip_shorter_mm is not None:
             result["edges_skipped"] = skipped
@@ -3101,7 +3110,8 @@ class SolidWorksSession:
             None, None, None, None, None, None,
         )
         if fillet is None:
-            raise SolidWorksError("FeatureFillet3 failed (None). Is a radius too large for the geometry?")
+            raise SolidWorksError("FeatureFillet3 failed (None). Is a radius too large for the geometry?",
+                                  code="VARIABLE_FILLET_REFUSED", params={"radius_mm": radius_mm, "radii_mm": radii})
         result = self._finish_feature(fillet, name, edges_filleted=edge_count)
         feature = binding.wrap(fillet, self._mod.IFeature)
         self._check_vertex_radii(feature, dict(zip(ends, radii)))
@@ -3110,7 +3120,8 @@ class SolidWorksSession:
         for k, (end, radius) in enumerate(zip(ends, radii)):
             dimension = f"{self._vertex_radius_dimension(k)}@{result['feature']}"
             if values.get(dimension) is None or abs(values[dimension] - radius) > 1e-6:
-                raise SolidWorksError(f"Could not find the dimension of the radius at {list(end)} ({dimension}).")
+                raise SolidWorksError(f"Could not find the dimension of the radius at {list(end)} ({dimension}).",
+                                      code="VARIABLE_FILLET_NO_DIMENSION", params={"at_mm": list(end)})
             result["vertex_radii"].append({"at_mm": list(end), "radius_mm": radius, "dimension": dimension})
         return result
 
@@ -3197,12 +3208,14 @@ class SolidWorksSession:
             data = binding.wrap(selmgr.CreateSelectData(), self._mod.ISelectData)
             data.Mark = mark
             if not binding.wrap(entity, self._mod.IEntity).Select4(True, data):
-                raise SolidWorksError("Could not select the faces for the full round.")
+                raise SolidWorksError("Could not select the faces for the full round.",
+                                      code="FULL_ROUND_SELECT_FAILED")
         feat_mgr = binding.wrap(model.FeatureManager, self._mod.IFeatureManager)
         fillet = feat_mgr.FeatureFillet3(0, 0.0, 0.0, 0.0, SW_FILLET_TYPE_FULL_ROUND, 0, 0,
                                          None, None, None, None, None, None, None)
         if fillet is None:
-            raise SolidWorksError(f"SolidWorks could not round the {face} face off between its sides.")
+            raise SolidWorksError(f"SolidWorks could not round the {face} face off between its sides.",
+                                  code="FULL_ROUND_REFUSED", params={"face": face, "width_mm": round(width, 4)})
         return self._finish_feature(fillet, name, width_mm=round(width, 4))
 
     def _side_faces(self, centre, normal) -> list:
@@ -3238,11 +3251,13 @@ class SolidWorksSession:
                 if sum(a * b for a, b in zip(normal, other_normal)) < -0.999999:
                     pairs.append((abs(sum((b - a) * n for a, b, n in zip(point, other_point, normal))), i, j))
         if not pairs:
-            raise SolidWorksError("A full round needs two opposite flat side faces along the face, such as a rib's sides.")
+            raise SolidWorksError("A full round needs two opposite flat side faces along the face, such as a rib's sides.",
+                                  code="FULL_ROUND_NO_SIDES")
         pairs.sort()
         if len(pairs) > 1 and pairs[1][0] - pairs[0][0] < 1e-6:
             raise SolidWorksError(f"Two pairs of side faces are equally far apart ({pairs[0][0]:g} mm): the full "
-                                  "round cannot tell which way to run.")
+                                  "round cannot tell which way to run.", code="FULL_ROUND_AMBIGUOUS",
+                                  params={"distance_mm": pairs[0][0]})
         distance, i, j = pairs[0]
         return i, j, distance
 
@@ -3261,12 +3276,15 @@ class SolidWorksSession:
         """
         self._require_model()
         if distance_mm <= 0:
-            raise SolidWorksError(f"distance must be > 0 (got {distance_mm}).")
+            raise SolidWorksError(f"distance must be > 0 (got {distance_mm}).", code="CHAMFER_BAD_DISTANCE",
+                                  params={"distance_mm": distance_mm})
         if not 0 < angle_deg < 90:
-            raise SolidWorksError(f"angle_deg must be between 0 and 90 (got {angle_deg}).")
+            raise SolidWorksError(f"angle_deg must be between 0 and 90 (got {angle_deg}).", code="CHAMFER_BAD_ANGLE",
+                                  params={"angle_deg": angle_deg})
         if angle_deg != 45 and from_face is None:
             raise SolidWorksError(f"A chamfer at {angle_deg:g} degrees needs from_face: which way the face faces "
-                                  "that the distance runs along and the angle is measured from, e.g. '-z'.")
+                                  "that the distance runs along and the angle is measured from, e.g. '-z'.",
+                                  code="CHAMFER_NEEDS_FROM_FACE", params={"angle_deg": angle_deg})
         reference = self._parse_direction(from_face) if from_face is not None else None
         body = self._solid_body()
         chamfer, edge_count = self._insert_chamfer(body, edges, distance_mm, angle_deg, flip=False)
@@ -3285,7 +3303,8 @@ class SolidWorksSession:
                 raise SolidWorksError(f"The chamfer does not leave the {from_face} face at {angle_deg:g} degrees "
                                       f"everywhere (its faces stand at {off or 'none'} to it): chamfer only edges "
                                       f"of the {from_face} face, and edges that run the other way in a call of "
-                                      "their own.")
+                                      "their own.", code="CHAMFER_WRONG_ANGLE",
+                                      params={"angle_deg": angle_deg, "from_face": from_face, "tilts_deg": off})
         return self._finish_feature(chamfer, name, edges_chamfered=edge_count)
 
     _CHAMFER_ANGLE_TOLERANCE_DEG = 0.5
@@ -3294,7 +3313,8 @@ class SolidWorksSession:
         """Select the edges and chamfer them; (feature, edge count)."""
         edge_count = self._select_edges(body, edges)
         if edge_count == 0:
-            raise SolidWorksError(f"No edges found for selector '{edges}'.")
+            raise SolidWorksError(f"No edges found for selector '{edges}'.", code="EDGES_NOT_FOUND",
+                                  params={"edges": edges})
         feat_mgr = binding.wrap(self._model.FeatureManager, self._mod.IFeatureManager)
         chamfer = feat_mgr.InsertFeatureChamfer(
             SW_FEATURE_CHAMFER_FLIP if flip else 0,  # Options (no tangent propagation)
@@ -3306,7 +3326,9 @@ class SolidWorksSession:
         )
         if chamfer is None:
             raise SolidWorksError(
-                "InsertFeatureChamfer failed (None). Is the distance too large for the geometry?"
+                "InsertFeatureChamfer failed (None). Is the distance too large for the geometry?",
+                code="CHAMFER_REFUSED", params={"distance_mm": distance_mm, "angle_deg": angle_deg,
+                                                "edges": edge_count},
             )
         return binding.wrap(chamfer, self._mod.IFeature), edge_count
 
@@ -3330,7 +3352,8 @@ class SolidWorksSession:
         """
         model = self._require_model()
         if thickness_mm <= 0:
-            raise SolidWorksError(f"thickness must be > 0 (got {thickness_mm}).")
+            raise SolidWorksError(f"thickness must be > 0 (got {thickness_mm}).", code="SHELL_BAD_THICKNESS",
+                                  params={"thickness_mm": thickness_mm})
 
         body = self._solid_body()
         opened = (open_face or "none").lower()
@@ -3345,7 +3368,8 @@ class SolidWorksSession:
         rebuilt_ok = bool(model.ForceRebuild3(False))
         props = self.get_mass_properties()["mass_properties"]
         if abs(props["volume_mm3"]) < 1e-6:
-            raise SolidWorksError("The shell removed all material; is the wall too thick?")
+            raise SolidWorksError("The shell removed all material; is the wall too thick?", code="SHELL_TOO_THICK",
+                                  params={"thickness_mm": thickness_mm, "open_face": opened})
         return {"ok": True, "open_face": opened, "rebuild_ok": rebuilt_ok, "mass_properties": props}
 
     def _first_edge_along(self, body, direction):
@@ -3859,7 +3883,8 @@ class SolidWorksSession:
         except SolidWorksError as exc:
             left = self._roll_back(snapshot)
             if left:
-                raise SolidWorksError(f"{exc} Could not remove what the call added: {', '.join(left)}.") from exc
+                raise SolidWorksError(f"{exc} Could not remove what the call added: {', '.join(left)}.",
+                                      code=exc.code, params=exc.params) from exc
             raise
         except Exception:
             self._roll_back(snapshot)
@@ -5520,15 +5545,17 @@ class SolidWorksSession:
                   for corner in itertools.product(*zip(*corners_mm))]
         return [min(t[i] for t in turned) for i in range(3)], [max(t[i] for t in turned) for i in range(3)]
 
-    def make_drawing(self, path: str) -> dict:
+    def make_drawing(self, path: str | None = None) -> dict:
         """A 2D drawing of the current part, saved as PDF or as an editable .slddrw.
 
         Front, top and right views in European (first angle) projection plus an
         isometric view, on an A4 sheet at the scale SolidWorks picks, with the
         model's own dimensions, each shown once. The drawing refers to the part's
         file, so the part must have been saved; unsaved changes show in a PDF
-        but not when a saved drawing is opened later.
+        but not when a saved drawing is opened later. With a knowledge-base case
+        open the server names the file (case_paths).
         """
+        path = case_paths.resolve("drawing", path)
         fmt = os.path.splitext(path)[1].lstrip(".").lower()
         if fmt not in DRAWING_FORMATS:
             raise SolidWorksError(f"A drawing is saved as {' or '.join(sorted(DRAWING_FORMATS))} (got '{fmt}').")

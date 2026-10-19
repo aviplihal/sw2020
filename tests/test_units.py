@@ -26,3 +26,22 @@ def test_deg_to_rad():
     assert abs(deg_to_rad(180) - math.pi) < 1e-12
     assert abs(deg_to_rad(360) - 2 * math.pi) < 1e-12
     assert abs(deg_to_rad(45) - math.pi / 4) < 1e-12
+
+
+def test_an_inch_is_exactly_25_4_mm():
+    from solidworks_mcp.units import in_to_mm, mm_to_in
+    assert in_to_mm(1) == 25.4
+    assert in_to_mm(".375") == 9.525  # read as written, no float step first
+    assert in_to_mm(".50") == 12.7
+    assert in_to_mm("1.0005") == 25.4127
+    assert mm_to_in(25.4) == 1.0
+    for v in (".375", "2.125", ".0005"):
+        assert abs(mm_to_in(in_to_mm(v)) - float(v)) < 1e-12
+
+
+def test_an_unreadable_inch_value_is_refused():
+    import pytest
+
+    from solidworks_mcp.units import in_to_mm
+    with pytest.raises(ValueError, match="Not a number of inches"):
+        in_to_mm("1/4")
