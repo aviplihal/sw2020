@@ -59,7 +59,9 @@ All notable changes to this project are documented here. This project follows
   axes now come from the view itself.
 - Dimensions in a section view or a detail of a section can measure to the
   cut face's outline (its lines and arcs, such as a fillet's arc for a
-  radius), which is no edge of the part: same point syntax.
+  radius), which is no edge of the part: same point syntax. Leader notes,
+  datums, frames and finish symbols there attach to the cut face's outline
+  where the part's edge hides behind it.
 - A section or detail label that would land on the title block goes above
   the view, else beside it, wherever no other view is.
 - A dimension in a detail view of a section could not select its edges

@@ -317,3 +317,7 @@ by check_drawing, the PDFs rendered and looked at.
   read back ok. On B at 1:2 the tall A-A hung its label over the title block and the "beside"
   spot sat on the detail: a label now goes above the view (into the outline's own margin,
   which runs 5-7 mm wider than the drawn view), else right, else left, wherever it is free.
+- A leader note at a point where the part's edge hides behind the cut face (DTN7's flange OD
+  circle at its chamfer, [172.0596, 87.884, 0], in detail D of A-A) found no copy of that edge
+  in the view; leaders (notes, datums, frames, finishes) now attach to the cut face's outline
+  through the point. Note C1, datum B and a parallelism frame there read back ok.

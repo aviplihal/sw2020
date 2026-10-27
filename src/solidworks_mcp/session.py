@@ -6603,6 +6603,13 @@ class SolidWorksSession:
         twin = self._view_twin(target, edge, point_mm) if point_mm is not None else None
         if twin is not None and target["view"].SelectEntity(twin, append):
             return
+        if not lines_only and point_mm is not None:
+            # a leader (note, datum, frame, finish) only needs something drawn at the
+            # point: where the part's edge hides behind a section's cut face, the cut
+            # face's own outline through it
+            cut = self._cut_face_edge_at(target, point_mm)
+            if cut is not None and target["view"].SelectEntity(cut, append):
+                return
         raise SolidWorksError(f"{label}: SolidWorks could not select that edge in view {target['name']}.")
 
     def _view_twin(self, target, edge, point_mm):
