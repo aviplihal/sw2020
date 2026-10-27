@@ -1050,11 +1050,13 @@ async def screenshot(path: str, view: str = "iso", zoom_mm: list | None = None,
 
 @mcp.tool()
 async def make_drawing(path: str | None = None, spec: dict | None = None, views: list | None = None,
-                       placements: dict | None = None) -> dict:
+                       placements: dict | None = None, sheet: str = "A") -> dict:
     """Make the shop drawing of the current part: an editable .slddrw (or a .pdf).
 
-    A-size sheet with SolidWorks' stock ANSI title block (left empty for the
-    user), third-angle projection, inches, never an isometric view. Save the
+    sheet: "A" (11 x 8.5 in, default), "B" (17 x 11) or "C" (22 x 17),
+    landscape, with SolidWorks' stock ANSI title block (left empty for the
+    user), third-angle projection, inches, never an isometric view. On B and C
+    the general notes go left of the title block. Save the
     part first (save_part, no unsaved changes): the drawing refers to its file.
     With a knowledge-base case open, leave out `path`; otherwise give one.
 
@@ -1121,7 +1123,7 @@ async def make_drawing(path: str | None = None, spec: dict | None = None, views:
     Each placed item is named after its spec id inside the drawing, so
     check_drawing can find it. Call check_drawing next.
     """
-    return await _call(_session.make_drawing, path, spec, views, placements)
+    return await _call(_session.make_drawing, path, spec, views, placements, sheet)
 
 
 @mcp.tool()

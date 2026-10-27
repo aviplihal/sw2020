@@ -44,8 +44,14 @@ All notable changes to this project are documented here. This project follows
   circle diameter, angles between centrelines, centre to a slot floor, a face
   to a hole axis).
 - Views that are not aligned with another (angled sections, details) take the
-  free spot on the sheet that keeps the largest scale; a detail's label that
-  would land on the title block goes beside the view.
+  free spot on the sheet that keeps the largest scale (and of those the most
+  compact); a detail's label that would land on the title block goes beside
+  the view. A dimension whose text would leave the drawing area goes on the
+  view's other side.
+- `make_drawing(..., sheet="B")`: an A (default), B (17 x 11 in) or C
+  (22 x 17 in) landscape sheet with SolidWorks' stock ANSI format; the layout
+  uses that sheet's area above the title block, and on B and C the general
+  notes go in the free strip left of the title block.
 
 ### Fixed (shop drawings)
 - Points in a section view were projected with its parent's axes, so

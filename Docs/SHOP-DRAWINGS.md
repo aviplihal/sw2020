@@ -200,6 +200,9 @@ A typed list; the first is the drawing's front view, the rest are placed third a
   which placements refer to. The sheet scale is the largest standard one at which the
   views fit (`drawing_spec.layout`). An isometric view is refused.
 - Without `views`: front, top, right.
+- `sheet`: `"A"` (default), `"B"` or `"C"`, landscape, each with SolidWorks' stock ANSI format
+  (`a/b/c - landscape.slddrt`). The views use the area inside the border above the title
+  block; on B and C the general notes go left of the title block.
 
 ### 5.2 `placements`
 `{spec id: where}`. Every read item except general notes needs one; an item flagged

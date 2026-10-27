@@ -258,18 +258,27 @@ VIEWS = {"front": 1, "back": 2, "left": 3, "right": 4, "top": 5, "bottom": 6, "i
 # Drawings (make_drawing / check_drawing). Every value below was read from the
 # SOLIDWORKS 2020 swconst.tlb (typelib v28.0); several differ from web docs
 # for later releases (swTolFITWITHTOL is 8 here, not 9).
-# A shop drawing is an A-size landscape sheet (swDwgPaperSizes_e) with
-# SolidWorks' stock ANSI sheet format, set up through IDrawingDoc.SetupSheet5
-# with a custom format file (swDwgTemplates_e): the user's default drawing
-# template on 2020 carries no sheet format of its own (verified).
-SW_DWG_PAPER_A = 0
+# A shop drawing is an A-, B- or C-size landscape sheet (swDwgPaperSizes_e)
+# with SolidWorks' stock ANSI sheet format, set up through
+# IDrawingDoc.SetupSheet5 with a custom format file (swDwgTemplates_e): the
+# user's default drawing template on 2020 carries no sheet format of its own
+# (verified).
 SW_DWG_TEMPLATE_CUSTOM = 12
-SHEET_FORMAT_FILE = "a - landscape.slddrt"
-SHEET_SIZE_MM = (279.4, 215.9)
-# Free drawing area inside that format's border, above its title block and the
-# proprietary box (measured on the stock 2020 format), and where notes start.
-SHEET_VIEW_AREA_MM = (16.0, 64.0, 262.0, 199.0)
-SHEET_NOTES_AT_MM = (16.0, 64.0)
+# Per sheet: paper size, format file, size, the free drawing area inside the
+# border and above the title block, and a free box left of the title block for
+# the general notes (None: they stack above the title block, in the area).
+# Measured on the stock 2020 formats: the border runs 12.7 mm in from the edge,
+# the title block's top is at 62.7 mm on all three; on B and C the title block
+# starts 180 / 307 mm from the left edge, leaving room for notes beside it.
+SHEETS = {
+    "A": {"paper": 0, "format": "a - landscape.slddrt", "size_mm": (279.4, 215.9),
+          "area_mm": (16.0, 64.0, 262.0, 199.0), "notes_box_mm": None},
+    "B": {"paper": 2, "format": "b - landscape.slddrt", "size_mm": (431.8, 279.4),
+          "area_mm": (16.0, 64.0, 415.0, 263.0), "notes_box_mm": (16.0, 16.0, 175.0, 60.0)},
+    "C": {"paper": 3, "format": "c - landscape.slddrt", "size_mm": (558.8, 431.8),
+          "area_mm": (16.0, 64.0, 542.0, 415.0), "notes_box_mm": (16.0, 16.0, 302.0, 60.0)},
+}
+SHEET_VIEW_AREA_MM = SHEETS["A"]["area_mm"]  # the default sheet's
 SW_PREF_SHEET_FORMAT_FOLDERS = 7            # swUserPreferenceStringValue_e.swFileLocationsSheetFormat
 SW_PREF_UNIT_SYSTEM = 263                   # swUserPreferenceIntegerValue_e
 SW_PREF_UNITS_LINEAR = 47

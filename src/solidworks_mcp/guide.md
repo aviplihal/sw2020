@@ -445,6 +445,9 @@ missing dimension is a scrapped part.
   measure to them by id: `["BC"]` diameter, `["CL_SLOT", "CL_H1"]` angle (its
   text goes between the lines), `["O", [x,y,z]]` centre to the slot floor,
   `[[x,y,z], "AX"]` a face to a hole axis. Marks must sit on the model.
+- **A big part or many views**: `sheet="B"` (17 x 11 in) or `"C"` (22 x 17 in)
+  gives a larger scale than the A sheet (DTN7 with four sections and a
+  detail: 1:10 on A, 1:4 on B). The `scale` in the result says what it got.
 - **Holes at an angle on a round part**: an angled section through two hole
   centres, `{"kind": "section", "from": "front", "line_mm": [p, q], "up": "+y"}`,
   stands upright with the part's axis up. A section of a section (a plan cut

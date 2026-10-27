@@ -150,10 +150,7 @@ from .mesh_tools import area, compare_sections, extents, load_mesh, section, sim
 from .region_tools import swept_outline
 from .sketch_constraints import MAX_DIMENSIONED_VERTICES, SketchDefiner
 from .constants import (  # shop drawings
-    SHEET_FORMAT_FILE,
-    SHEET_NOTES_AT_MM,
-    SHEET_SIZE_MM,
-    SHEET_VIEW_AREA_MM,
+    SHEETS,
     SW_ANGULAR_DIMENSION_TYPE,
     SW_ANNOTATION_OWNER_TEMPLATE,
     SW_ANNOTATION_TYPES,
@@ -164,7 +161,6 @@ from .constants import (  # shop drawings
     SW_DETAILING_ANSI,
     SW_DIMENSION_TEXT_PREFIX,
     SW_DIMENSION_TEXT_SUFFIX,
-    SW_DWG_PAPER_A,
     SW_DWG_TEMPLATE_CUSTOM,
     SW_FRACTION,
     SW_GCS,
@@ -5891,11 +5887,15 @@ class SolidWorksSession:
 
     _EDGE_ON_TOLERANCE_MM = 0.01
 
+    # The sheet the drawing being made is on (make_drawing sets it).
+    _sheet = SHEETS["A"]
+
     def make_drawing(self, path: str | None = None, spec: dict | None = None, views: list | None = None,
-                     placements: dict | None = None) -> dict:
+                     placements: dict | None = None, sheet: str = "A") -> dict:
         """A shop drawing of the current part, saved as .slddrw (or .pdf).
 
-        An A-size sheet with SolidWorks' stock ANSI title block (left empty),
+        An A-size sheet (or `sheet` "B", "C", landscape) with SolidWorks' stock
+        ANSI title block (left empty),
         third-angle projection, inches, never an isometric view. Without a spec
         it shows front, top and right views with the model's own dimensions.
         With a spec (drawing_spec, §4.1) and placements it places every read
@@ -5906,6 +5906,9 @@ class SolidWorksSession:
         fmt = os.path.splitext(path)[1].lstrip(".").lower()
         if fmt not in DRAWING_FORMATS:
             raise SolidWorksError(f"A drawing is saved as {' or '.join(sorted(DRAWING_FORMATS))} (got '{fmt}').")
+        key = str(sheet).strip().upper()
+        if key not in SHEETS:
+            raise SolidWorksError(f"sheet is one of {', '.join(SHEETS)} (ANSI landscape; got {sheet!r}).")
         checked = drawing_spec.validate(spec) if spec is not None else None
         plan = drawing_spec.validate_views(views)
         view_ids = {v["id"] for v in plan}
@@ -5928,9 +5931,13 @@ class SolidWorksSession:
             raise SolidWorksError("The part has no solid body to draw.")
         notes = [i for i in (checked or {"items": []})["items"]
                  if i["kind"] == "note" and i["status"] == "read" and i["id"] not in places]
-        x0, y0, x1, y1 = SHEET_VIEW_AREA_MM
+        self._sheet = SHEETS[key]
+        x0, y0, x1, y1 = self._sheet["area_mm"]
         notes_height = sum(len(drawing_spec.to_sw_text(n["text"]).splitlines()) for n in notes) * 5.0
-        lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0 + notes_height + (4 if notes else 0), x1, y1])
+        self._notes_at = self._notes_corner(notes_height)
+        if self._notes_at[1] >= y0 and notes:  # the notes stack in the area: the views go above them
+            y0 += notes_height + 4
+        lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0, x1, y1])
         started = time.perf_counter()
         self._timings = {"items": {}}
         doc, drawing = self._new_shop_drawing()
@@ -5974,7 +5981,7 @@ class SolidWorksSession:
             self._sw.ActivateDoc3(part.GetTitle(), False, SW_DONT_REBUILD_ACTIVE_DOC, 0)
         result = {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path),
                   "views": {vid: info["name"] for vid, info in made.items()},
-                  "scale": f"{lay['scale'][0]}:{lay['scale'][1]}", **placed,
+                  "sheet": key, "scale": f"{lay['scale'][0]}:{lay['scale'][1]}", **placed,
                   "timings_s": self._timing_report(time.perf_counter() - started),
                   "note": "The drawing refers to the part by file name: rename the two together with "
                           "SolidWorks' Pack and Go, never in Explorer."}
@@ -6010,24 +6017,35 @@ class SolidWorksSession:
                 "items": round(sum(v for _, v in items), 1), "save": round(timings.get("save", 0.0), 1),
                 "slowest_items": {k: round(v, 2) for k, v in items[:8]}}
 
+    def _notes_corner(self, notes_height: float) -> tuple:
+        """Where the general notes start (their bottom left, mm): in the free box
+        left of the title block when they fit there (B, C), else on the area's
+        bottom edge, above the title block."""
+        box = self._sheet["notes_box_mm"]
+        if box is not None and notes_height <= box[3] - box[1]:
+            return box[0], box[1]
+        return self._sheet["area_mm"][0], self._sheet["area_mm"][1]
+
     def _new_shop_drawing(self):
-        """A new drawing from the default template on an A-size sheet with the
-        stock ANSI title block, third angle, in inches."""
+        """A new drawing from the default template on the sheet make_drawing
+        chose (A, B or C landscape) with the stock ANSI title block, third
+        angle, in inches."""
         sw = self._sw
+        paper, format_file = self._sheet["paper"], self._sheet["format"]
         template = sw.GetUserPreferenceStringValue(SW_PREF_DEFAULT_TEMPLATE_DRAWING)
         folders = [f.strip() for f in (sw.GetUserPreferenceStringValue(SW_PREF_SHEET_FORMAT_FOLDERS) or "").split(";")]
-        sheet_format = next((os.path.join(f, SHEET_FORMAT_FILE) for f in folders
-                             if f and os.path.isfile(os.path.join(f, SHEET_FORMAT_FILE))), None)
+        sheet_format = next((os.path.join(f, format_file) for f in folders
+                             if f and os.path.isfile(os.path.join(f, format_file))), None)
         if sheet_format is None:
-            raise SolidWorksError(f"No sheet format '{SHEET_FORMAT_FILE}' in SolidWorks' sheet format folders "
+            raise SolidWorksError(f"No sheet format '{format_file}' in SolidWorks' sheet format folders "
                                   f"({'; '.join(f for f in folders if f) or 'none set'}).")
-        doc = binding.wrap(sw.NewDocument(template, SW_DWG_PAPER_A, 0.0, 0.0), self._mod.IModelDoc2)
+        doc = binding.wrap(sw.NewDocument(template, paper, 0.0, 0.0), self._mod.IModelDoc2)
         if doc is None:
             raise SolidWorksError(f"SolidWorks could not start a drawing from the template '{template}'.")
         drawing = binding.wrap(doc, self._mod.IDrawingDoc)
         sheet = binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet)
-        width, height = (mm_to_m(c) for c in SHEET_SIZE_MM)
-        if not drawing.SetupSheet5(sheet.GetName(), SW_DWG_PAPER_A, SW_DWG_TEMPLATE_CUSTOM, 1.0, 1.0, False,
+        width, height = (mm_to_m(c) for c in self._sheet["size_mm"])
+        if not drawing.SetupSheet5(sheet.GetName(), paper, SW_DWG_TEMPLATE_CUSTOM, 1.0, 1.0, False,
                                    sheet_format, width, height, "Default", True):
             self._sw.CloseDoc(doc.GetTitle())
             raise SolidWorksError(f"SolidWorks could not set up the sheet with '{sheet_format}'.")
@@ -6103,7 +6121,7 @@ class SolidWorksSession:
             if (binding.wrap(annotation.GetSpecificAnnotation(), self._mod.INote).GetText() or "").strip():
                 continue  # a placed note, not the label (which reads back blank)
             top = m_to_mm(list(annotation.GetPosition())[1])
-            if top - self._LABEL_HEIGHT_MM >= SHEET_VIEW_AREA_MM[1]:
+            if top - self._LABEL_HEIGHT_MM >= self._sheet["area_mm"][1]:
                 continue
             annotation.SetPosition2(mm_to_m(x1 + 3.0 + self._LABEL_HALF_WIDTH_MM),
                                     mm_to_m((y0 + y1) / 2 + self._LABEL_HEIGHT_MM / 2), 0.0)
@@ -6348,7 +6366,7 @@ class SolidWorksSession:
         items = {i["id"]: i for i in checked["items"]}
         order = {"dimension": 0, "thread": 1, "hole": 1, "datum": 2, "gdt": 2, "finish": 3, "note": 4}
         annotations, text_at, out = {}, {}, {"placed": []}
-        self._slots, self._on_host = drawing_spec.TextSlots(SHEET_VIEW_AREA_MM), {}
+        self._slots, self._on_host = drawing_spec.TextSlots(self._sheet["area_mm"]), {}
         for info in made.values():  # a section's or detail's label sits under it: leader text goes below that
             if info["kind"] != "standard":
                 self._slots.reserve(info["name"], "below", drawing_spec.VIEW_LABEL_MM)
@@ -6380,7 +6398,7 @@ class SolidWorksSession:
                 raise SolidWorksError(f"Could not name the annotation for {sid}.")
             out["placed"].append(sid)
             timings[sid] = time.perf_counter() - began
-        x, y = SHEET_NOTES_AT_MM
+        x, y = self._notes_at
         for item in reversed(notes):  # the first note on top
             doc.ClearSelection2(True)
             drawing.ActivateSheet(binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).GetName())
@@ -6622,6 +6640,11 @@ class SolidWorksSession:
         off, side = place["offset_mm"], place.get("side")
         upper = side == "above" if side in ("above", "below") else my >= (oy0 + oy1) / 2
         right = side == "right" if side in ("left", "right") else mx >= (ox0 + ox1) / 2
+        ax0, ay0, ax1, ay1 = self._sheet["area_mm"]
+        if (oy1 + off > ay1 - 3.0 if upper else oy0 - off < ay0 + 3.0):
+            upper = not upper  # its text would leave the drawing area (over the border or the title block)
+        if (ox1 + off > ax1 - 3.0 if right else ox0 - off < ax0 + 3.0):
+            right = not right
         if measure not in ("vertical", "angle"):  # its text sits above or below the view
             self._slots.reserve(target["name"], "above" if upper else "below", off)
         above = oy1 + off if upper else oy0 - off  # the text's height for a dimension across the view
@@ -6769,7 +6792,7 @@ class SolidWorksSession:
         x, y = self._sheet_point(target, point_mm)
         ox0, oy0, ox1, oy1 = self._outline_mm(target)
         side = "above" if y >= (oy0 + oy1) / 2 else "below"
-        x0, y0, x1, y1 = SHEET_VIEW_AREA_MM
+        x0, y0, x1, y1 = self._sheet["area_mm"]
         for _ in range(2):  # off the drawing area on this side: the other side
             sx, sy = self._slots.place(target["name"], side, x + 4.0, oy1 if side == "above" else oy0, width_mm, lines)
             if y0 + 4.0 <= sy <= y1 - 2.0:

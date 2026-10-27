@@ -554,3 +554,34 @@ def test_an_angled_section_takes_the_free_spot_that_keeps_the_scale():
     assert out["scale"] == (1, 5)
     (fx, fy), (cx, cy), (dx, dy) = (out["centres_mm"][k] for k in ("front", "section C", "detail E"))
     assert cx > fx and dy < fy
+
+
+# --- sheet sizes ----------------------------------------------------------------------------
+
+def dtn7_views():
+    def p(deg):
+        a = math.radians(deg)
+        return [163.5125 * math.cos(a), 47.625, 163.5125 * math.sin(a)]
+    return ds.validate_views([
+        FRONT_TOP,
+        {"kind": "section", "from": "front", "cut": "vertical", "label": "A", "through_mm": [0, 0, 0]},
+        {"kind": "section", "from": "section A", "cut": "vertical", "label": "B", "through_mm": [0, 47.625, 0]},
+        {"kind": "section", "from": "front", "line_mm": [p(-36), p(144)], "up": "+y", "label": "C"},
+        {"kind": "detail", "from": "section A", "label": "D", "center_mm": [168, 85, 0], "radius_mm": 8,
+         "scale": "1:1"}])
+
+
+def test_a_b_sheet_takes_dtn7_at_a_quarter():
+    """DTN7 (Ø13.548 x 3.5) with front, A-A, B-B from A-A, angled C-C and a 1:1 detail:
+    1:10 on the A sheet, 1:4 on B (verified on 2020: the title block clear)."""
+    from solidworks_mcp.constants import SHEETS
+    o, size = ds.view_orientations("top", "+x"), [344.12, 88.9, 344.12]
+    assert ds.layout(dtn7_views(), o, size, SHEETS["A"]["area_mm"])["scale"] == (1, 10)
+    out = ds.layout(dtn7_views(), o, size, SHEETS["B"]["area_mm"])
+    assert out["scale"] == (1, 4)
+    (dx, dy), (ax, ay), (cx, cy) = (out["centres_mm"][k] for k in ("detail D", "section A", "section C"))
+    assert dx == ax and dy < ay, "the detail goes under its section, where there is room, not in a new row"
+    for key in ("A", "B", "C"):  # every sheet's area lies inside its border (12.7 mm in) and above the title block
+        x0, y0, x1, y1 = SHEETS[key]["area_mm"]
+        w, h = SHEETS[key]["size_mm"]
+        assert 12.7 < x0 and x1 < w - 12.7 and 62.7 < y0 and y1 < h - 12.7

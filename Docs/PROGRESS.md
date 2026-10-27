@@ -300,3 +300,12 @@ by check_drawing, the PDFs rendered and looked at.
 - Not verified: `angle_deg` cuts (the `line_mm` form was), `radius` to a mark circle, a
   `center_mark` on a circle that already has an automatic one. The new integration tests in
   `tests/test_drawing.py` were run as the same calls through the bridge, not under pytest.
+- **Sheet sizes** (later): `SetupSheet5(name, swDwgPaperBsize (2) / Csize (3), swDwgTemplateCustom,
+  ..., "b - landscape.slddrt", 0.4318, 0.2794, ...)` sets up the stock B / C formats like the A
+  one. Measured on rendered blank sheets: the border runs 12.7 mm in from every edge, the title
+  block's top is at 62.7 mm on all three, and on B / C it is the A block moved right
+  (it starts 180 / 307 mm from the left), leaving a free strip left of it for the notes.
+  Areas: A (16, 64, 262, 199), B (16, 64, 415, 263), C (16, 64, 542, 415) mm. DTN7 with front,
+  A-A, B-B from A-A, angled C-C and a 1:1 detail of A-A: **1:4 on B** (1:10 on A); all 13 items
+  read back ok and nothing overlaps the title block. A dimension placed 10 mm above a view at the
+  top of the area went over the border; such text now goes on the other side.

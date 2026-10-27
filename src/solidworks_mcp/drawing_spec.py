@@ -563,9 +563,10 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
     top above, bottom below, left and right beside; sections cut vertically go
     in further columns on their parent's row, horizontal cuts above/below their
     parent's column. Views that are not aligned with another (angled sections,
-    details) each take the free cell that keeps the largest scale: details a
-    row below everything first, an angled section a new column first. Largest
-    scale that fits."""
+    details) each take the free cell that keeps the largest scale, and of
+    those the one that keeps the sheet's views most compact (ties: details a
+    row below everything, an angled section a new column). Largest scale that
+    fits."""
     cells = {}  # view id -> (col, row)
     for view in views:
         if view["kind"] == "standard":
@@ -622,10 +623,12 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
         candidates = first + [(c, r) for r in used_rows + [below] for c in used_cols + [beside]
                               if (c, r) not in taken and (c, r) not in first]
         best = None
-        for cell in candidates:
+        for cell in candidates:  # the largest scale; at the same scale, the most compact layout
             got = fit({**cells, view["id"]: cell})
-            if got is not None and (best is None or got[0] < best[0]):
-                best = (got[0], cell)
+            if got is not None:
+                rank = (got[0], round(got[3] + got[4], 3))
+                if best is None or rank < best[0]:
+                    best = (rank, cell)
         if best is None:
             raise SolidWorksError("The views do not fit the sheet even at 1:20.")
         cells[view["id"]] = best[1]
