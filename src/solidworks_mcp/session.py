@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from fractions import Fraction
 from xml.sax.saxutils import quoteattr
 
 import pythoncom
@@ -89,6 +90,11 @@ from .constants import (
     SW_ISO_SOCKET_COUNTERSUNK,
     SW_ISO_SOCKET_HEAD_CAP,
     SW_ISO_TAPPED_HOLE,
+    SW_ANSI_INCH_FLAT_SOCKET_82,
+    SW_ANSI_INCH_SCREW_CLEARANCES,
+    SW_ANSI_INCH_SOCKET_CAP_SCREW,
+    SW_ANSI_INCH_TAPPED_HOLE,
+    SW_WZD_STANDARD_ANSI_INCH,
     SW_PREF_DEFAULT_TEMPLATE_DRAWING,
     SW_RAY_HIT_EXIT,
     SW_RAY_NORMALS_ENTRY_EXIT,
@@ -2233,7 +2239,7 @@ class SolidWorksSession:
             "right_handed": True,
         })
 
-    # --- Hole Wizard: SolidWorks' own ISO tables -----------------------------------
+    # --- Hole Wizard: SolidWorks' own ISO and ANSI Inch tables ---------------------
 
     # kind -> (swWzdGeneralHoleTypes_e, fastener type): ISO 273 clearances,
     # counterbores for ISO 4762 socket head cap screws, countersinks for ISO 10642
@@ -2244,7 +2250,71 @@ class SolidWorksSession:
         "countersink": (SW_WZD_COUNTERSINK, SW_ISO_SOCKET_COUNTERSUNK),
         "tapped": (SW_WZD_TAP, SW_ISO_TAPPED_HOLE),
     }
+    # The same kinds in the ANSI Inch standard: screw clearances, counterbores for
+    # socket head cap screws, countersinks for 82 degree flat socket head screws,
+    # tapped holes (UNC / UNF / UNEF / UNS, by threads per inch).
+    _WIZARD_KINDS_INCH = {
+        "clearance": (SW_WZD_HOLE, SW_ANSI_INCH_SCREW_CLEARANCES),
+        "counterbore": (SW_WZD_COUNTERBORE, SW_ANSI_INCH_SOCKET_CAP_SCREW),
+        "countersink": (SW_WZD_COUNTERSINK, SW_ANSI_INCH_FLAT_SOCKET_82),
+        "tapped": (SW_WZD_TAP, SW_ANSI_INCH_TAPPED_HOLE),
+    }
     _WIZARD_THREADS = ("cosmetic", "modeled")
+    _INCH_SIZE = re.compile(
+        r"(?P<dia>#\d+|\d+[ -]\d+/\d+|\d+/\d+|\d*\.\d+|\d+)"
+        r"(?:\s*-\s*(?P<tpi>\d+)\s*(?P<series>UNC|UNF|UNEF|UNS)?)?"
+        r"(?:\s*-?\s*(?P<cls>[123]B))?",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _inch_hole_size(size: str, kind: str) -> dict:
+        """An inch size as SolidWorks' ANSI Inch Hole Wizard table names it.
+
+        Takes '7/8-9', '.875-9UNC', '0.875-9 UNC-3B', '1-1/8-7' or '1 1/8-7',
+        '#10-24' (tapped: diameter-threads per inch; the series and the class
+        are optional). The other kinds take the screw's diameter ('1/4',
+        '.250', '#10'; a pitch such as '1/4-20' is ignored). A decimal must be
+        an exact 1/64 fraction or a numbered size (#0..#12: .060 + .013 n
+        inch, ASME B1.1). Returns {'wizard_size', 'major_in', 'tpi', 'series',
+        'thread_class'}.
+        """
+        m = SolidWorksSession._INCH_SIZE.fullmatch(str(size).strip())
+        if m is None:
+            raise SolidWorksError(
+                f"Cannot read the hole size '{size}'. Use ISO metric ('M3') or inch: '7/8-9' or "
+                f"'.875-9UNC' (diameter-threads per inch, optional series and class like '-3B'), "
+                f"'#10-24'; a bare diameter such as '1/4' for clearance/counterbore/countersink."
+            )
+        dia, tpi, series, cls = m["dia"], m["tpi"], m["series"], m["cls"]
+        if kind == "tapped" and tpi is None:
+            raise SolidWorksError(f"An inch tapped hole needs threads per inch, e.g. '7/8-9' (got '{size}').")
+        if kind != "tapped" and cls:
+            raise SolidWorksError(f"A thread class is for a tapped hole, not a {kind} one (got '{size}').")
+        if dia.startswith("#"):
+            number = int(dia[1:])
+            major = Fraction("0.060") + Fraction("0.013") * number
+            if number > 12:
+                raise SolidWorksError(f"Numbered inch sizes run #0..#12 (got '{dia}').")
+        else:
+            whole, _, part = dia.replace("-", " ").rpartition(" ")
+            major = (Fraction(int(whole)) if whole else 0) + Fraction(part)  # exact: "7/8" or ".875"
+        if major <= 0:
+            raise SolidWorksError(f"The hole size '{size}' has no diameter.")
+        numbered = next((n for n in range(13) if Fraction("0.060") + Fraction("0.013") * n == major), None)
+        if numbered is not None and major < Fraction(1, 4):
+            name = f"#{numbered}"
+        elif (64 % major.denominator) == 0:
+            w, r = divmod(major, 1)
+            name = "-".join(t for t in (str(w) if w else "", str(r) if r else "") if t)  # "1-1/8"
+        else:
+            raise SolidWorksError(
+                f"{float(major):g} in is neither a fractional (1/64) nor a numbered (#0..#12) inch size."
+            )
+        if tpi is not None and kind == "tapped":
+            name = f"{name}-{int(tpi)}"
+        return {"wizard_size": name, "major_in": float(major), "tpi": int(tpi) if tpi else None,
+                "series": series.upper() if series else None, "thread_class": cls.upper() if cls else None}
 
     @staticmethod
     def _wizard_values(kind: str, fit: int, through: bool) -> list:
@@ -2330,13 +2400,18 @@ class SolidWorksSession:
             model.ClearSelection2(True)
             sk.InsertSketch(True)  # leave the position sketch
 
-    def _wizard_hole_info(self, feat, kind: str, size: str, fit: str) -> dict:
-        """The sizes SolidWorks took from its standard table for this hole (mm, degrees)."""
+    def _wizard_hole_info(self, feat, kind: str, size: str, fit: str, inch: dict | None = None) -> dict:
+        """The sizes SolidWorks took from its standard table for this hole (mm, degrees;
+        for an ANSI Inch hole each length also in inches, as `*_in`)."""
         data = binding.wrap(feat.GetDefinition(), self._mod.IWizardHoleFeatureData2)
         mm = lambda v: round(m_to_mm(v), 4)
-        info = {"standard": "ISO", "kind": kind, "size": size}
+        info = {"standard": "ANSI Inch" if inch else "ISO", "kind": kind, "size": size}
+        if inch:
+            info.update(wizard_size=data.FastenerSize, series=inch["series"],
+                        thread_class=data.ThreadClass or None)
         if kind == "tapped":
             info.update(tap_drill_diameter_mm=mm(data.TapDrillDiameter or data.ThruTapDrillDiameter),
+                        tap_drill_depth_mm=mm(data.TapDrillDepth),
                         thread_diameter_mm=mm(data.ThreadDiameter),
                         thread_depth_mm=mm(data.ThreadDepth), cosmetic_thread=data.CosmeticThreadType > 0)
         else:
@@ -2346,25 +2421,58 @@ class SolidWorksSession:
         if kind == "countersink":
             info.update(csink_diameter_mm=mm(data.CounterSinkDiameter),
                         csink_angle_deg=round(math.degrees(data.CounterSinkAngle), 3))
+        if inch:
+            info.update({k[:-3] + "_in": round(mm_to_in(v), 4) for k, v in list(info.items())
+                         if k.endswith("_mm")})
         return info
+
+    def _check_inch_wizard_size(self, info: dict, inch: dict, size: str) -> None:
+        """Fail loud when SolidWorks did not take the inch size as asked: it may
+        fall back to another size or class rather than refuse one it lacks."""
+        if info.get("wizard_size") != inch["wizard_size"]:
+            raise SolidWorksError(
+                f"SolidWorks' ANSI Inch table has no {info['kind']} size '{inch['wizard_size']}' (from "
+                f"'{size}'): the Hole Wizard took '{info.get('wizard_size')}' instead."
+            )
+        if info["kind"] == "tapped":
+            got = info["thread_diameter_mm"]
+            if abs(got - in_to_mm(inch["major_in"])) > self._THREAD_DIAMETER_TOLERANCE_MM:
+                raise SolidWorksError(
+                    f"The Hole Wizard's '{inch['wizard_size']}' thread is Ø{got:.3f} mm, not the "
+                    f"Ø{in_to_mm(inch['major_in']):.3f} mm of '{size}'."
+                )
+        if inch["thread_class"] and info.get("thread_class") != inch["thread_class"]:
+            raise SolidWorksError(
+                f"SolidWorks made thread class '{info.get('thread_class')}', not '{inch['thread_class']}'."
+            )
 
     def add_hole_wizard(self, kind: str, size: str, face: str, x_mm: float, y_mm: float, z_mm: float,
                         depth_mm: float | None = None, fit: str = "normal", thread: str = "cosmetic",
-                        name: str | None = None) -> dict:
-        """An ISO hole from SolidWorks' Hole Wizard, sized by its standard tables.
+                        name: str | None = None, depth_in: float | str | None = None) -> dict:
+        """An ISO or ANSI Inch hole from SolidWorks' Hole Wizard, sized by its standard tables.
 
         kind: 'clearance' (ISO 273), 'counterbore' (socket head cap screw,
         ISO 4762), 'countersink' (socket countersunk screw, ISO 10642) or
-        'tapped'. size: ISO metric, e.g. 'M3'. Centred at 3D point (x, y, z) on
-        the face through it (as add_hole_on_face); through all, or depth_mm deep
-        (a blind hole ends in a 118 degree drill point). fit: 'close', 'normal'
-        or 'loose' (not for tapped). thread (tapped only): 'cosmetic' drills the
-        ISO tap drill and adds SolidWorks' cosmetic thread; 'modeled' drills the
-        ISO basic minor diameter and cuts a real, printable thread over the
-        standard thread depth (all the way through a through hole). Returns the
-        standard's sizes in `hole`, and the position as dimensions x/y.
+        'tapped'. size: ISO metric, e.g. 'M3', or inch, which takes the ANSI
+        Inch tables (screw clearances, socket head cap screw, 82 degree flat
+        socket head screw, tapped holes): '7/8-9', '.875-9UNC', '7/8-9 UNC-3B',
+        '#10-24' (see _inch_hole_size). Centred at 3D point (x, y, z) on the
+        face through it (as add_hole_on_face); through all, or depth_mm (or
+        depth_in, inches) deep (a blind hole ends in a 118 degree drill point;
+        for a tapped hole it is the tap drill depth). fit: 'close', 'normal' or
+        'loose' (not for tapped). thread (tapped only): 'cosmetic' drills the
+        standard's tap drill and adds SolidWorks' cosmetic thread; 'modeled'
+        (ISO only) drills the ISO basic minor diameter and cuts a real,
+        printable thread over the standard thread depth (all the way through a
+        through hole). Returns the standard's sizes in `hole`, and the position
+        as dimensions x/y.
         """
-        model = self._require_model()
+        if depth_in is not None:
+            if depth_mm is not None:
+                raise SolidWorksError("Give depth_mm or depth_in, not both.")
+            depth_mm = in_to_mm(depth_in if isinstance(depth_in, str) else float(depth_in))
+        iso = bool(re.fullmatch(r"M\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?", str(size).strip()))
+        inch = None if iso else self._inch_hole_size(size, kind) if kind in self._WIZARD_KINDS else None
         if kind not in self._WIZARD_KINDS:
             raise SolidWorksError(f"Unknown hole kind '{kind}'. Use one of {sorted(self._WIZARD_KINDS)}.")
         if fit not in SCREW_FITS:
@@ -2373,8 +2481,12 @@ class SolidWorksSession:
             raise SolidWorksError(f"Unknown thread '{thread}'. Use 'cosmetic' or 'modeled'.")
         if thread == "modeled" and kind != "tapped":
             raise SolidWorksError("A modeled thread needs kind='tapped'.")
+        if thread == "modeled" and inch:
+            raise SolidWorksError("A modeled thread needs an ISO metric size; an inch tapped hole "
+                                  "gets SolidWorks' cosmetic thread (thread='cosmetic').")
         if depth_mm is not None and depth_mm <= 0:
             raise SolidWorksError(f"depth must be > 0 (got {depth_mm}).")
+        model = self._require_model()
         point = (x_mm, y_mm, z_mm)
         coarse = self._coarse_thread_size(size) if thread == "modeled" else None
         diameter_m = -1.0  # from the standard
@@ -2399,24 +2511,30 @@ class SolidWorksSession:
         if not ext.SelectByRay(*start, *(-n for n in normal), mm_to_m(self._ON_FACE_TOLERANCE_MM),
                                SW_SEL_FACES, False, 0, 0):
             raise SolidWorksError(f"Could not pick the {face} face at ({x_mm:g}, {y_mm:g}, {z_mm:g}) mm.")
-        hole_type, fastener = self._WIZARD_KINDS[kind]
+        hole_type, fastener = (self._WIZARD_KINDS_INCH if inch else self._WIZARD_KINDS)[kind]
+        standard = SW_WZD_STANDARD_ANSI_INCH if inch else SW_WZD_STANDARD_ISO
+        wizard_size = inch["wizard_size"] if inch else size
         through = depth_mm is None
         feat_mgr = binding.wrap(model.FeatureManager, self._mod.IFeatureManager)
         feat = feat_mgr.HoleWizard5(
-            hole_type, SW_WZD_STANDARD_ISO, fastener, size,
+            hole_type, standard, fastener, wizard_size,
             SW_END_COND_THROUGH_ALL if through else SW_END_COND_BLIND,
             diameter_m, -1.0 if through else mm_to_m(depth_mm), -1.0,  # Diameter, Depth, Length (slots)
             *self._wizard_values(kind, SCREW_FITS[fit], through),
-            "", False, False, True, False, False, False,  # ThreadClass (inch only), RevDir, scope flags
+            (inch or {}).get("thread_class") or "",  # ThreadClass (inch only)
+            False, False, True, False, False, False,  # RevDir, scope flags
         )
         if feat is None:
+            table, examples = ("ANSI Inch", "'1/4-20', '7/8-9'") if inch else ("ISO", "'M3', 'M4', 'M10'")
             raise SolidWorksError(
-                f"The Hole Wizard made no {kind} hole of size '{size}'. Is it an ISO metric size "
-                f"in SolidWorks' table (e.g. 'M3', 'M4', 'M10'), with material at the point?"
+                f"The Hole Wizard made no {kind} hole of size '{wizard_size}'. Is it a size in "
+                f"SolidWorks' {table} table (e.g. {examples}), with material at the point?"
             )
         feat = binding.wrap(feat, self._mod.IFeature)
+        info = self._wizard_hole_info(feat, kind, size, fit, inch)
+        if inch:
+            self._check_inch_wizard_size(info, inch, size)
         dims, fully_defined = self._pin_wizard_position(feat, point)
-        info = self._wizard_hole_info(feat, kind, size, fit)
         result = self._finish_feature(feat, name or feat.Name, dimensions=dims,
                                       fully_defined=fully_defined, hole=info)
         if coarse:

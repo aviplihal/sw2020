@@ -119,6 +119,16 @@ stray drag in SolidWorks can change the part.
   The Hole Wizard only makes *cosmetic* threads; `thread="modeled"` drills the
   ISO basic minor diameter and cuts a real, printable thread with the Thread
   feature, over the standard depth (2 x D) or all the way through.
+- **Inch holes**: an inch size takes SolidWorks' ANSI Inch tables instead.
+  Tapped: diameter-threads per inch, with an optional series and class:
+  `'7/8-9'`, `'.875-9UNC-3B'`, `'1-1/8-7'`, `'#10-24'` (a decimal must be an
+  exact 1/64 fraction or a numbered size). Clearance, counterbore (socket head
+  cap screw) and countersink (82 degree flat socket head screw) take the screw
+  diameter: `'1/4'`, `'#10'`. SolidWorks picks the tap drill (7/8-9: .7656);
+  give the drill depth from a drawing as text in inches, `depth_in="1.96"`,
+  and the code converts it. `hole` holds every size in mm and as `*_in`. An
+  inch size SolidWorks' table lacks (`'7/8-10'`) fails. Modeled threads are
+  ISO only.
 - **Adding material to a part**: `add_boss_on_face` (a round boss: standoff,
   peg) and `add_extruded_profile_on_face` (a polygon pad or ledge) grow out of
   any planar face. A PCB standoff is a boss plus a blind hole in its top.

@@ -34,6 +34,16 @@ All notable changes to this project are documented here. This project follows
 - A failed tool call no longer marks the part as changed when there was
   nothing to undo.
 
+### Hole Wizard
+- `add_hole_wizard` takes inch sizes and then uses SolidWorks' ANSI Inch
+  tables: tapped holes (`'7/8-9'`, `'.875-9UNC-3B'`, `'1-1/8-7'`, `'#10-24'`;
+  the tap drill comes from the table, the thread class is passed on and read
+  back) and clearance, counterbore and countersink holes by screw diameter
+  (`'1/4'`, `'#10'`). `depth_in` gives a blind depth in inches. `hole`
+  reports the size SolidWorks used and each length also in inches (`*_in`),
+  plus the tap drill depth. A size, thread diameter or class SolidWorks did
+  not take fails loud.
+
 ## [0.16.0] — 2026-10-10
 
 ### Fixed

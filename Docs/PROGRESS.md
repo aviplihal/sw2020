@@ -213,3 +213,21 @@ API findings (all used in `session.py`'s shop-drawing section):
   included a GraphicsRedraw2 + EditRebuild3 retry inside the quiet-UI guard (removed since,
   it did not help). The crash is not explained; the last layout changes were not run on
   SolidWorks after it.
+
+### 2026-10-27 — ANSI Inch Hole Wizard on 2020 (branch `feat/shop-drawings`)
+
+- `HoleWizard5` with `swStandardAnsiInch` (0) and `swStandardAnsiInchTappedHole` (27) works on
+  2020 SP4 with the same Value1..12 vectors as ISO. Clearance (`...ScrewClearances`, 22),
+  counterbore (`...SocketCapScrew`, 9) and countersink (`...FlatSocket82`, 13) work too.
+- Size strings are the table's own names: `7/8-9`, `1/4-20`, `#10-24`, `1-8`, and mixed sizes
+  with a hyphen, `1-1/8-7` (`1 1/8-7` is refused). Clearance sizes are the bare diameter (`1/4`).
+- An unknown size (`7/8-10`) makes `HoleWizard5` return None, as for ISO; `run_guarded` rolls
+  back cleanly. The tool also reads `FastenerSize`, `ThreadDiameter` and `ThreadClass` back.
+- The `ThreadClass` argument ('3B', '2B') is kept and reads back from
+  `IWizardHoleFeatureData2.ThreadClass`; empty gives an empty class.
+- Measured: `.875-9UNC-3B`, blind 1.96 in: tap drill .7656 in (the table stores 49/64 rounded
+  to four places; the cut volume matches .7656, not 49/64), drill depth 49.784 mm, thread depth
+  1.75 in (2 x D) with a cosmetic thread. `1/4-20` through: .201 (#7); `#10-24`: .1495 (#25);
+  `1-1/8-7`: .9844 (63/64); `1-8` blind 1.96: .875, thread depth clamped to the drill depth.
+  Clearance `1/4` normal: .266; counterbore `1/4`: Ø.4375 x .25; countersink `1/4`: Ø.531, 82°.
+- A through tapped hole (no depth) reports `ThreadDepth` 0: threaded all the way.

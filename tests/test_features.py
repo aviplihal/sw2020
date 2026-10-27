@@ -1142,6 +1142,33 @@ def test_wizard_rejects_a_size_it_does_not_know(part):
         part.add_hole_wizard("clearance", "M3.3", "+z", 20, 10, 10)
 
 
+# ANSI Inch: SOLIDWORKS 2020's own table supplies the tap drill (7/8-9: .7656,
+# the 49/64 drill as the table stores it; 1/4-20: the #7 drill, .201).
+
+def test_wizard_inch_tapped_hole_uses_the_ansi_tap_drill(part):
+    part.add_box(100, 100, 60)
+    hole = part.add_hole_wizard("tapped", ".875-9UNC-3B", "+z", 50, 50, 60, depth_in="1.96")
+    info = hole["hole"]
+    assert (info["standard"], info["wizard_size"], info["thread_class"]) == ("ANSI Inch", "7/8-9", "3B")
+    assert (info["tap_drill_diameter_in"], info["tap_drill_depth_in"]) == pytest.approx((0.7656, 1.96))
+    assert (info["thread_diameter_in"], info["thread_depth_in"]) == pytest.approx((0.875, 1.75))
+    assert info["cosmetic_thread"] is True
+    d, depth = 0.7656 * 25.4, 1.96 * 25.4
+    assert abs(600000 - vol(hole) - (math.pi * (d / 2) ** 2 * depth + _drill_point(d))) < 0.5
+
+
+def test_wizard_inch_through_tapped_hole(part):
+    part.add_box(40, 20, 10)
+    info = part.add_hole_wizard("tapped", "1/4-20", "+z", 20, 10, 10)["hole"]
+    assert info["tap_drill_diameter_in"] == pytest.approx(0.201)
+
+
+def test_wizard_rejects_an_inch_size_it_does_not_know(part):
+    part.add_box(100, 100, 60)
+    with pytest.raises(SolidWorksError, match="7/8-10"):
+        part.add_hole_wizard("tapped", "7/8-10", "+z", 50, 50, 60, depth_mm=30)
+
+
 def test_wizard_refuses_a_point_over_an_existing_countersink(part):
     # the face lies at the point's height, but the point falls into the first
     # hole's countersink (2.5 mm out: past the 1.7 bore, within the 3.36 rim):

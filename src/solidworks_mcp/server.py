@@ -425,18 +425,25 @@ async def add_hole_on_face(diameter_mm: float, face: str, x_mm: float, y_mm: flo
 @mcp.tool()
 async def add_hole_wizard(kind: str, size: str, face: str, x_mm: float, y_mm: float, z_mm: float,
                           depth_mm: float | None = None, fit: str = "normal", thread: str = "cosmetic",
-                          name: str | None = None) -> dict:
-    """An ISO hole from SolidWorks' Hole Wizard, sized by its standard tables.
+                          name: str | None = None, depth_in: float | str | None = None) -> dict:
+    """An ISO or ANSI Inch hole from SolidWorks' Hole Wizard, sized by its standard tables.
 
-    kind: 'clearance' (ISO 273), 'counterbore' (socket head cap screw),
-    'countersink' (socket countersunk screw) or 'tapped'; size e.g. 'M3'.
+    kind: 'clearance', 'counterbore' (socket head cap screw), 'countersink'
+    (socket countersunk / 82 degree flat socket head screw) or 'tapped'.
+    size: ISO metric ('M3') uses the ISO tables; an inch size uses the ANSI
+    Inch tables: tapped '7/8-9', '.875-9UNC', '7/8-9 UNC-3B', '1 1/8-7',
+    '#10-24' (diameter-threads per inch; optional series and thread class),
+    other kinds the screw diameter ('1/4', '.250', '#10'). A decimal must be
+    an exact 1/64 fraction or a numbered size. An unknown size fails.
     Centred at (x, y, z) mm on the face through that point; through all, or
-    depth_mm deep. fit: 'close' / 'normal' / 'loose'. For tapped holes
-    thread='modeled' cuts a real, printable ISO thread instead of SolidWorks'
-    cosmetic one. Returns the standard's sizes in `hole` and mass properties.
+    depth_mm (or depth_in, inches, e.g. '1.96') deep: for a tapped hole the
+    tap drill depth. fit: 'close' / 'normal' / 'loose'. Tapped holes get the
+    standard's tap drill and a cosmetic thread; thread='modeled' (ISO only)
+    cuts a real, printable thread instead. Returns the standard's sizes in
+    `hole` (mm, and inches as *_in for ANSI Inch) and mass properties.
     """
     return await _call(_session.add_hole_wizard, kind, size, face, x_mm, y_mm, z_mm,
-                       depth_mm, fit, thread, name)
+                       depth_mm, fit, thread, name, depth_in)
 
 
 @mcp.tool()
