@@ -91,6 +91,14 @@ Rules:
   datum order.
 - `view` records **where the item was on the old drawing**. It is reading context only: it
   does **not** say which view the item goes in on the new drawing (§4.4).
+- A dimension may also carry (added 2026-10-27 for DTN7): `"basic": true` (a theoretically
+  exact value, boxed, `tolerance` null), `"reference": true` (in parentheses, `tolerance`
+  null; checked against the model to the places it shows), and `"prefix"` / `"suffix"`
+  text exactly as written (`"10X"`, `"4X"`, `"MAX"`, `"TYP"`). The drawing must show
+  `10X [36°]`, `(6.78)`, `.033 MAX`; check_drawing reads the box, the parentheses and the
+  texts back, so a lost box or bracket reads `differs`.
+- A `gdt` item may carry `"projected": ".56"`: a projected tolerance zone, shown as
+  `Ø.041 Ⓟ .56` in the frame and read back.
 - A pure module **`drawing_spec.py`** validates this format and converts dimension values to
   mm through `units.py`. The knowledge base stores the spec as JSON and does not depend on
   this module (§8.2).
@@ -179,6 +187,15 @@ A typed list; the first is the drawing's front view, the rest are placed third a
   turn each needs.
 - Sections cut through a model point, vertically or horizontally across their parent
   (`"flip": true` looks the other way). Details circle a model point at a scale.
+- An **angled section** cuts through two model points (`"line_mm": [[x,y,z], [x,y,z]]`) or at
+  `"angle_deg"` on its parent through `through_mm`; it is turned upright (`"up"`: a model
+  axis or vector pointing up the sheet, default along the cutting line) and placed freely.
+  A section or detail may be cut **from a section** (`"from": "section A"`).
+- **Marks** on any view: `{"kind": "center_mark", "at_mm"}`, `{"kind": "point", "id",
+  "at_mm"}`, `{"kind": "circle", "id", "center_mm", "through_mm"}` (a bolt circle),
+  `{"kind": "line", "id", "from_mm", "to_mm", "extend_mm"}` (a centreline). Each point
+  must be a hole or arc centre, on an axis, or on an edge of the model. Placements measure
+  to them by id (§5.2).
 - Each view gets an id (`front`, `right`, `section A`, `detail B`, or its own `id`),
   which placements refer to. The sheet scale is the largest standard one at which the
   views fit (`drawing_spec.layout`). An isometric view is refused.
@@ -191,7 +208,7 @@ it, or on a silhouette line (the side of a cone or cylinder):
 
 | Kind | Placement |
 |---|---|
-| dimension | `{"view", "measure": horizontal / vertical / distance / diameter / radius / angle, "points_mm": [two points] or [one point on the circle], "side": above / below / left / right, "offset_mm": 10}`. A circle seen edge-on gives its diameter |
+| dimension | `{"view", "measure": horizontal / vertical / distance / diameter / radius / angle, "points_mm": [two points] or [one point on the circle], "side": above / below / left / right, "offset_mm": 10}`. A circle seen edge-on gives its diameter. A point may be a mark id of the view: `["BC"]` (bolt circle diameter), `["CL_SLOT", "CL_H1"]` (angle between centrelines), `["O", [x,y,z]]` (centre to an edge), `[[x,y,z], "AX"]` (an edge to a hole axis) |
 | datum, gdt | `{"view", "on": "D13"}` on a placed dimension (a feature of size; the symbol sits on its dimension line) or thread/hole, or `{"view", "point_mm"}` on a surface's edge |
 | finish, thread, hole, local note | `{"view", "point_mm"}`: a leader to that edge |
 | general note | none: they stack at the lower left |

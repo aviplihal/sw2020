@@ -435,6 +435,21 @@ missing dimension is a scrapped part.
 - A datum on a feature of size (a diameter) goes `"on"` its dimension, the way
   an old `-A-` under a size dimension meant; a frame on a thread or hole goes
   `"on"` that callout.
+- **Basic and reference dimensions, `10X`, `MAX`**: say so in the spec item
+  (`"basic": true`, `"reference": true`, `"prefix": "10X"`, `"suffix": "MAX"`);
+  the tool boxes, brackets and writes the text. A frame's `"projected": ".56"`
+  adds Ⓟ .56.
+- **Hole patterns and centres**: give the view `marks`: a `point` at the part
+  centre, a `circle` (bolt circle) through a hole centre, `line`s from the
+  centre through hole centres or along a slot or a radial hole's axis. Then
+  measure to them by id: `["BC"]` diameter, `["CL_SLOT", "CL_H1"]` angle (its
+  text goes between the lines), `["O", [x,y,z]]` centre to the slot floor,
+  `[[x,y,z], "AX"]` a face to a hole axis. Marks must sit on the model.
+- **Holes at an angle on a round part**: an angled section through two hole
+  centres, `{"kind": "section", "from": "front", "line_mm": [p, q], "up": "+y"}`,
+  stands upright with the part's axis up. A section of a section (a plan cut
+  through radial holes) and a detail of a section work too; a detail keeps its
+  own scale (1:1, 2:1) when the sheet is 1:4 or 1:5.
 - Then call `check_drawing(path, spec)`. Fix every `missing` and `differs` and
   make the drawing again. `differs` on a dimension can mean the drawing shows
   the wrong text **or the model is wrong**: it compares the measured model

@@ -255,3 +255,48 @@ API findings (all used in `session.py`'s shop-drawing section):
     gives 15479.31 (drill alone: measured 15337.51, hand 15342.92). SolidWorks' mass properties
     on the saddle-shaped intersection faces run about 0.05 % low; the ring alone and flat-face
     holes match to 0.1 mm3. Bounding box unchanged (327.025 x 88.9 x 327.025).
+
+### 2026-10-27 (later) — Shop drawing features for DTN7 (branch `feat/shop-drawings`)
+
+Verified on SOLIDWORKS 2020 SP4 through the dev bridge on a copy of DTN7
+(`_tmp\drawings\dtn7copy.SLDPRT`) and an inch test box: every item placed and read back `ok`
+by check_drawing, the PDFs rendered and looked at.
+- **View axes**: `IView.ModelToViewTransform.ArrayData[0:9]` holds the view's rotation, view
+  angle included: sheet right = `data[0:9:3]`, up = `data[1:9:3]`, towards the viewer =
+  `data[2:9:3]` (checked on a front view turned 90° and on sections). The old code projected
+  a section's points with its parent's axes, which put section dimensions and details of
+  sections in the wrong place; every view now reads its own axes.
+- **Angled sections**: `CreateSectionViewAt5` takes any sketch line; the section comes out
+  aligned with the cutting line. `IView.RemoveAlignment` then `IView.Angle += turn` turns it
+  upright (read back from the transform).
+- **Sections of sections and details of sections** work. In a **detail view of a section**
+  `IView.SelectEntity(part edge)` returns False, and picking by sheet position selects the
+  view; the view's own edges (`GetVisibleEntities2(None, swViewEntityType_Edge=1)`) select,
+  but they are flat copies (a circle seen edge-on is a straight line), so the copy is found by
+  the point and its direction on the sheet.
+- **Basic**: `IDimensionTolerance.Type = swTolBASIC (1)` boxes the value. **Reference**:
+  `IDisplayDimension.ShowParenthesis = True`. **Prefix/suffix**: `SetText(swDimensionTextPrefix
+  (1) / Suffix (2))`. The written prefix goes before whatever prefix SolidWorks had, and a
+  trailing `<MOD-DIAM>` / `R` is left out when it is read back (a prefix on a diameter or a
+  radius was not tried on 2020).
+- **Projected tolerance zone**: `IGtol.SetPTZHeight2(1, 1, True, ".56")` shows `Ⓟ .56` after
+  the tolerance; `GetPTZHeight2(1, 1)` reads (ok, shown, height) back.
+- **Marks**: sketch entities drawn in the view (`SketchManager.CreatePoint/CreateLine/
+  CreateCircle` with the view active, `AddToDB = True` so they do not snap), styled
+  `ISketchSegment.Style = swLineCENTER (4)`. A dimension to them needs **their view active**
+  (`AddVerticalDimension2` returned None while another view was active). Centre marks:
+  `InsertCenterMark3(swCenterMark_Single, False, False)` on a selected circle. The default
+  template already auto-inserts centre marks (with a dashed circle through hole patterns),
+  which cannot be dimensioned to through the API; the sketch marks can.
+- An angle between two centrelines that meet at a centre: of the sectors that show the
+  angle, the one between the lines' directions is tried first.
+- A **detail view's label** sits some 27 mm under its centre (its outline is wider than the
+  circle); on the bottom row it landed on the title block, so it is moved beside the view.
+- Layout: DTN7 (Ø13.548 × 3.5) with front + A-A + B-B (from A-A) + a 1:1 detail fits at 1:5;
+  front + angled C-C + a 1:2 detail at 1:5. Four big views plus an angled one in a row drop
+  to 1:10: the A sheet's drawing area is 246 × 135 mm.
+- Dimensions on model edges print grey and those on sketch marks black in the PDF (SolidWorks'
+  colours for driven and driving dimensions in a drawing); not changed.
+- Not verified: `angle_deg` cuts (the `line_mm` form was), `radius` to a mark circle, a
+  `center_mark` on a circle that already has an automatic one. The new integration tests in
+  `tests/test_drawing.py` were run as the same calls through the bridge, not under pytest.

@@ -120,3 +120,55 @@ def test_an_unreadable_item_is_never_placed(part, tmp_path):
         part.make_drawing(str(tmp_path / "x.slddrw"), SPEC, VIEWS,
                           {**PLACEMENTS, "D9": {"view": "front", "measure": "horizontal",
                                                 "points_mm": [[0, 10, 12.7], [38.1, 10, 12.7]]}})
+
+
+# --- basic, reference and prefix text; marks; angled sections (DTN7) -------------
+# The same inch box; a point mark at the hole centre, a centreline from the
+# box's corner through it. Verified on SOLIDWORKS 2020 through the bridge on a
+# copy of DTN7 (Docs/PROGRESS.md), not run under pytest there.
+
+MARK_VIEWS = [{"kind": "standard", "model_view": "front", "marks": [
+    {"kind": "point", "id": "H", "at_mm": [28.575, 12.7, 12.7]},
+    {"kind": "line", "id": "CL", "from_mm": [0, 12.7, 12.7], "to_mm": [28.575, 12.7, 12.7]}]},
+    {"kind": "section", "from": "front", "line_mm": [[0, 0, 12.7], [38.1, 25.4, 12.7]], "label": "C"}]
+
+MARK_SPEC = {"units": "in", "items": [
+    {"id": "D1", "kind": "dimension", "value": "1.125", "decimals": 3, "tolerance": None, "basic": True,
+     "prefix": "2X", "between": "left face to hole centre", "status": "read"},
+    {"id": "D2", "kind": "dimension", "value": ".50", "decimals": 2, "tolerance": None, "reference": True,
+     "between": "bottom to hole centre", "status": "read"},
+    {"id": "D3", "kind": "dimension", "value": "1.500", "decimals": 3, "tolerance": None, "suffix": "TYP",
+     "between": "width", "status": "read"},
+]}
+
+MARK_PLACEMENTS = {
+    "D1": {"view": "front", "measure": "horizontal", "points_mm": [[0, 10, 12.7], "H"], "side": "above"},
+    "D2": {"view": "front", "measure": "vertical", "points_mm": [[10, 0, 12.7], "CL"]},
+    "D3": {"view": "front", "measure": "horizontal", "points_mm": [[0, 10, 12.7], [38.1, 10, 12.7]],
+           "side": "below"},
+}
+
+
+def test_basic_reference_and_prefix_dimensions_to_marks_read_back(part, tmp_path):
+    inch_box(part, tmp_path)
+    path = str(tmp_path / "marks.slddrw")
+    made = part.make_drawing(path, MARK_SPEC, MARK_VIEWS, MARK_PLACEMENTS)
+    assert set(made["views"]) == {"front", "section C"}
+    check = part.check_drawing(path, MARK_SPEC)
+    shown = {line["id"]: (line["status"], line.get("shown")) for line in check["items"]}
+    assert shown == {"D1": ("ok", "2X [1.125]"), "D2": ("ok", "(.50)"), "D3": ("ok", "1.500 TYP")}
+    bare = {**MARK_SPEC, "items": [dict(i, basic=False) if i["id"] == "D1" else i for i in MARK_SPEC["items"]]}
+    line = next(i for i in part.check_drawing(path, bare)["items"] if i["id"] == "D1")
+    assert line["status"] == "differs", "a box the spec does not have reads differs"
+
+
+def test_a_mark_must_sit_on_the_model(part, tmp_path):
+    inch_box(part, tmp_path)
+    views = [{"kind": "standard", "model_view": "front", "marks": [
+        {"kind": "point", "id": "X", "at_mm": [20, 20, 12.7]}]}]  # on the face, but no centre, axis or edge
+    with pytest.raises(SolidWorksError, match="no hole or arc centre"):
+        part.make_drawing(str(tmp_path / "x.slddrw"), MARK_SPEC, views,
+                          {**MARK_PLACEMENTS, "D1": {"view": "front", "measure": "horizontal",
+                                                     "points_mm": [[0, 10, 12.7], "X"]},
+                           "D2": {"view": "front", "measure": "vertical",
+                                  "points_mm": [[10, 0, 12.7], [0, 25.4, 12.7]]}})

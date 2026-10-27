@@ -281,9 +281,10 @@ SW_INCHES = 3                               # swLengthUnit_e
 SW_DETAILING_ANSI = 1                       # swDetailingStandard_e
 SW_DECIMAL, SW_FRACTION = 1, 2              # swFractionDisplay_e
 SW_ROUND_HALF_AWAY = 0                      # swUnitsDecimalRounding_e
-SW_TOLERANCES = {"none": 0, "bilateral": 2, "limits": 3, "symmetric": 4}   # swTolType_e
+SW_TOLERANCES = {"none": 0, "basic": 1, "bilateral": 2, "limits": 3, "symmetric": 4}   # swTolType_e
 SW_TOLERANCE_NAMES = {0: "none", 1: "basic", 2: "bilateral", 3: "limits", 4: "symmetric", 5: "min", 6: "max"}
 SW_DIMENSION_TEXT_PREFIX = 1                # swDimensionTextParts_e
+SW_DIMENSION_TEXT_SUFFIX = 2
 SW_ANGULAR_DIMENSION_TYPE = 3               # swDimensionType_e
 SW_ANNOTATION_TYPES = {2: "datum", 4: "dimension", 5: "gtol", 6: "note", 7: "finish"}   # swAnnotationType_e
 SW_ANNOTATION_OWNER_TEMPLATE = 2           # swAnnotationOwner_e: the sheet format (title block)
@@ -310,6 +311,7 @@ SW_SECTION_CHANGE_DIRECTION = 4             # swCreateSectionViewAtOptions_e
 SW_DETAIL_STANDARD = 0                      # swDetViewStyle_e
 SW_DETAIL_CIRCLE = 1                        # swDetCircleShowType_e
 SW_VIEW_ENTITY_SILHOUETTE = 4               # swViewEntityType_e: IView.GetVisibleEntities2
+SW_VIEW_ENTITY_EDGE = 1                     # swViewEntityType_e: model edges as a view shows them
 # swSelectType_e: what a pick on a drawing sheet may land on for a leader: an edge, a face,
 # a silhouette (picked by position, a silhouette comes back as its face)
 SW_SEL_PART_GEOMETRY = {1, 2, 46}

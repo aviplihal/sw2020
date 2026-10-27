@@ -371,3 +371,186 @@ def test_detail_views_go_in_a_row_below():
     out = ds.layout(views, ds.view_orientations("front", "-x"), [20, 150.8, 20], [16, 64, 262, 199])
     (fx, fy), (dx, dy) = out["centres_mm"]["front"], out["centres_mm"]["detail B"]
     assert out["scale"] == (1, 1) and dy < fy
+
+
+# --- basic, reference, prefix/suffix, projected zones (DTN7) ------------------------------
+
+def decorated_dim(value, decimals, tolerance=None, **extra):
+    spec = dim(value, decimals, tolerance)
+    spec["items"][0].update(extra)
+    return first(spec)
+
+
+@pytest.mark.parametrize("extra, value, decimals, text", [
+    ({"basic": True}, "3.936", 3, "[3.936]"),
+    ({"basic": True, "prefix": "10X"}, "36°", 0, "10X [36°]"),
+    ({"reference": True}, "6.78", 2, "(6.78)"),
+    ({"suffix": "MAX"}, ".033", 3, ".033 MAX"),
+    ({"prefix": "4X", "basic": True}, "1.625", 3, "4X [1.625]"),
+])
+def test_basic_reference_and_text_around_a_value(extra, value, decimals, text):
+    item = decorated_dim(value, decimals, **extra)
+    assert ds.expected_text(item) == text
+    show = ds.display_settings(item)
+    assert show["tolerance"] == ("basic" if extra.get("basic") else "none")
+    assert show["reference"] == bool(extra.get("reference"))
+
+
+def test_a_suffix_follows_the_tolerance():
+    item = decorated_dim(".306", 3, {"plus": ".001", "minus": ".001"}, suffix="TYP")
+    assert ds.expected_text(item) == ".306 ±.001 TYP"
+
+
+@pytest.mark.parametrize("extra, message", [
+    ({"basic": True, "reference": True}, "basic or reference, not both"),
+    ({"basic": "yes"}, "true or false"),
+    ({"prefix": ""}, "prefix is the text"),
+    ({"suffix": "MAX\nTYP"}, "suffix is the text"),
+])
+def test_bad_decorations_are_refused(extra, message):
+    with pytest.raises(SolidWorksError, match=message):
+        decorated_dim("3.936", 3, **extra)
+
+
+def test_a_basic_dimension_has_no_tolerance():
+    with pytest.raises(SolidWorksError, match="no tolerance"):
+        decorated_dim("3.936", 3, {"plus": ".005", "minus": ".005"}, basic=True)
+
+
+def test_a_lost_box_or_bracket_reads_differs():
+    basic = decorated_dim("36°", 0, basic=True, prefix="10X")
+    read = {"value": 36.0, "angle": True, "decimals": 0, "tolerance": "basic", "prefix": "10X"}
+    assert ds.compare_dimension(basic, read)["status"] == "ok"
+    assert ds.compare_dimension(basic, {**read, "tolerance": "none"})["status"] == "differs"
+    assert ds.compare_dimension(basic, {**read, "prefix": ""})["status"] == "differs"
+    ref = decorated_dim(".75", 2, reference=True)
+    read = {"value": .7515, "decimals": 2, "tolerance": "none", "reference": True}
+    assert ds.compare_dimension(ref, read)["status"] == "ok", "a reference value is the model rounded"
+    assert ds.compare_dimension(ref, {**read, "reference": False})["status"] == "differs"
+    assert ds.compare_dimension(ref, {**read, "value": .7600})["status"] == "differs"
+
+
+def test_a_projected_tolerance_zone_is_part_of_the_frame():
+    spec = {"units": "in", "items": [{"id": "G7", "kind": "gdt", "characteristic": "position",
+                                      "tolerance": "Ø.041", "modifier": None, "projected": ".56",
+                                      "datums": ["A", "B", "C"], "feature": "4X radial", "status": "read"}]}
+    got = {"name": "SPEC_G7", "characteristic": "position", "tolerance": "Ø.041", "modifier": None,
+           "datums": ["A", "B", "C"], "projected": ".56"}
+    lines = ds.compare(spec, {"gtols": [got]})["items"]
+    assert lines[0]["status"] == "ok" and lines[0]["spec"] == "position | Ø.041 Ⓟ .56 | A | B | C"
+    assert ds.compare(spec, {"gtols": [{**got, "projected": None}]})["items"][0]["status"] == "differs"
+    spec["items"][0]["projected"] = "0.56 in"
+    with pytest.raises(SolidWorksError, match="projected"):
+        ds.validate(spec)
+
+
+# --- angled sections, sections of sections, marks ---------------------------------------
+
+FRONT_TOP = {"kind": "standard", "model_view": "top", "up": "+x"}  # DTN7: looking down the axis, slot up
+
+
+def test_an_angled_section_through_two_points_stands_upright():
+    a, b = [132.284, 47.625, -96.109], [-132.284, 47.625, 96.109]
+    views = ds.validate_views([FRONT_TOP, {"kind": "section", "from": "front", "line_mm": [a, b], "up": "+y",
+                                           "label": "C"}])
+    assert views[1]["cut"] == "angled" and views[1]["through_mm"] == a
+    o = ds.view_orientations("top", "+x")
+    axes = ds.plan_axes(views, o)["section C"]
+    assert axes["up"] == pytest.approx((0, 1, 0))  # the part's axis up the sheet
+    along = [math.cos(math.radians(36)), 0, -math.sin(math.radians(36))]
+    assert abs(ds._dot(axes["right"], along)) == pytest.approx(1.0)  # along the cutting line
+    # -36 deg from +x lies up and left with +x up and +z right: the line falls at -54 deg on the sheet
+    assert ds.cut_angle_deg(views[1], o["front"]) == pytest.approx(-54.0, abs=1e-3)
+
+
+def test_a_section_of_a_section_looks_across_its_parent():
+    views = ds.validate_views([FRONT_TOP, {"kind": "section", "from": "front", "cut": "vertical", "label": "A",
+                                           "through_mm": [0, 0, 0]},
+                               {"kind": "section", "from": "section A", "cut": "vertical", "label": "B",
+                                "through_mm": [0, 47.625, 0]}])
+    axes = ds.plan_axes(views, ds.view_orientations("top", "+x"))
+    # section A looks across the front's right (z): the axis y runs across the sheet, as on 2020
+    assert axes["section A"]["right"] == (0, 1, 0) and axes["section A"]["up"] == (1, 0, 0)
+    # section B, cut at a height y in A, looks along the axis again: a plan
+    assert abs(axes["section B"]["towards_viewer"][1]) == 1
+
+
+@pytest.mark.parametrize("view, message", [
+    ({"cut": "vertical", "angle_deg": 30, "through_mm": [0, 0, 0]}, "give one of"),
+    ({"cut": "vertical", "through_mm": [0, 0, 0], "up": "+y"}, "up turns an angled section"),
+    ({"line_mm": [[0, 0, 0], [0, 0, 0]]}, "the same point"),
+    ({"line_mm": [[0, 0, 0], [1, 0, 0]], "through_mm": [0, 0, 0]}, "leave through_mm out"),
+    ({"angle_deg": "36", "through_mm": [0, 0, 0]}, "angle_deg is"),
+])
+def test_bad_cuts_are_refused(view, message):
+    with pytest.raises(SolidWorksError, match=message):
+        ds.validate_views([FRONT_TOP, {"kind": "section", "from": "front", "label": "A", **view}])
+
+
+def test_the_cutting_line_is_clipped_to_the_view():
+    ends = ds.clip_line((5, 5), (1, 1), (0, 0, 10, 20))
+    assert ends[0] == pytest.approx((0, 0)) and ends[1] == pytest.approx((10, 10))
+    assert ds.clip_line((5, 30), (1, 0), (0, 0, 10, 20)) is None
+    vertical = ds.clip_line((3, 4), (0, 1), (0, 0, 10, 20))
+    assert vertical[0] == pytest.approx((3, 0)) and vertical[1] == pytest.approx((3, 20))
+
+
+MARKS = [{"kind": "point", "id": "O", "at_mm": [0, 88.9, 0]},
+         {"kind": "circle", "id": "BC", "center_mm": [0, 88.9, 0], "through_mm": [119.27, 88.9, 38.75]},
+         {"kind": "line", "id": "CL1", "from_mm": [0, 88.9, 0], "to_mm": [119.27, 88.9, 38.75]},
+         {"kind": "line", "id": "CL2", "from_mm": [0, 88.9, 0], "to_mm": [99.97, 88.9, 0], "extend_mm": 0},
+         {"kind": "center_mark", "at_mm": [0, 85.83, 0]}]
+
+
+def test_marks_are_checked_and_carry_ids():
+    views = ds.validate_views([{**FRONT_TOP, "marks": MARKS}])
+    marks = views[0]["marks"]
+    assert [m["id"] for m in marks] == ["O", "BC", "CL1", "CL2", None]
+    assert marks[2]["extend_mm"] == 5.0 and marks[3]["extend_mm"] == 0.0
+    with pytest.raises(SolidWorksError, match="used twice"):
+        ds.validate_views([{**FRONT_TOP, "marks": MARKS + [{"kind": "point", "id": "O", "at_mm": [0, 0, 0]}]}])
+    with pytest.raises(SolidWorksError, match="needs an id"):
+        ds.validate_views([{**FRONT_TOP, "marks": [{"kind": "line", "from_mm": [0, 0, 0], "to_mm": [1, 0, 0]}]}])
+    with pytest.raises(SolidWorksError, match="kind is one of"):
+        ds.validate_views([{**FRONT_TOP, "marks": [{"kind": "arc", "id": "X"}]}])
+
+
+def basic_spec(*items):
+    return ds.validate({"units": "in", "items": [
+        {"id": sid, "kind": "dimension", "value": value, "decimals": decimals, "tolerance": None,
+         "basic": True, "between": "x", "status": "read"} for sid, value, decimals in items]})
+
+
+def test_placements_measure_to_marks_of_their_view():
+    views = ds.validate_views([{**FRONT_TOP, "marks": MARKS}])
+    marks = {v["id"]: v["marks"] for v in views}
+    checked = basic_spec(("D7", "3.936", 3), ("D8", "9.875", 3), ("D9", "18°", 0))
+    places = ds.validate_placements({
+        "D7": {"view": "front", "measure": "vertical", "points_mm": ["O", [99.9744, 88.9, 0]]},
+        "D8": {"view": "front", "measure": "diameter", "points_mm": ["BC"]},
+        "D9": {"view": "front", "measure": "angle", "points_mm": ["CL2", "CL1"]}}, checked, {"front"}, marks)
+    assert places["D7"]["points_mm"][0] == "O" and places["D8"]["points_mm"] == ["BC"]
+    for bad, message in [({"measure": "diameter", "points_mm": ["CL1"]}, "measures to a circle"),
+                         ({"measure": "diameter", "points_mm": ["XX"]}, "no mark of view")]:
+        with pytest.raises(SolidWorksError, match=message):
+            ds.validate_placements({"D8": {"view": "front", **bad}, "D7": places["D7"], "D9": places["D9"]},
+                                   checked, {"front"}, marks)
+    with pytest.raises(SolidWorksError, match="measures to a line"):
+        ds.validate_placements({"D9": {"view": "front", "measure": "angle", "points_mm": ["O", "CL1"]},
+                                "D7": places["D7"], "D8": places["D8"]}, checked, {"front"}, marks)
+
+
+def test_the_angle_text_goes_between_centrelines_from_a_centre():
+    up, right = ((0.0, 0.0), (0.0, 1.0)), ((0.0, 0.0), (0.95, 0.31))  # a slot up, a hole 18 deg off it
+    assert ds.ray_side((3, 9), up, right) > 0 > ds.ray_side((-3, -9), up, right)
+
+
+def test_an_angled_section_takes_the_free_spot_that_keeps_the_scale():
+    views = ds.validate_views([FRONT_TOP, {"kind": "section", "from": "front", "line_mm": [
+        [132.284, 47.625, -96.109], [-132.284, 47.625, 96.109]], "up": "+y", "label": "C"},
+        {"kind": "detail", "from": "section C", "label": "E", "center_mm": [132.3, 47.6, -96.1],
+         "radius_mm": 15, "scale": "1:2"}])
+    out = ds.layout(views, ds.view_orientations("top", "+x"), [344.12, 88.9, 344.12], [16, 64, 262, 199])
+    assert out["scale"] == (1, 5)
+    (fx, fy), (cx, cy), (dx, dy) = (out["centres_mm"][k] for k in ("front", "section C", "detail E"))
+    assert cx > fx and dy < fy

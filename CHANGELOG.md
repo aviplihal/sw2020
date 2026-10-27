@@ -31,6 +31,29 @@ All notable changes to this project are documented here. This project follows
   behind it is not the spec's value.
 - `drawing_spec`: validates the drawing-spec format and reads inch values
   exactly as written (`.375`, `5 15/16`, `.500/.498`, `45°`).
+- Spec dimensions can be BASIC (boxed), REFERENCE (in parentheses) and carry
+  prefix/suffix text (`10X [36°]`, `R.033 MAX`); frames can carry a projected
+  tolerance zone (`Ø.041 Ⓟ .56`). make_drawing shows them and check_drawing
+  reads them back, so a lost box or bracket reads `differs`. A reference value
+  is checked against the model to the places it shows.
+- Angled section views: cut through two model points (`line_mm`) or at an
+  angle (`angle_deg`), turned upright (`up`) and placed freely. Sections and
+  details can be cut from a section view.
+- View `marks`: centre marks, centreline points, bolt circles and centrelines,
+  checked against the model, which dimensions measure to by id (a basic bolt
+  circle diameter, angles between centrelines, centre to a slot floor, a face
+  to a hole axis).
+- Views that are not aligned with another (angled sections, details) take the
+  free spot on the sheet that keeps the largest scale; a detail's label that
+  would land on the title block goes beside the view.
+
+### Fixed (shop drawings)
+- Points in a section view were projected with its parent's axes, so
+  dimensions and details in a section went to the wrong place. Every view's
+  axes now come from the view itself.
+- A dimension in a detail view of a section could not select its edges
+  (SOLIDWORKS 2020 refuses the part's edge there); the view's own copy of the
+  edge is selected instead.
 - A failed tool call no longer marks the part as changed when there was
   nothing to undo.
 

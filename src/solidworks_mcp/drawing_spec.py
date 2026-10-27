@@ -33,7 +33,12 @@ FIELDS = {  # required keys per kind (besides id, kind, status)
     "gdt": ("characteristic", "tolerance", "modifier", "datums", "feature"),
     "note": ("text",),
 }
-OPTIONAL_FIELDS = {"thread": ("depth",), "dimension": ()}
+# A dimension can be BASIC (boxed, theoretically exact, no tolerance), a
+# REFERENCE (in parentheses), and carry text before or after its value as
+# written ("10X", "4X", "MAX", "TYP"). A frame can carry a projected tolerance
+# zone: its height as written (".56"), shown after Ⓟ.
+OPTIONAL_FIELDS = {"thread": ("depth",), "dimension": ("basic", "reference", "prefix", "suffix"),
+                   "gdt": ("projected",)}
 
 GDT_CHARACTERISTICS = (
     "straightness", "flatness", "circularity", "cylindricity", "profile of a line",
@@ -193,6 +198,11 @@ def validate(spec) -> dict:
             if not isinstance(datums, list) or len(datums) > 3 or not all(
                     isinstance(d, str) and re.fullmatch(r"[A-Z]{1,2}(-[A-Z]{1,2})?", d) for d in datums):
                 raise SolidWorksError(f"{where}: datums is a list of up to 3 labels in frame order, such as [\"A\", \"B\"].")
+            projected = item.get("projected")
+            if projected is not None and (not isinstance(projected, str)
+                                          or not re.fullmatch(_DECIMAL, projected.strip())):
+                raise SolidWorksError(f"{where}: projected is the projected tolerance zone's height as written, "
+                                      f"such as '.56' (got {projected!r}).")
         out.append(entry)
     return {"items": out}
 
@@ -242,6 +252,22 @@ def _validate_dimension(item, where) -> Value:
         value.tol_places = max(_places(tolerance["plus"].lstrip("+-")), _places(tolerance["minus"].lstrip("+-")))
     else:
         value.display = None
+    value.basic, value.reference = item.get("basic", False), item.get("reference", False)
+    for key in ("basic", "reference"):
+        if not isinstance(item.get(key, False), bool):
+            raise SolidWorksError(f"{where}: {key} is true or false.")
+    if (value.basic or value.reference) and tolerance is not None:
+        raise SolidWorksError(f"{where}: a {'basic' if value.basic else 'reference'} dimension has no tolerance "
+                              "(tolerance null).")
+    if value.basic and value.reference:
+        raise SolidWorksError(f"{where}: a dimension is basic or reference, not both.")
+    for key in ("prefix", "suffix"):
+        text = item.get(key)
+        if text is not None and (not isinstance(text, str) or not text.strip() or "\n" in text):
+            raise SolidWorksError(f"{where}: {key} is the text as written on one line, such as "
+                                  f"{'10X' if key == 'prefix' else 'MAX'} (got {text!r}).")
+    value.prefix = (item.get("prefix") or "").strip()
+    value.suffix = (item.get("suffix") or "").strip()
     return value
 
 
@@ -322,16 +348,27 @@ def format_fraction(number, denominator: int = FRACTION_DENOMINATOR) -> str:
 
 
 def expected_text(item) -> str:
-    """What the drawing must show for a read dimension, in the spec's own style."""
+    """What the drawing must show for a read dimension, in the spec's own style:
+    a basic value boxed as [3.936], a reference one as (6.78), with its prefix
+    and suffix text around it ('10X [36°]', '.033 MAX')."""
     value = item["parsed"]
     if value.format == "limits":
-        return f"{format_decimal(value.upper, value.places)}/{format_decimal(value.lower, value.places)}"
-    base = _plain_text(value)
-    if value.display == "symmetric":
-        return f"{base} ±{format_decimal(value.plus, value.tol_places)}"
-    if value.display == "bilateral":
-        return f"{base} +{format_decimal(value.plus, value.tol_places)}/-{format_decimal(value.minus, value.tol_places)}"
-    return base
+        core = f"{format_decimal(value.upper, value.places)}/{format_decimal(value.lower, value.places)}"
+    else:
+        base = _plain_text(value)
+        if value.display == "symmetric":
+            core = f"{base} ±{format_decimal(value.plus, value.tol_places)}"
+        elif value.display == "bilateral":
+            core = f"{base} +{format_decimal(value.plus, value.tol_places)}/-{format_decimal(value.minus, value.tol_places)}"
+        else:
+            core = base
+    return decorated(core, value.basic, value.reference, value.prefix, value.suffix)
+
+
+def decorated(core: str, basic: bool, reference: bool, prefix: str = "", suffix: str = "") -> str:
+    """A dimension's text with its box or parentheses and its prefix/suffix text."""
+    text = f"[{core}]" if basic else f"({core})" if reference else core
+    return " ".join(t for t in (prefix, text, suffix) if t)
 
 
 def _plain_text(value: Value) -> str:
@@ -348,7 +385,8 @@ def display_settings(item) -> dict:
     value = item["parsed"]
     out = {"angle": value.kind == "angle", "fraction": value.format == "fraction",
            "decimals": 0 if value.format == "fraction" else (value.places or 0),
-           "tolerance": value.display or "none"}
+           "tolerance": "basic" if value.basic else value.display or "none", "reference": value.reference,
+           "prefix": to_sw_text(value.prefix), "suffix": to_sw_text(value.suffix)}
     if value.display:
         out.update(plus_in=float(value.plus), minus_in=float(value.minus), tol_decimals=value.tol_places)
     if value.format == "limits":
@@ -359,7 +397,14 @@ def display_settings(item) -> dict:
 def shown_text(read: dict) -> str:
     """The text a read-back dimension shows, built from its read-back settings:
     {'value': in or deg, 'angle', 'fraction', 'decimals', 'denominator',
-     'tolerance': none|bilateral|symmetric|limits|other, 'tol_min', 'tol_max', 'tol_decimals'}."""
+     'tolerance': none|basic|bilateral|symmetric|limits|other, 'tol_min', 'tol_max', 'tol_decimals',
+     'reference', 'prefix', 'suffix'} (prefix and suffix as written, without the
+    Ø or R SolidWorks adds itself)."""
+    return decorated(_shown_core(read), read.get("tolerance") == "basic", bool(read.get("reference")),
+                     (read.get("prefix") or "").strip(), (read.get("suffix") or "").strip())
+
+
+def _shown_core(read: dict) -> str:
     value, places = read["value"], read.get("decimals", 0)
     if read.get("angle"):
         base = f"{format_decimal(value, places)}°"
@@ -374,7 +419,7 @@ def shown_text(read: dict) -> str:
         return f"{base} ±{format_decimal(abs(read['tol_max']), tp)}"
     if kind == "bilateral":
         return f"{base} +{format_decimal(read['tol_max'], tp)}/-{format_decimal(-read['tol_min'], tp)}"
-    if kind not in ("none", None):
+    if kind not in ("none", "basic", None):
         return f"{base} ({kind} tolerance)"
     return base
 
@@ -390,13 +435,24 @@ def compare_dimension(item, read: dict) -> dict:
     if value.format == "limits":
         if not value.lower - EXACT_IN <= actual <= value.upper + EXACT_IN:
             notes.append(f"the model measures {float(actual):.5f}, outside {value.text}")
-    elif abs(actual - value.nominal) > (EXACT_DEG if value.kind == "angle" else EXACT_IN):
+    elif abs(actual - value.nominal) > _model_tolerance(value):
         unit = "°" if value.kind == "angle" else " in"
         notes.append(f"the model measures {float(actual):.5f}{unit}, spec nominal {float(value.nominal):.5f}{unit}")
     if (value.kind == "angle") != bool(read.get("angle")):
         notes.append("an angle is shown as a length, or the other way round")
     return {"status": "differs" if notes else "ok", "shown": got, "spec": want,
             **({"detail": "; ".join(notes)} if notes else {})}
+
+
+def _model_tolerance(value: Value) -> Fraction | float:
+    """How far the model may be from a dimension's nominal: exact, except for a
+    reference dimension, which is the model rounded to the places it shows."""
+    exact = EXACT_DEG if value.kind == "angle" else EXACT_IN
+    if value.reference and value.format != "fraction":
+        return Fraction(1, 2 * 10 ** (value.places or 0)) + Fraction(exact)
+    if value.reference:
+        return Fraction(1, 2 * FRACTION_DENOMINATOR) + Fraction(exact)
+    return exact
 
 
 def _norm_number_text(text: str) -> str:
@@ -497,65 +553,88 @@ def view_extent(size_mm, orientation) -> tuple:
 SCALES = ((4, 1), (2, 1), (1, 1), (1, 2), (1, 4), (1, 5), (1, 10), (1, 20))
 VIEW_GAP_MM = 25.0  # paper between views, room for the dimensions on both
 EDGE_MM = 12.0  # paper between the views and the edge of the drawing area
+DETAIL_LABEL_MM = 14.0  # a detail view's two-line label under it (SolidWorks' outline is wider than the circle)
+VIEW_LABEL_MM = 14.0  # from a section's or detail's outline to below its label ('SECTION A-A', 'SCALE 1 : 4')
 
 
 def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
     """Sheet scale and view centres for checked `views` in `area_mm`
     ([x0, y0, x1, y1] on the sheet, mm). Third-angle grid around the front view:
     top above, bottom below, left and right beside; sections cut vertically go
-    in further columns on the front's row, horizontal cuts above/below their
-    parent's column; detail views in a last column. Largest scale that fits."""
+    in further columns on their parent's row, horizontal cuts above/below their
+    parent's column. Views that are not aligned with another (angled sections,
+    details) each take the free cell that keeps the largest scale: details a
+    row below everything first, an angled section a new column first. Largest
+    scale that fits."""
     cells = {}  # view id -> (col, row)
     for view in views:
         if view["kind"] == "standard":
             cells[view["id"]] = {"front": (0, 0), "top": (0, -1), "bottom": (0, 1),
                                  "left": (-1, 0), "right": (1, 0)}[view["direction"]]
     extra_col = max([c for c, _ in cells.values()] + [0]) + 1
+    axes = plan_axes(views, orientations)
     for view in views:
-        if view["kind"] == "section":
+        if view["kind"] == "section" and view["cut"] != "angled":
             col, row = cells[view["from"]]
             if view["cut"] == "vertical":
-                cells[view["id"]] = (extra_col, row)
-                extra_col += 1
+                cells[view["id"]] = (max(extra_col, max(c for c, _ in cells.values()) + 1), row)
             else:
                 free = [r for r in (row + 1, row - 1) if (col, r) not in cells.values()]
                 if not free:
                     raise SolidWorksError(f"No room above or below {view['from']!r} for {view['id']!r}; "
                                           "cut vertically, or leave out the top/bottom view.")
                 cells[view["id"]] = (col, free[0])
-    details = [v for v in views if v["kind"] == "detail"]
-    below = 1 + max([r for _, r in cells.values()] + [0])  # a free row under everything: details go there
-    for n, view in enumerate(details):
-        cells[view["id"]] = (n, below)
 
     def extent(view, scale):
         if view["kind"] == "detail":
             side = 2 * view["radius_mm"] * view["scale"][0] / view["scale"][1]
             return side, side
-        if view["kind"] == "section":
-            parent = next(v for v in views if v["id"] == view["from"])
-            key = parent.get("direction", "front")
-            side = "right" if view["cut"] == "vertical" else "top"
-            w, h = view_extent(size_mm, _turned(orientations, key, side))
-        else:
-            w, h = view_extent(size_mm, orientations[view["direction"]])
+        w, h = view_extent(size_mm, axes[view["id"]])
         return w * scale, h * scale
 
     x0, y0, x1, y1 = area_mm
-    for num, den in SCALES:
-        scale = num / den
-        cols, rows = {}, {}
-        for view in views:
-            w, h = extent(view, scale)
-            col, row = cells[view["id"]]
-            cols[col] = max(cols.get(col, 0), w)
-            rows[row] = max(rows.get(row, 0), h)
-        width = sum(cols.values()) + VIEW_GAP_MM * (len(cols) - 1) + 2 * EDGE_MM
-        height = sum(rows.values()) + VIEW_GAP_MM * (len(rows) - 1) + 2 * EDGE_MM
-        if width <= x1 - x0 and height <= y1 - y0:
-            break
-    else:
+
+    def fit(placed):
+        """(index in SCALES, cols, rows, width, height) of the largest scale at which `placed` fits."""
+        for n, (num, den) in enumerate(SCALES):
+            cols, rows = {}, {}
+            for view in views:
+                if view["id"] not in placed:
+                    continue
+                w, h = extent(view, num / den)
+                col, row = placed[view["id"]]
+                cols[col] = max(cols.get(col, 0), w)
+                rows[row] = max(rows.get(row, 0), h)
+            width = sum(cols.values()) + VIEW_GAP_MM * (len(cols) - 1) + 2 * EDGE_MM
+            height = sum(rows.values()) + VIEW_GAP_MM * (len(rows) - 1) + 2 * EDGE_MM
+            if width <= x1 - x0 and height <= y1 - y0:
+                return n, cols, rows, width, height
+        return None
+
+    for view in views:
+        if view["id"] in cells:
+            continue
+        taken = set(cells.values())
+        used_cols = sorted({c for c, _ in taken}) or [0]
+        used_rows = sorted({r for _, r in taken}) or [0]
+        below, beside = used_rows[-1] + 1, used_cols[-1] + 1
+        first = [(used_cols[0], below)] if view["kind"] == "detail" else [(beside, cells[view["from"]][1])]
+        candidates = first + [(c, r) for r in used_rows + [below] for c in used_cols + [beside]
+                              if (c, r) not in taken and (c, r) not in first]
+        best = None
+        for cell in candidates:
+            got = fit({**cells, view["id"]: cell})
+            if got is not None and (best is None or got[0] < best[0]):
+                best = (got[0], cell)
+        if best is None:
+            raise SolidWorksError("The views do not fit the sheet even at 1:20.")
+        cells[view["id"]] = best[1]
+
+    got = fit(cells)
+    if got is None:
         raise SolidWorksError("The views do not fit the sheet even at 1:20.")
+    n, cols, rows, width, height = got
+    num, den = SCALES[n]
     left = x0 + (x1 - x0 - width) / 2 + EDGE_MM
     col_x, x = {}, left
     for col in sorted(cols):
@@ -566,16 +645,66 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
     for row in sorted(rows):  # row -1 (top view) is highest on the sheet
         row_y[row] = y - rows[row] / 2
         y -= rows[row] + VIEW_GAP_MM
-    if details:  # the detail row sits at the bottom of the area: the dimensions under the views need the room
-        row_y[below] = y0 + EDGE_MM + rows[below] / 2
+    last = max(rows)
+    if all(v["kind"] == "detail" for v in views if cells[v["id"]][1] == last) and len(rows) > 1:
+        # a row of details only sits at the bottom of the area: the dimensions under the views need
+        # the room; its labels ('DETAIL D', 'SCALE 1 : 1') go under it, above the title block
+        row_y[last] = min(y0 + EDGE_MM + DETAIL_LABEL_MM + rows[last] / 2, row_y[last])
     return {"scale": (num, den), "centres_mm": {v["id"]: (round(col_x[cells[v["id"]][0]], 3),
                                                           round(row_y[cells[v["id"]][1]], 3)) for v in views}}
 
 
-def _turned(orientations, parent: str, side: str) -> dict:
-    """The orientation of a view projected from `parent` towards `side`; for
-    the front it is that standard view, otherwise approximated by the front's."""
-    return orientations[side] if parent == "front" else orientations.get(parent, orientations["front"])
+def plan_axes(views, orientations) -> dict:
+    """Each planned view's sheet-right, sheet-up and line-of-sight model axes,
+    for its size on the sheet (signs aside: a section may look either way).
+    A vertical cut looks across its parent's right, a horizontal one across its
+    up; an angled cut across its own line, with `up` along the line or as given.
+    A detail shows its parent's axes. Pure."""
+    out = {}
+    for view in views:
+        if view["kind"] == "standard":
+            o = orientations[view["direction"]]
+            out[view["id"]] = {"right": o["right"], "up": o["up"], "towards_viewer": o["towards_viewer"]}
+            continue
+        parent = out[view["from"]]
+        if view["kind"] == "detail":
+            out[view["id"]] = dict(parent)
+            continue
+        r, u, t = parent["right"], parent["up"], parent["towards_viewer"]
+        if view["cut"] == "vertical":
+            out[view["id"]] = {"right": t, "up": u, "towards_viewer": r}
+            continue
+        if view["cut"] == "horizontal":
+            out[view["id"]] = {"right": r, "up": t, "towards_viewer": u}
+            continue
+        angle = math.radians(cut_angle_deg(view, parent))
+        along = tuple(math.cos(angle) * a + math.sin(angle) * b for a, b in zip(r, u))
+        sight = tuple(-math.sin(angle) * a + math.cos(angle) * b for a, b in zip(r, u))
+        up = along
+        if view.get("up") is not None:
+            w = view["up"]
+            w = [c - _dot(w, sight) * s for c, s in zip(w, sight)]  # the part of it in the section's plane
+            n = math.sqrt(_dot(w, w))
+            if n < 1e-9:
+                raise SolidWorksError(f"{view['id']}: up points along the section's line of sight; give a direction "
+                                      "in the cutting plane.")
+            up = tuple(c / n for c in w)
+        out[view["id"]] = {"right": _cross(up, sight), "up": up, "towards_viewer": sight}
+    return out
+
+
+def cut_angle_deg(view, parent_axes) -> float:
+    """An angled cut's angle on its parent's sheet (anticlockwise from the
+    parent's horizontal): angle_deg, or the angle of line_mm as the parent shows it."""
+    if view.get("line_mm") is None:
+        return view["angle_deg"]
+    a, b = view["line_mm"]
+    d = [q - p for p, q in zip(a, b)]
+    x, y = _dot(d, parent_axes["right"]), _dot(d, parent_axes["up"])
+    if math.hypot(x, y) < 1e-6:
+        raise SolidWorksError(f"{view['id']}: the two points of line_mm lie one behind the other in the "
+                              "parent view; pick points apart on the sheet.")
+    return math.degrees(math.atan2(y, x))
 
 
 def angle_text_spot(line1, line2, nominal_deg: float, distance_mm: float, away_from=None) -> tuple:
@@ -614,6 +743,33 @@ def angle_text_spots(line1, line2, nominal_deg: float, distance_mm: float, away_
     return spots
 
 
+def clip_line(point, direction, rect) -> tuple | None:
+    """The two ends of the line through `point` along `direction` where it
+    crosses the rectangle (x0, y0, x1, y1), or None when it misses. Pure."""
+    (px, py), (dx, dy) = point, _unit2(direction)
+    lo, hi = -math.inf, math.inf
+    for p, d, a, b in ((px, dx, rect[0], rect[2]), (py, dy, rect[1], rect[3])):
+        if abs(d) < 1e-12:
+            if not a <= p <= b:
+                return None
+            continue
+        t1, t2 = sorted(((a - p) / d, (b - p) / d))
+        lo, hi = max(lo, t1), min(hi, t2)
+    if hi - lo < 1e-9:
+        return None
+    return (px + lo * dx, py + lo * dy), (px + hi * dx, py + hi * dy)
+
+
+def ray_side(point, line1, line2) -> float:
+    """How far `point` lies into the sector between two rays ((start, direction)
+    on the sheet), along the bisector from the first ray's start: centrelines
+    drawn out from a centre measure the angle between their directions. Pure."""
+    (p, d1), (_, d2) = line1, line2
+    a, b = _unit2(d1), _unit2(d2)
+    bisector = _unit2((a[0] + b[0], a[1] + b[1])) if math.hypot(a[0] + b[0], a[1] + b[1]) > 1e-9 else (-a[1], a[0])
+    return (point[0] - p[0]) * bisector[0] + (point[1] - p[1]) * bisector[1]
+
+
 def _unit2(v) -> tuple:
     n = math.hypot(*v)
     return v[0] / n, v[1] / n
@@ -641,14 +797,14 @@ def validate_views(views) -> list:
     views = DEFAULT_VIEWS if views is None else views
     if not isinstance(views, list) or not views:
         raise SolidWorksError("views is a non-empty list; the first is the front (most descriptive) view.")
-    out, ids, standard = [], set(), set()
+    out, ids, standard, mark_ids = [], set(), set(), set()
     for n, view in enumerate(views):
         where = f"view {n + 1}"
         if not isinstance(view, dict):
             raise SolidWorksError(f"{where} is not an object.")
         kind = view.get("kind")
         if kind == "standard" and n == 0:
-            allowed = {"kind", "direction", "model_view", "up", "id"}
+            allowed = {"kind", "direction", "model_view", "up", "id", "marks"}
             if view.get("direction", "front") != "front":
                 raise SolidWorksError("The first view is the drawing's front view (direction \"front\"), the most "
                                       "descriptive one. Choose what it shows with model_view and up.")
@@ -663,7 +819,7 @@ def validate_views(views) -> list:
             entry = {"kind": kind, "direction": "front", "model_view": model_view, "up": up,
                      "id": view.get("id") or "front"}
         elif kind == "standard":
-            allowed = {"kind", "direction", "id"}
+            allowed = {"kind", "direction", "id", "marks"}
             direction = view.get("direction")
             if direction not in THIRD_ANGLE_SIDE:
                 raise SolidWorksError(f"{where}: a projected view's direction is top, bottom, left or right "
@@ -673,17 +829,16 @@ def validate_views(views) -> list:
             standard.add(direction)
             entry = {"kind": kind, "direction": direction, "id": view.get("id") or direction}
         elif kind == "section":
-            allowed = {"kind", "from", "cut", "through_mm", "label", "id", "flip"}
-            if view.get("cut") not in ("vertical", "horizontal"):
-                raise SolidWorksError(f"{where}: cut is \"vertical\" or \"horizontal\" (the cutting line on the parent view).")
+            allowed = {"kind", "from", "cut", "through_mm", "angle_deg", "line_mm", "up", "label", "id", "flip",
+                       "marks"}
             label = view.get("label")
             if not isinstance(label, str) or not re.fullmatch(r"[A-Z]{1,2}", label):
                 raise SolidWorksError(f"{where}: label is the section's letter, such as \"A\".")
-            entry = {"kind": kind, "from": view.get("from"), "cut": view["cut"], "label": label,
-                     "through_mm": _point(view.get("through_mm"), f"{where}: through_mm"),
+            entry = {"kind": kind, "from": view.get("from"), "label": label,
                      "flip": bool(view.get("flip", False)), "id": view.get("id") or f"section {label}"}
+            entry.update(_section_cut(view, where))
         elif kind == "detail":
-            allowed = {"kind", "from", "center_mm", "radius_mm", "scale", "label", "id"}
+            allowed = {"kind", "from", "center_mm", "radius_mm", "scale", "label", "id", "marks"}
             label = view.get("label")
             if not isinstance(label, str) or not re.fullmatch(r"[A-Z]{1,2}", label):
                 raise SolidWorksError(f"{where}: label is the detail's letter, such as \"B\".")
@@ -705,13 +860,104 @@ def validate_views(views) -> list:
         if entry["id"] in ids:
             raise SolidWorksError(f"{where}: the view id {entry['id']!r} is used twice.")
         ids.add(entry["id"])
+        entry["marks"] = _validate_marks(view.get("marks"), where, mark_ids)
         out.append(entry)
     return out
 
 
-def validate_placements(placements, checked_spec: dict, view_ids) -> dict:
+def _section_cut(view, where) -> dict:
+    """The cutting line of a section view: "cut": "vertical" / "horizontal"
+    through through_mm, "angle_deg" (on the parent's sheet, anticlockwise from
+    its horizontal) through through_mm, or "line_mm": two model points the line
+    passes through as the parent shows them. An angled cut may say which model
+    direction points `up` in the section (default: along the cutting line)."""
+    given = [k for k in ("cut", "angle_deg", "line_mm") if view.get(k) is not None]
+    if len(given) != 1:
+        raise SolidWorksError(f"{where}: give one of cut (\"vertical\" or \"horizontal\"), angle_deg "
+                              "(with through_mm) or line_mm (two model points the cutting line runs through).")
+    if view.get("up") is not None and given[0] == "cut":
+        raise SolidWorksError(f"{where}: up turns an angled section; a vertical or horizontal one stays aligned "
+                              "with its parent.")
+    up = view.get("up")
+    if up is not None:
+        up = list(AXES[up]) if up in AXES else _point(up, f"{where}: up (a model axis such as \"+y\" or a vector)")
+        if not any(up):
+            raise SolidWorksError(f"{where}: up is a direction, not [0, 0, 0].")
+    if given[0] == "cut":
+        if view["cut"] not in ("vertical", "horizontal"):
+            raise SolidWorksError(f"{where}: cut is \"vertical\" or \"horizontal\" (the cutting line on the parent view).")
+        if view.get("line_mm") is not None:
+            raise SolidWorksError(f"{where}: line_mm goes without cut.")
+        return {"cut": view["cut"], "through_mm": _point(view.get("through_mm"), f"{where}: through_mm"), "up": None}
+    if given[0] == "angle_deg":
+        angle = view["angle_deg"]
+        if not isinstance(angle, (int, float)) or isinstance(angle, bool) or not math.isfinite(angle):
+            raise SolidWorksError(f"{where}: angle_deg is the cutting line's angle on the parent view, in degrees.")
+        return {"cut": "angled", "angle_deg": float(angle), "up": up,
+                "through_mm": _point(view.get("through_mm"), f"{where}: through_mm")}
+    line = view["line_mm"]
+    if not isinstance(line, list) or len(line) != 2:
+        raise SolidWorksError(f"{where}: line_mm is two model points [[x, y, z], [x, y, z]].")
+    if view.get("through_mm") is not None:
+        raise SolidWorksError(f"{where}: line_mm already says where the cut runs; leave through_mm out.")
+    points = [_point(p, f"{where}: line_mm[{i}]") for i, p in enumerate(line)]
+    if math.dist(*points) < 1e-6:
+        raise SolidWorksError(f"{where}: the two points of line_mm are the same point.")
+    return {"cut": "angled", "line_mm": points, "through_mm": points[0], "up": up}
+
+
+# Centre marks and centrelines a view carries, so dimensions can measure to hole
+# centres, bolt circles and axes. Each is checked against the model when drawn.
+MARK_KINDS = ("center_mark", "circle", "line", "point")
+
+
+def _validate_marks(marks, where, ids: set) -> list:
+    """A view's "marks": [{"kind": "center_mark", "at_mm"}, {"kind": "circle", "id",
+    "center_mm", "through_mm"}, {"kind": "line", "id", "from_mm", "to_mm",
+    "extend_mm"}, {"kind": "point", "id", "at_mm"}]. Ids are unique across views."""
+    if marks is None:
+        return []
+    if not isinstance(marks, list):
+        raise SolidWorksError(f"{where}: marks is a list of centre marks and centrelines.")
+    out = []
+    fields = {"center_mark": ("at_mm",), "circle": ("center_mm", "through_mm"), "line": ("from_mm", "to_mm"),
+              "point": ("at_mm",)}
+    for n, mark in enumerate(marks):
+        here = f"{where} mark {n + 1}"
+        if not isinstance(mark, dict) or mark.get("kind") not in MARK_KINDS:
+            raise SolidWorksError(f"{here}: kind is one of {', '.join(MARK_KINDS)}.")
+        kind = mark["kind"]
+        extra = sorted(set(mark) - {"kind", "id", *fields[kind], *(("extend_mm",) if kind == "line" else ())})
+        if extra:
+            raise SolidWorksError(f"{here}: unknown field(s) {', '.join(extra)} for a {kind}.")
+        mid = mark.get("id")
+        if kind != "center_mark" or mid is not None:
+            if not isinstance(mid, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", mid):
+                raise SolidWorksError(f"{here}: a {kind} needs an id (letters, digits, _), which placements "
+                                      "use to measure to it.")
+            if mid in ids:
+                raise SolidWorksError(f"{here}: the mark id {mid!r} is used twice.")
+            ids.add(mid)
+        entry = {"kind": kind, "id": mid, **{k: _point(mark.get(k), f"{here}: {k}") for k in fields[kind]}}
+        if kind == "line":
+            extend = mark.get("extend_mm", 5.0)
+            if not isinstance(extend, (int, float)) or isinstance(extend, bool) or extend < 0:
+                raise SolidWorksError(f"{here}: extend_mm is how far the line runs past its points on paper (mm).")
+            entry["extend_mm"] = float(extend)
+            if math.dist(entry["from_mm"], entry["to_mm"]) < 1e-6:
+                raise SolidWorksError(f"{here}: from_mm and to_mm are the same point.")
+        if kind == "circle" and math.dist(entry["center_mm"], entry["through_mm"]) < 1e-6:
+            raise SolidWorksError(f"{here}: through_mm is on the circle, away from center_mm.")
+        out.append(entry)
+    return out
+
+
+def validate_placements(placements, checked_spec: dict, view_ids, marks: dict | None = None) -> dict:
     """make_drawing's `placements`: {spec id: where it goes}. Every read item of
-    the spec must be placed, except notes (they go in the notes block)."""
+    the spec must be placed, except notes (they go in the notes block). A
+    dimension's points_mm entries may name a mark of its view by id (marks:
+    {view id: [mark, ...]}, as validate_views gives them)."""
+    marks = marks or {}
     placements = placements or {}
     if not isinstance(placements, dict):
         raise SolidWorksError("placements is an object keyed by spec id.")
@@ -745,7 +991,19 @@ def validate_placements(placements, checked_spec: dict, view_ids) -> dict:
             count = 1 if measure in ("diameter", "radius") else 2
             if not isinstance(points, list) or len(points) != count:
                 raise SolidWorksError(f"{where}: a {measure} takes {count} model point(s) in points_mm, each on "
-                                      "an edge that shows in the view.")
+                                      "an edge that shows in the view, or the id of a mark of the view.")
+            view_marks = {m["id"]: m for m in marks.get(view, []) if m["id"]}
+            for p in points:
+                if isinstance(p, str):
+                    mark = view_marks.get(p)
+                    if mark is None:
+                        raise SolidWorksError(f"{where}: {p!r} is no mark of view {view!r} "
+                                              f"({', '.join(sorted(view_marks)) or 'it has none'}).")
+                    fits = {"diameter": ("circle",), "radius": ("circle",), "angle": ("line",)}.get(
+                        measure, ("line", "point"))
+                    if mark["kind"] not in fits:
+                        raise SolidWorksError(f"{where}: a {measure} measures to a {' or '.join(fits)} mark, "
+                                              f"not the {mark['kind']} {p!r}.")
             if (measure == "angle") != (item["parsed"].kind == "angle"):
                 raise SolidWorksError(f"{where}: {item['value']!r} needs measure "
                                       f"{'angle' if item['parsed'].kind == 'angle' else 'distance, horizontal, vertical, diameter or radius'}.")
@@ -753,7 +1011,8 @@ def validate_placements(placements, checked_spec: dict, view_ids) -> dict:
             if not isinstance(offset, (int, float)) or isinstance(offset, bool):
                 raise SolidWorksError(f"{where}: offset_mm is the distance from the part to the dimension text on paper.")
             entry.update(measure=measure, offset_mm=float(offset), side=place.get("side"),
-                         points_mm=[_point(p, f"{where}: points_mm[{i}]") for i, p in enumerate(points)])
+                         points_mm=[p if isinstance(p, str) else _point(p, f"{where}: points_mm[{i}]")
+                                    for i, p in enumerate(points)])
         elif kind in ("datum", "gdt"):
             allowed = {"view", "on", "point_mm"}
             if ("on" in place) == ("point_mm" in place):
@@ -845,17 +1104,19 @@ def _compare_one(item, group, got) -> dict:
         ok = got.get("symbol") == item["symbol"] and norm_text(got.get("value")) == norm_text(item["value"])
         return {"status": "ok" if ok else "differs", "shown": shown, "spec": f"{item['symbol']} {item['value']}"}
     if kind == "gdt":
-        want = gdt_frame_text(item["characteristic"], item["tolerance"], item["modifier"], item["datums"])
+        want = gdt_frame_text(item["characteristic"], item["tolerance"], item["modifier"], item["datums"],
+                              item.get("projected"))
         shown = gdt_frame_text(got.get("characteristic"), got.get("tolerance", ""), got.get("modifier"),
-                               got.get("datums", []))
+                               got.get("datums", []), got.get("projected"))
         return {"status": "ok" if norm_text(shown) == norm_text(want) else "differs", "shown": shown, "spec": want}
     return {"status": "differs", "detail": f"no check for kind {kind}"}
 
 
-def gdt_frame_text(characteristic, tolerance, modifier, datums) -> str:
-    """One readable line for a feature control frame: 'position | Ø.010 MMC | A | B | C'."""
-    cells = [str(characteristic), f"{tolerance} {modifier}".strip() if modifier else str(tolerance), *datums]
-    return " | ".join(cells)
+def gdt_frame_text(characteristic, tolerance, modifier, datums, projected=None) -> str:
+    """One readable line for a feature control frame: 'position | Ø.010 MMC | A | B | C',
+    with a projected tolerance zone 'position | Ø.041 Ⓟ .56 | A | B | C'."""
+    cell = " ".join(t for t in (str(tolerance), modifier or "", f"Ⓟ {projected.strip()}" if projected else "") if t)
+    return " | ".join([str(characteristic), cell, *datums])
 
 
 CHAR_MM = 2.2  # the width of a note character on the stock A-size format (3 mm text)

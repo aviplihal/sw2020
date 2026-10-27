@@ -1070,11 +1070,30 @@ async def make_drawing(path: str | None = None, spec: dict | None = None, views:
       {"kind": "standard", "direction": "right"}   top / bottom / left / right
       {"kind": "section", "from": "front", "cut": "vertical", "label": "A",
        "through_mm": [x, y, z]}   cutting line through that model point
-       (optional "flip": true to look the other way)
+       (optional "flip": true to look the other way); "cut": "horizontal" too.
+      {"kind": "section", "from": "front", "line_mm": [[x,y,z], [x,y,z]],
+       "up": "+y", "label": "C"}   an angled cut through two model points as
+       the parent shows them (or "angle_deg": 36 with "through_mm": the line's
+       angle on the parent, anticlockwise from its horizontal). It is turned
+       upright: "up" (a model axis or [x,y,z]) points up, default along the cut.
       {"kind": "detail", "from": "front", "label": "B", "center_mm": [x, y, z],
        "radius_mm": 4, "scale": "4:1"}
-    Each view gets an id: its direction, "section A", "detail B" (or "id").
-    The sheet scale is the largest standard one at which the views fit.
+    "from" may name a section, so a section of a section and a detail of a
+    section work. Each view gets an id: its direction, "section A", "detail B"
+    (or "id"). The sheet scale is the largest standard one at which the views
+    fit; views not aligned with another (angled sections, details) take the
+    free spot that keeps it largest. A detail keeps its own scale (1:1, 1:2).
+
+    marks (on any view): centre marks and centrelines, drawn from the MODEL's
+    geometry (each point must be a hole or arc centre, on an axis, or on an
+    edge, or the call fails), so dimensions can measure to them:
+      "marks": [{"kind": "center_mark", "at_mm": [..]}   on the circle centred there
+                {"kind": "point", "id": "O", "at_mm": [..]}   e.g. the part centre
+                {"kind": "circle", "id": "BC", "center_mm": [..], "through_mm": [..]}
+                   a centreline circle (bolt circle) through a hole centre
+                {"kind": "line", "id": "CL1", "from_mm": [..], "to_mm": [..]}]
+                   a centreline from a centre through a hole centre or along a
+                   slot or an axis (runs extend_mm past both ends, default 5)
 
     spec: the drawing spec (Docs/SHOP-DRAWINGS.md 4.1), values as written in
     inches. Every read item except general notes needs a placement; items
@@ -1088,7 +1107,14 @@ async def make_drawing(path: str | None = None, spec: dict | None = None, views:
         a diameter/radius: on the circle; a circle seen edge-on gives its
         diameter), optional "side": above/below/left/right and "offset_mm"
         (paper distance from the view, default 10; stagger them)}.
-        The tool sets the spec's precision, fraction or limits and tolerance.
+        A points_mm entry may be the id of a mark of that view instead:
+        ["BC"] diameter of a bolt circle, ["CL_SLOT", "CL_H1"] angle between
+        centrelines (its text goes between them), ["O", [x,y,z]] distance from
+        the centre point to an edge, [[x,y,z], "AX"] edge to a hole's axis.
+        The tool sets the spec's precision, fraction or limits and tolerance,
+        and the spec's "basic": true (boxed, no tolerance), "reference": true
+        (in parentheses) and "prefix"/"suffix" text ("10X", "MAX", "TYP").
+        A gdt item's "projected": ".56" adds Ⓟ .56 to its frame.
       datum / gdt: {"view", "on": "D13"} on a placed dimension (a feature of
         size) or thread/hole, or {"view", "point_mm": [..]} on a surface's edge.
       finish, thread, hole, local note: {"view", "point_mm": [..]} (leader).
