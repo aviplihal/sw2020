@@ -129,6 +129,17 @@ stray drag in SolidWorks can change the part.
   and the code converts it. `hole` holds every size in mm and as `*_in`. An
   inch size SolidWorks' table lacks (`'7/8-10'`) fails. Modeled threads are
   ISO only.
+- **Radial holes in a round part**: there is no flat face, so start the hole
+  on a plane tangent to the outside. `add_plane("right", angle_deg=30,
+  about="y")` turns a plane to the hole's direction (for a part revolved about
+  Y), then `add_plane(<that plane>, offset_mm=<outer radius>)` moves it out to
+  touch the OD. Give `face=None, plane=<name>` and a point on the tangent line
+  (origin + the height along the axis): the hole drills toward the axis and
+  its depth counts from the plane. A tapped hole takes `thread_depth_in`
+  ("MIN FULL THD") apart from the tap drill depth, and a near-side
+  countersink, `csink_diameter_in=".94", csink_angle_deg=90`. The countersink
+  is sized where it meets the plane. From a plane that also cuts through the
+  part elsewhere (one tangent to a bore) SOLIDWORKS 2020 makes no hole.
 - **Adding material to a part**: `add_boss_on_face` (a round boss: standoff,
   peg) and `add_extruded_profile_on_face` (a polygon pad or ledge) grow out of
   any planar face. A PCB standoff is a boss plus a blind hole in its top.

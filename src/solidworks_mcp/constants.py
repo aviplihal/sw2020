@@ -322,6 +322,7 @@ DRAWING_FORMATS = {"pdf", "slddrw"}
 # points. Each hit comes back as 9 doubles: body, ray, hit type, x y z, nx ny nz.
 SW_RAY_NORMALS_ENTRY_EXIT = 1 | 4
 RAY_HIT_WIDTH = 9
+SW_RAY_HIT_ENTER = 16  # swRayPtsResults_e flag in a hit's type: the ray enters the body there
 SW_RAY_HIT_EXIT = 32  # swRayPtsResults_e flag in a hit's type: the ray leaves the body there
 
 # Neutral formats open_part imports as a new part (ISldWorks.LoadFile4).

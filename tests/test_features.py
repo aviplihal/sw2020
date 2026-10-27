@@ -1163,6 +1163,41 @@ def test_wizard_inch_through_tapped_hole(part):
     assert info["tap_drill_diameter_in"] == pytest.approx(0.201)
 
 
+def test_wizard_radial_hole_from_a_plane_tangent_to_a_ring(part):
+    # DTN7's radial holes: a plane turned 30 degrees about the ring's axis and
+    # moved out to touch the OD; the hole drills toward the axis
+    R = 163.5125
+    part.add_revolved_profile([[86.2, 0], [R, 0], [R, 88.9], [86.2, 88.9]])
+    turned = part.add_plane("right", angle_deg=30, about="y")["plane"]
+    tangent = part.add_plane(turned, offset_mm=R, name="HolePlane")
+    point = [o + 47.625 * a for o, a in zip(tangent["origin_mm"], [0, 1, 0])]
+    hole = part.add_hole_wizard("tapped", ".875-9UNC", None, *point, plane="HolePlane", depth_in="1.96",
+                                thread_depth_in="1.29", csink_diameter_in=".94", csink_angle_deg=90)
+    info = hole["hole"]
+    assert (info["tap_drill_diameter_in"], info["tap_drill_depth_in"], info["thread_depth_in"]) ==         pytest.approx((0.7656, 1.96, 1.29))
+    assert (info["thread_diameter_in"], info["near_csink_diameter_in"], info["near_csink_angle_deg"]) ==         pytest.approx((0.875, 0.94, 90.0)), "SolidWorks gives this hole's cosmetic thread a wrong diameter"
+    assert hole["mass_properties"]["bounding_box_mm"]["size_mm"] == pytest.approx([2 * R, 88.9, 2 * R])
+    # The cut, integrated over the curved OD (drill + 118 degree point + countersink):
+    # 15479.3 mm3; SolidWorks' mass properties on those saddle faces run ~0.05 % low.
+    removed = math.pi * (R ** 2 - 86.2 ** 2) * 88.9 - vol(hole)
+    assert removed == pytest.approx(15479.3, rel=1e-3)
+
+
+def test_wizard_hole_from_a_plane_drills_into_the_part_either_way(part):
+    # the front plane touches a block on its +normal side: the hole runs along +z
+    part.add_box(40, 20, 10)
+    got = vol(part.add_hole_wizard("tapped", "1/4-20", None, 20, 10, 0, plane="front", depth_mm=8))
+    d = 0.201 * 25.4
+    assert abs(8000 - got - (math.pi * (d / 2) ** 2 * 8 + _drill_point(d))) < 0.01
+
+
+def test_wizard_hole_from_a_plane_that_does_not_touch_the_part_fails(part):
+    part.add_box(40, 20, 10)
+    with pytest.raises(SolidWorksError, match="does not touch the part"):
+        part.add_hole_wizard("tapped", "1/4-20", None, 20, 10, 5, plane=part.add_plane("front", offset_mm=5)["plane"],
+                             depth_mm=8)
+
+
 def test_wizard_rejects_an_inch_size_it_does_not_know(part):
     part.add_box(100, 100, 60)
     with pytest.raises(SolidWorksError, match="7/8-10"):

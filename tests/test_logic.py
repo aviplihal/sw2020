@@ -390,6 +390,52 @@ def test_inch_hole_wizard_arguments_are_checked_before_solidworks(s, kwargs, mes
         s.add_hole_wizard(kind="tapped", face="+z", x_mm=0, y_mm=0, z_mm=0, **kwargs)
 
 
+def test_wizard_values_carry_thread_depth_and_a_near_side_countersink():
+    """Found on 2020 by reading the feature back: Value1 is the thread depth,
+    Value2/Value3 the near-side countersink's diameter and angle."""
+    values = SolidWorksSession._wizard_values("tapped", 1, False, 0.032766, (0.023876, math.pi / 2))
+    assert values[:3] == [0.032766, 0.023876, math.pi / 2]
+    assert values[3:6] == [-1.0] * 3 and values[6:8] == [1.0, 0.0], "the rest stays as before"
+    assert SolidWorksSession._wizard_values("tapped", 1, False)[:3] == [-1.0] * 3
+
+
+@pytest.mark.parametrize("value_mm,value_in,expected", [(10, None, 10), (None, "1.96", 49.784),
+                                                        (None, 1.29, 32.766), (None, None, None)])
+def test_a_hole_length_is_given_in_mm_or_inches(value_mm, value_in, expected):
+    got = SolidWorksSession._length_mm("depth", value_mm, value_in)
+    assert got == (None if expected is None else pytest.approx(expected))
+
+
+# RayIntersections flags measured on 2020 where a plane touches a ring: the
+# material side ENTERs (16) at 0, the air side grazes and EXITs (32) at 0.
+@pytest.mark.parametrize("ahead,behind,side", [
+    ([(0.0, 17), (77.3, 33)], [(0.0, 33)], 1),              # the part lies along the normal
+    ([(0.0, 33)], [(0.0, 17), (77.3, 33)], -1),
+    ([(0.0, 17), (21.7, 33)], [(0.0, 33), (172.4, 17)], 1),  # a bore: the far wall does not count
+    ([(12.0, 33)], [(30.0, 33)], 0),                        # inside the material
+    ([], [], 0),                                            # in the air
+    ([(5.0, 17)], [], 0),                                   # a gap: the plane does not touch the part
+])
+def test_a_hole_from_a_plane_drills_where_the_plane_touches_the_part(ahead, behind, side):
+    assert SolidWorksSession._touching_side(ahead, behind, 0.01) == side
+
+
+@pytest.mark.parametrize("kwargs,message", [
+    ({"face": "+z", "plane": "Plane1"}, "one of them"),
+    ({"face": None}, "one of them"),
+    ({"thread_depth_in": "1.29", "kind": "clearance", "size": "1/4"}, "for kind='tapped'"),
+    ({"csink_diameter_in": ".94"}, "csink_angle_deg"),
+    ({"csink_angle_deg": 90}, "csink_diameter"),
+    ({"csink_diameter_in": ".94", "csink_angle_deg": 180}, "between 0 and 180"),
+    ({"depth_in": "1.29", "thread_depth_in": "1.96"}, "cannot run deeper"),
+    ({"size": "M3", "thread": "modeled", "plane": "Plane1", "face": None}, "modeled thread starts on a face"),
+])
+def test_hole_wizard_plane_and_countersink_arguments_are_checked(s, kwargs, message):
+    args = {"kind": "tapped", "size": "7/8-9", "face": "+z", "x_mm": 0, "y_mm": 0, "z_mm": 0, **kwargs}
+    with pytest.raises(SolidWorksError, match=message):
+        s.add_hole_wizard(**args)
+
+
 def test_parse_face_selector_rejects_unknown_side(s):
     with pytest.raises(SolidWorksError):
         s._parse_face_selector("+z:middle")

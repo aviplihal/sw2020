@@ -96,6 +96,7 @@ from .constants import (
     SW_ANSI_INCH_TAPPED_HOLE,
     SW_WZD_STANDARD_ANSI_INCH,
     SW_PREF_DEFAULT_TEMPLATE_DRAWING,
+    SW_RAY_HIT_ENTER,
     SW_RAY_HIT_EXIT,
     SW_RAY_NORMALS_ENTRY_EXIT,
     SW_REF_PLANE_ANGLE,
@@ -2317,18 +2318,27 @@ class SolidWorksSession:
                 "series": series.upper() if series else None, "thread_class": cls.upper() if cls else None}
 
     @staticmethod
-    def _wizard_values(kind: str, fit: int, through: bool) -> list:
+    def _wizard_values(kind: str, fit: int, through: bool, thread_depth_m: float | None = None,
+                       csink: tuple | None = None) -> list:
         """HoleWizard5's Value1..Value12 for `kind`; -1 means 'from the standard'.
 
         Found by trial on SOLIDWORKS 2026, each vector verified by a volume test:
         a plain hole cut through all fails unless its unused values are 0, while a
         tapped hole given zeros cuts garbage. A tapped hole keeps its cosmetic
         thread: without one SolidWorks mills the threaded length at the major
-        diameter.
+        diameter. Tapped, found on 2020 by reading the feature back: Value1 is
+        the thread depth, Value2/Value3 a near-side countersink's diameter and
+        angle (m, rad; given together they turn it on), Value6 the drill point
+        angle.
         """
         if kind == "tapped":
             thread_end = 1.0 if through else 0.0  # swWzdHoleThreadEndCondition_e
-            return [-1.0] * 6 + [float(SW_COSMETIC_THREAD_WITH_CALLOUT), thread_end] + [-1.0] * 4
+            values = [-1.0] * 6 + [float(SW_COSMETIC_THREAD_WITH_CALLOUT), thread_end] + [-1.0] * 4
+            if thread_depth_m is not None:
+                values[0] = float(thread_depth_m)
+            if csink is not None:
+                values[1], values[2] = (float(c) for c in csink)
+            return values
         if kind == "clearance":
             return [float(fit)] + [0.0 if through else -1.0] * 11
         return [-1.0, -1.0, -1.0, float(fit)] + [-1.0] * 8  # counterbore/countersink: fit is Value4
@@ -2409,6 +2419,9 @@ class SolidWorksSession:
         if inch:
             info.update(wizard_size=data.FastenerSize, series=inch["series"],
                         thread_class=data.ThreadClass or None)
+        if kind == "tapped" and data.NearSideCounterSink:
+            info.update(near_csink=True, near_csink_diameter_mm=mm(data.NearCounterSinkDiameter),
+                        near_csink_angle_deg=round(math.degrees(data.NearCounterSinkAngle), 3))
         if kind == "tapped":
             info.update(tap_drill_diameter_mm=mm(data.TapDrillDiameter or data.ThruTapDrillDiameter),
                         tap_drill_depth_mm=mm(data.TapDrillDepth),
@@ -2446,9 +2459,109 @@ class SolidWorksSession:
                 f"SolidWorks made thread class '{info.get('thread_class')}', not '{inch['thread_class']}'."
             )
 
-    def add_hole_wizard(self, kind: str, size: str, face: str, x_mm: float, y_mm: float, z_mm: float,
+    @staticmethod
+    def _length_mm(label: str, value_mm, value_in) -> float | None:
+        """A length given in mm or in inches (text is read exactly, see units.in_to_mm), or None."""
+        if value_in is not None:
+            if value_mm is not None:
+                raise SolidWorksError(f"Give {label}_mm or {label}_in, not both.")
+            value_mm = in_to_mm(value_in if isinstance(value_in, str) else float(value_in))
+        if value_mm is not None and value_mm <= 0:
+            raise SolidWorksError(f"{label.replace('_', ' ')} must be > 0 (got {value_mm}).")
+        return value_mm
+
+    def _ray_hits(self, point_mm, direction) -> list:
+        """Where a ray from point_mm along `direction` meets the solid body:
+        sorted (distance mm, swRayPtsResults_e flags) pairs."""
+        start = [mm_to_m(c) for c in point_mm]
+        model = self._model
+        hits = model.RayIntersections(
+            win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, [self._solid_body()._oleobj_]),
+            win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, start),
+            win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [float(n) for n in direction]),
+            SW_RAY_NORMALS_ENTRY_EXIT, 0.0, 0.0)
+        points = model.GetRayIntersectionsPoints() if hits else ()
+        return sorted((m_to_mm(math.dist(points[h * RAY_HIT_WIDTH + 3:h * RAY_HIT_WIDTH + 6], start)),
+                       int(points[h * RAY_HIT_WIDTH + 2])) for h in range(hits or 0))
+
+    @staticmethod
+    def _touching_side(ahead: list, behind: list, tolerance_mm: float) -> int:
+        """+1 / -1: the side of a plane where the part starts at the point, from
+        the ray hits each way (see _ray_hits); 0 when it touches neither or
+        both. Measured on 2020: the material side enters (ENTER) at 0, while a
+        ray grazing the part on the air side exits (EXIT) at 0. Pure."""
+        def enters(hits):
+            return any(d <= tolerance_mm and flags & SW_RAY_HIT_ENTER for d, flags in hits)
+        a, b = enters(ahead), enters(behind)
+        return 0 if a == b else (1 if a else -1)
+
+    def _wizard_plane_side(self, plane: str, point) -> tuple:
+        """(plane, label, direction into the material, plane normal) for a hole that starts on a
+        reference plane at `point`. The point must lie on the plane, and the
+        part must start there on one side of it (the plane touches the part at
+        the point): the hole drills that way."""
+        ref, label = self._named_plane(plane)
+        frame = self._plane_frame(ref)
+        normal = frame["normal"]
+        where = ", ".join(f"{c:g}" for c in point)
+        off = sum((p - o) * n for p, o, n in zip(point, frame["origin_mm"], normal))
+        if abs(off) > self._ON_FACE_TOLERANCE_MM:
+            raise SolidWorksError(f"({where}) mm is not on the {label} but {abs(off):.3g} mm off it. "
+                                  f"Give a point on the plane.")
+        side = self._touching_side(self._ray_hits(point, normal), self._ray_hits(point, [-n for n in normal]),
+                                   self._ON_FACE_TOLERANCE_MM)
+        if not side:
+            raise SolidWorksError(
+                f"The {label} does not touch the part at ({where}) mm with the part on one side: the point lies "
+                f"in the air or inside the material. A hole from a plane starts where the plane touches the "
+                f"part, such as a plane tangent to a round part at the hole's centre."
+            )
+        return ref, label, [side * n for n in normal], normal
+
+    def _check_wizard_extras(self, info: dict, thread_depth_mm, csink_diameter_mm, csink_angle_deg) -> None:
+        """Fail loud when the thread depth or the countersink did not come out as asked."""
+        tol = self._THREAD_DIAMETER_TOLERANCE_MM
+        if thread_depth_mm is not None and abs(info["thread_depth_mm"] - thread_depth_mm) > tol:
+            raise SolidWorksError(f"SolidWorks made the thread {info['thread_depth_mm']:g} mm deep, "
+                                  f"not {thread_depth_mm:g} mm.")
+        if csink_diameter_mm is None:
+            return
+        if not info.get("near_csink"):
+            raise SolidWorksError("SolidWorks did not add the near-side countersink.")
+        if (abs(info["near_csink_diameter_mm"] - csink_diameter_mm) > tol
+                or abs(info["near_csink_angle_deg"] - csink_angle_deg) > 1e-3):
+            raise SolidWorksError(
+                f"SolidWorks made the countersink Ø{info['near_csink_diameter_mm']:g} mm x "
+                f"{info['near_csink_angle_deg']:g}°, not Ø{csink_diameter_mm:g} mm x {csink_angle_deg:g}°."
+            )
+        if csink_diameter_mm <= info["tap_drill_diameter_mm"]:
+            raise SolidWorksError(f"The countersink (Ø{csink_diameter_mm:g} mm) must be wider than the "
+                                  f"tap drill (Ø{info['tap_drill_diameter_mm']:g} mm).")
+
+    def _fix_cosmetic_thread(self, feat, major_mm: float) -> None:
+        """Give a wizard hole's cosmetic thread its major diameter.
+
+        A tapped hole started on a plane that touches a curved surface gets a
+        cosmetic thread with no edge and a made-up diameter (2020: the tap drill
+        plus 1 mm, or 0). Setting the diameter holds through rebuilds.
+        """
+        sub = next((x for x in self._sub_features(feat) if x.GetTypeName2() == "CosmeticThread"), None)
+        if sub is None:
+            raise SolidWorksError(f"The Hole Wizard hole '{feat.Name}' has no cosmetic thread.")
+        data = binding.wrap(sub.GetDefinition(), self._mod.ICosmeticThreadFeatureData)
+        if abs(m_to_mm(data.Diameter) - major_mm) <= self._THREAD_DIAMETER_TOLERANCE_MM:
+            return
+        data.AccessSelections(self._model, None)
+        data.Diameter = mm_to_m(major_mm)
+        if not sub.ModifyDefinition(data, self._model, None):
+            raise SolidWorksError(f"Could not set the cosmetic thread of '{feat.Name}' to Ø{major_mm:g} mm.")
+
+    def add_hole_wizard(self, kind: str, size: str, face: str | None, x_mm: float, y_mm: float, z_mm: float,
                         depth_mm: float | None = None, fit: str = "normal", thread: str = "cosmetic",
-                        name: str | None = None, depth_in: float | str | None = None) -> dict:
+                        name: str | None = None, depth_in: float | str | None = None,
+                        plane: str | None = None, thread_depth_mm: float | None = None,
+                        thread_depth_in: float | str | None = None, csink_diameter_mm: float | None = None,
+                        csink_diameter_in: float | str | None = None, csink_angle_deg: float | None = None) -> dict:
         """An ISO or ANSI Inch hole from SolidWorks' Hole Wizard, sized by its standard tables.
 
         kind: 'clearance' (ISO 273), 'counterbore' (socket head cap screw,
@@ -2466,11 +2579,32 @@ class SolidWorksSession:
         printable thread over the standard thread depth (all the way through a
         through hole). Returns the standard's sizes in `hole`, and the position
         as dimensions x/y.
+
+        plane (with face None): start the hole on a reference plane by name,
+        such as one add_plane made tangent to a round part. The point lies on
+        the plane where it touches the part; the hole drills along the plane's
+        normal into the part (a point in the air or inside the material
+        fails), and its depth counts from the plane. A blind hole that cuts
+        nothing fails. Tapped holes only: thread_depth_mm / _in sets the
+        cosmetic thread's depth (default the standard's), and csink_diameter_mm
+        / _in with csink_angle_deg adds a near-side countersink.
         """
-        if depth_in is not None:
-            if depth_mm is not None:
-                raise SolidWorksError("Give depth_mm or depth_in, not both.")
-            depth_mm = in_to_mm(depth_in if isinstance(depth_in, str) else float(depth_in))
+        depth_mm = self._length_mm("depth", depth_mm, depth_in)
+        thread_depth_mm = self._length_mm("thread_depth", thread_depth_mm, thread_depth_in)
+        csink_diameter_mm = self._length_mm("csink_diameter", csink_diameter_mm, csink_diameter_in)
+        if (face is None) == (plane is None):
+            raise SolidWorksError("Give face (a planar face, e.g. '+z') or plane (a reference plane by name), "
+                                  "one of them.")
+        extras = thread_depth_mm is not None or csink_diameter_mm is not None or csink_angle_deg is not None
+        if extras and kind != "tapped":
+            raise SolidWorksError("thread_depth and a near-side countersink are for kind='tapped'.")
+        if (csink_diameter_mm is None) != (csink_angle_deg is None):
+            raise SolidWorksError("A near-side countersink needs csink_diameter (mm or in) and csink_angle_deg.")
+        if csink_angle_deg is not None and not 0 < csink_angle_deg < 180:
+            raise SolidWorksError(f"csink_angle_deg must be between 0 and 180 (got {csink_angle_deg}).")
+        if thread_depth_mm is not None and depth_mm is not None and thread_depth_mm > depth_mm + 1e-9:
+            raise SolidWorksError(f"The thread ({thread_depth_mm:g} mm) cannot run deeper than the tap drill "
+                                  f"({depth_mm:g} mm).")
         iso = bool(re.fullmatch(r"M\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?", str(size).strip()))
         inch = None if iso else self._inch_hole_size(size, kind) if kind in self._WIZARD_KINDS else None
         if kind not in self._WIZARD_KINDS:
@@ -2484,8 +2618,9 @@ class SolidWorksSession:
         if thread == "modeled" and inch:
             raise SolidWorksError("A modeled thread needs an ISO metric size; an inch tapped hole "
                                   "gets SolidWorks' cosmetic thread (thread='cosmetic').")
-        if depth_mm is not None and depth_mm <= 0:
-            raise SolidWorksError(f"depth must be > 0 (got {depth_mm}).")
+        if thread == "modeled" and (plane is not None or extras):
+            raise SolidWorksError("A modeled thread starts on a face, over the standard thread depth, "
+                                  "without a countersink.")
         model = self._require_model()
         point = (x_mm, y_mm, z_mm)
         coarse = self._coarse_thread_size(size) if thread == "modeled" else None
@@ -2494,36 +2629,58 @@ class SolidWorksSession:
             major, pitch = self._parse_thread_size(coarse)
             diameter_m = mm_to_m(self._thread_minor_diameter(major, pitch))
 
-        normal, side = self._parse_face_selector(face, default_side=None)
-        target = self._select_face_through(self._solid_body(), normal, side, point, face)
-        off = self._off_face_mm(target, point)
-        if off > self._ON_FACE_TOLERANCE_MM:  # the pick would land on whatever lies there, e.g. a countersink
-            raise SolidWorksError(
-                f"({x_mm:g}, {y_mm:g}, {z_mm:g}) mm is not on the {face} face but {off:.3g} mm off it: "
-                f"beyond its edge, or over an opening such as an earlier hole. Give a point on the face."
-            )
-        model.ClearSelection2(True)
         ext = binding.wrap(model.Extension, self._mod.IModelDocExtension)
-        # The wizard drills where the face is picked. SelectByID2 picks what the
-        # view shows first at that spot (in a side view: another face, or none),
-        # so a ray from just above the point straight into the face picks it.
-        start = [mm_to_m(c + n * self._PICK_ABOVE_MM) for c, n in zip(point, normal)]
-        if not ext.SelectByRay(*start, *(-n for n in normal), mm_to_m(self._ON_FACE_TOLERANCE_MM),
-                               SW_SEL_FACES, False, 0, 0):
-            raise SolidWorksError(f"Could not pick the {face} face at ({x_mm:g}, {y_mm:g}, {z_mm:g}) mm.")
+        if plane is None:
+            normal, side = self._parse_face_selector(face, default_side=None)
+            target = self._select_face_through(self._solid_body(), normal, side, point, face)
+            off = self._off_face_mm(target, point)
+            if off > self._ON_FACE_TOLERANCE_MM:  # the pick would land on whatever lies there, e.g. a countersink
+                raise SolidWorksError(
+                    f"({x_mm:g}, {y_mm:g}, {z_mm:g}) mm is not on the {face} face but {off:.3g} mm off it: "
+                    f"beyond its edge, or over an opening such as an earlier hole. Give a point on the face."
+                )
+        else:
+            ref, label, into, plane_normal = self._wizard_plane_side(plane, point)
+            normal = [-n for n in into]  # the hole runs along -normal, as from a face
         hole_type, fastener = (self._WIZARD_KINDS_INCH if inch else self._WIZARD_KINDS)[kind]
         standard = SW_WZD_STANDARD_ANSI_INCH if inch else SW_WZD_STANDARD_ISO
         wizard_size = inch["wizard_size"] if inch else size
         through = depth_mm is None
+        csink = None if csink_diameter_mm is None else (mm_to_m(csink_diameter_mm), math.radians(csink_angle_deg))
+        values = self._wizard_values(kind, SCREW_FITS[fit], through,
+                                     None if thread_depth_mm is None else mm_to_m(thread_depth_mm), csink)
         feat_mgr = binding.wrap(model.FeatureManager, self._mod.IFeatureManager)
+        volume_before = self.get_mass_properties()["mass_properties"]["volume_mm3"]
+        model.ClearSelection2(True)
+        reverse = False
+        if plane is None:
+            # The wizard drills where the face is picked. SelectByID2 picks what the
+            # view shows first at that spot (in a side view: another face, or none),
+            # so a ray from just above the point straight into the face picks it.
+            start = [mm_to_m(c + n * self._PICK_ABOVE_MM) for c, n in zip(point, normal)]
+            if not ext.SelectByRay(*start, *(-n for n in normal), mm_to_m(self._ON_FACE_TOLERANCE_MM),
+                                   SW_SEL_FACES, False, 0, 0):
+                raise SolidWorksError(f"Could not pick the {face} face at ({x_mm:g}, {y_mm:g}, {z_mm:g}) mm.")
+        else:
+            if not ext.SelectByID2(ref.Name, "PLANE", *(mm_to_m(c) for c in point), False, 0, None, 0):
+                raise SolidWorksError(f"Could not select the {label}.")
+            # From a plane the wizard drills against its normal (2020), so
+            # RevDir turns it round when the part lies on the normal's side.
+            reverse = sum(i * n for i, n in zip(into, plane_normal)) > 0
         feat = feat_mgr.HoleWizard5(
             hole_type, standard, fastener, wizard_size,
             SW_END_COND_THROUGH_ALL if through else SW_END_COND_BLIND,
             diameter_m, -1.0 if through else mm_to_m(depth_mm), -1.0,  # Diameter, Depth, Length (slots)
-            *self._wizard_values(kind, SCREW_FITS[fit], through),
+            *values,
             (inch or {}).get("thread_class") or "",  # ThreadClass (inch only)
-            False, False, True, False, False, False,  # RevDir, scope flags
+            reverse, False, True, False, False, False,  # RevDir, scope flags
         )
+        if feat is None and plane is not None:
+            raise SolidWorksError(
+                f"The Hole Wizard made no {kind} hole of size '{wizard_size}' from the {label}. "
+                f"On 2020 that happens from a plane that also cuts through the part elsewhere, such "
+                f"as one tangent to a bore. Use a plane that only touches the part."
+            )
         if feat is None:
             table, examples = ("ANSI Inch", "'1/4-20', '7/8-9'") if inch else ("ISO", "'M3', 'M4', 'M10'")
             raise SolidWorksError(
@@ -2531,10 +2688,17 @@ class SolidWorksSession:
                 f"SolidWorks' {table} table (e.g. {examples}), with material at the point?"
             )
         feat = binding.wrap(feat, self._mod.IFeature)
+        dims, fully_defined = self._pin_wizard_position(feat, point)
+        if plane is not None and kind == "tapped":
+            model.ForceRebuild3(False)  # the cosmetic thread appears with the rebuild
+            major_mm = in_to_mm(inch["major_in"]) if inch else float(re.match(r"M(\d+(?:\.\d+)?)", size)[1])
+            self._fix_cosmetic_thread(feat, major_mm)
+        if plane is not None and self.get_mass_properties()["mass_properties"]["volume_mm3"] > volume_before - 1e-3:
+            raise SolidWorksError(f"The hole from the {label} cut nothing: it drilled away from the part.")
         info = self._wizard_hole_info(feat, kind, size, fit, inch)
         if inch:
             self._check_inch_wizard_size(info, inch, size)
-        dims, fully_defined = self._pin_wizard_position(feat, point)
+        self._check_wizard_extras(info, thread_depth_mm, csink_diameter_mm, csink_angle_deg)
         result = self._finish_feature(feat, name or feat.Name, dimensions=dims,
                                       fully_defined=fully_defined, hole=info)
         if coarse:

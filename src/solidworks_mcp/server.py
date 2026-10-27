@@ -423,9 +423,13 @@ async def add_hole_on_face(diameter_mm: float, face: str, x_mm: float, y_mm: flo
 
 
 @mcp.tool()
-async def add_hole_wizard(kind: str, size: str, face: str, x_mm: float, y_mm: float, z_mm: float,
+async def add_hole_wizard(kind: str, size: str, face: str | None, x_mm: float, y_mm: float, z_mm: float,
                           depth_mm: float | None = None, fit: str = "normal", thread: str = "cosmetic",
-                          name: str | None = None, depth_in: float | str | None = None) -> dict:
+                          name: str | None = None, depth_in: float | str | None = None,
+                          plane: str | None = None, thread_depth_mm: float | None = None,
+                          thread_depth_in: float | str | None = None, csink_diameter_mm: float | None = None,
+                          csink_diameter_in: float | str | None = None,
+                          csink_angle_deg: float | None = None) -> dict:
     """An ISO or ANSI Inch hole from SolidWorks' Hole Wizard, sized by its standard tables.
 
     kind: 'clearance', 'counterbore' (socket head cap screw), 'countersink'
@@ -441,9 +445,19 @@ async def add_hole_wizard(kind: str, size: str, face: str, x_mm: float, y_mm: fl
     standard's tap drill and a cosmetic thread; thread='modeled' (ISO only)
     cuts a real, printable thread instead. Returns the standard's sizes in
     `hole` (mm, and inches as *_in for ANSI Inch) and mass properties.
+
+    plane='Plane1' with face=None starts the hole on a reference plane, e.g.
+    one add_plane made tangent to a round part (turned about the axis, then
+    offset by the radius): the point lies on the plane where it touches the
+    part, the hole drills along the plane's normal into the part, and depth
+    counts from the plane. Tapped only:
+    thread_depth_mm / thread_depth_in (cosmetic thread depth, e.g. '1.29')
+    and a near-side countersink, csink_diameter_mm / csink_diameter_in with
+    csink_angle_deg (e.g. '.94' and 90).
     """
     return await _call(_session.add_hole_wizard, kind, size, face, x_mm, y_mm, z_mm,
-                       depth_mm, fit, thread, name, depth_in)
+                       depth_mm, fit, thread, name, depth_in, plane, thread_depth_mm, thread_depth_in,
+                       csink_diameter_mm, csink_diameter_in, csink_angle_deg)
 
 
 @mcp.tool()

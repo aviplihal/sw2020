@@ -231,3 +231,27 @@ API findings (all used in `session.py`'s shop-drawing section):
   `1-1/8-7`: .9844 (63/64); `1-8` blind 1.96: .875, thread depth clamped to the drill depth.
   Clearance `1/4` normal: .266; counterbore `1/4`: Ø.4375 x .25; countersink `1/4`: Ø.531, 82°.
 - A through tapped hole (no depth) reports `ThreadDepth` 0: threaded all the way.
+- Later: holes from a plane, thread depth and near-side countersink (DTN7's radial holes).
+  - HoleWizard5 tapped values, by reading the feature back: Value1 = thread depth, Value2/Value3
+    = near-side countersink diameter / angle (both given turn `NearSideCounterSink` on, and
+    `Type` reads 47 instead of 46), Value6 = drill point angle. Value4/5 and 9-12 changed nothing.
+  - A hole can start on a reference plane selected with `SelectByID2(name, "PLANE", x, y, z)`; it
+    lands at that point and `_pin_wizard_position` defines it as on a face. With RevDir False
+    it drills against the plane's normal, with True along it (a hole into the air is still
+    made: 0 mm3 cut, not None). The tool picks RevDir from where the plane touches the part:
+    a ray from the point ENTERs the body at 0 on the material side and EXITs at 0 on the air
+    side (`swRayPtsResults_e`).
+  - From a plane tangent to a cylinder (no circular edge on the plane) the cosmetic thread gets
+    no edge and a wrong diameter: 0 right after creation, then the tap drill + 1 mm (20.446 for
+    7/8-9), with an empty callout. Setting `ICosmeticThreadFeatureData.Diameter` by
+    `ModifyDefinition` after the rebuild fixes it and holds through rebuilds and a moved
+    position. The cosmetic thread only exists after the first rebuild.
+  - From a plane tangent to the bore (it also cuts through the ring elsewhere) HoleWizard5 returns
+    None in both directions, at any depth: not supported, fails loud.
+  - Ring test (OD 163.5125 mm radius, revolved about Y, plane turned 30 degrees, offset 163.5125):
+    .875-9UNC, drill 1.96 in, thread 1.29 in, countersink .94 x 90. Rays down the axis: drill
+    tip at 55.6262 mm (49.784 + the 118 degree point), countersink cone at 0.938 mm, 11 mm off
+    the axis both ways, as calculated. Removed 15471.41 mm3; the hand integral over the curved OD
+    gives 15479.31 (drill alone: measured 15337.51, hand 15342.92). SolidWorks' mass properties
+    on the saddle-shaped intersection faces run about 0.05 % low; the ring alone and flat-face
+    holes match to 0.1 mm3. Bounding box unchanged (327.025 x 88.9 x 327.025).

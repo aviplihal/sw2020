@@ -43,6 +43,16 @@ All notable changes to this project are documented here. This project follows
   reports the size SolidWorks used and each length also in inches (`*_in`),
   plus the tap drill depth. A size, thread diameter or class SolidWorks did
   not take fails loud.
+- `add_hole_wizard(face=None, plane=...)` starts a hole on a reference plane,
+  such as one tangent to a round part: it drills along the plane's normal
+  into the part, the depth counting from the plane. A point where the plane
+  does not touch the part, or a hole that cuts nothing, fails. The cosmetic
+  thread such a hole gets (SolidWorks gives it a wrong diameter) is set to
+  the thread's major diameter.
+- Tapped holes take `thread_depth_mm` / `thread_depth_in` (the cosmetic
+  thread's depth, apart from the tap drill depth) and a near-side countersink
+  (`csink_diameter_mm` / `csink_diameter_in` with `csink_angle_deg`); both
+  are read back and checked.
 
 ## [0.16.0] — 2026-10-10
 
