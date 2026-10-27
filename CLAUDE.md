@@ -14,6 +14,12 @@ converted back and verified on 2020.
 - Everything below "What this is" describes the upstream code as it stands. Statements like "tested on 2026" are
   upstream facts, not this fork's target.
 
+## Language: English only
+
+Everything in this repository is written in **English**: Markdown docs, code comments, docstrings, tool descriptions,
+error messages, commit messages and PR text. If you find text in another language (e.g. Dutch from upstream), translate
+it to English rather than adding to it. Reply in whatever language the user writes in, but write files in English.
+
 ## What this is
 
 `solidworks-mcp` (v0.16.0, MIT, Python ≥3.11): an **MCP server that drives a running SolidWorks on Windows over COM**, so an AI agent can model parametric parts and assemblies **and verify its own work**. Every modelling tool returns measured volume / mass / bounding box, so the agent can compare with a hand calculation and correct itself.
