@@ -309,3 +309,11 @@ by check_drawing, the PDFs rendered and looked at.
   A-A, B-B from A-A, angled C-C and a 1:1 detail of A-A: **1:4 on B** (1:10 on A); all 13 items
   read back ok and nothing overlaps the title block. A dimension placed 10 mm above a view at the
   top of the area went over the border; such text now goes on the other side.
+- **Cut-face edges** (later): a section's hatched outline is no edge of the part, but
+  `IView.GetVisibleEntities2(None, swViewEntityType_Edge)` lists it with the view's own edges, in
+  model space on the cutting plane (lines and arcs, also in a detail of a section). The tool
+  falls back to them when no part edge passes through the point: DTN7's R.04 ±.03 flange fillet
+  (arc centre (164.5285, 80.1116, 0), R 1.016) placed as a radius in detail D (1:1) of A-A and
+  read back ok. On B at 1:2 the tall A-A hung its label over the title block and the "beside"
+  spot sat on the detail: a label now goes above the view (into the outline's own margin,
+  which runs 5-7 mm wider than the drawn view), else right, else left, wherever it is free.

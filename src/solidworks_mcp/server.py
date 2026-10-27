@@ -1109,6 +1109,8 @@ async def make_drawing(path: str | None = None, spec: dict | None = None, views:
         a diameter/radius: on the circle; a circle seen edge-on gives its
         diameter), optional "side": above/below/left/right and "offset_mm"
         (paper distance from the view, default 10; stagger them)}.
+        In a section (or a detail of one) a point may also lie on the cut
+        face's outline: a fillet's arc gives its radius, a cut line a distance.
         A points_mm entry may be the id of a mark of that view instead:
         ["BC"] diameter of a bolt circle, ["CL_SLOT", "CL_H1"] angle between
         centrelines (its text goes between them), ["O", [x,y,z]] distance from

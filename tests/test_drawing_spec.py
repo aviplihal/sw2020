@@ -585,3 +585,11 @@ def test_a_b_sheet_takes_dtn7_at_a_quarter():
         x0, y0, x1, y1 = SHEETS[key]["area_mm"]
         w, h = SHEETS[key]["size_mm"]
         assert 12.7 < x0 and x1 < w - 12.7 and 62.7 < y0 and y1 < h - 12.7
+
+
+def test_a_label_goes_where_the_area_is_free():
+    area, taken = (16, 64, 415, 263), [(68, 72, 252, 255), (334, 148, 364, 179)]
+    assert ds.box_is_free((280, 254, 306, 263), area, taken)
+    assert not ds.box_is_free((280, 256, 306, 265), area, taken), "past the top of the area"
+    assert not ds.box_is_free((324, 163, 350, 172), area, taken), "on the detail view"
+    assert not ds.box_is_free((237, 163, 263, 172), area, taken), "on the front view"

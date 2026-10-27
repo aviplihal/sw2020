@@ -763,6 +763,15 @@ def clip_line(point, direction, rect) -> tuple | None:
     return (px + lo * dx, py + lo * dy), (px + hi * dx, py + hi * dy)
 
 
+def box_is_free(box, area, taken, gap: float = 2.0) -> bool:
+    """Whether a box (x0, y0, x1, y1) lies on the area and clear of the taken
+    boxes by `gap`. Pure."""
+    if box[0] < area[0] or box[1] < area[1] or box[2] > area[2] or box[3] > area[3]:
+        return False
+    return all(box[2] + gap <= t[0] or t[2] + gap <= box[0] or box[3] + gap <= t[1] or t[3] + gap <= box[1]
+               for t in taken)
+
+
 def ray_side(point, line1, line2) -> float:
     """How far `point` lies into the sector between two rays ((start, direction)
     on the sheet), along the bisector from the first ray's start: centrelines

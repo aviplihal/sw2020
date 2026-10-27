@@ -57,6 +57,11 @@ All notable changes to this project are documented here. This project follows
 - Points in a section view were projected with its parent's axes, so
   dimensions and details in a section went to the wrong place. Every view's
   axes now come from the view itself.
+- Dimensions in a section view or a detail of a section can measure to the
+  cut face's outline (its lines and arcs, such as a fillet's arc for a
+  radius), which is no edge of the part: same point syntax.
+- A section or detail label that would land on the title block goes above
+  the view, else beside it, wherever no other view is.
 - A dimension in a detail view of a section could not select its edges
   (SOLIDWORKS 2020 refuses the part's edge there); the view's own copy of the
   edge is selected instead.

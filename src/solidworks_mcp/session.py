@@ -6098,8 +6098,10 @@ class SolidWorksSession:
             self._move_view(made[view["id"]]["view"], *(mm_to_m(c) for c in lay["centres_mm"][view["id"]]),
                             {"vertical": "x", "horizontal": "y"}.get(view.get("cut"), "xy"))
             made[view["id"]]["orientation"] = self._view_axes(made[view["id"]]["view"])
+        outlines = [self._outline_mm(info) for info in made.values()]
+        for view in plan:
             if view["kind"] != "standard":
-                self._keep_label_on_area(made[view["id"]])
+                self._keep_label_on_area(made[view["id"]], outlines)
         for view in plan:
             made[view["id"]]["marks"] = self._draw_marks(doc, drawing, made[view["id"]], view["marks"])
         return made
@@ -6108,12 +6110,15 @@ class SolidWorksSession:
     # view, its position the middle of its top line, two lines of 3.5 mm text.
     _LABEL_HEIGHT_MM = 9.0
     _LABEL_HALF_WIDTH_MM = 13.0
+    _OUTLINE_MARGIN_MM = 5.0
 
-    def _keep_label_on_area(self, made_view) -> None:
-        """Move a view's label beside the view when SolidWorks put it below the
-        drawing area (over the title block): a detail on the bottom row hangs its
-        label some 10 mm under its outline."""
+    def _keep_label_on_area(self, made_view, outlines) -> None:
+        """Move a view's label when SolidWorks put it below the drawing area (over
+        the title block: a tall section, or a detail on the bottom row, hangs its
+        label some 10 mm under its outline): above the view, else right of it,
+        else left of it, wherever it stays on the area and off the other views."""
         x0, y0, x1, y1 = self._outline_mm(made_view)
+        h, w = self._LABEL_HEIGHT_MM, self._LABEL_HALF_WIDTH_MM
         for handle in made_view["view"].GetAnnotations() or ():
             annotation = binding.wrap(handle, self._mod.IAnnotation)
             if SW_ANNOTATION_TYPES.get(annotation.GetType()) != "note":
@@ -6121,10 +6126,18 @@ class SolidWorksSession:
             if (binding.wrap(annotation.GetSpecificAnnotation(), self._mod.INote).GetText() or "").strip():
                 continue  # a placed note, not the label (which reads back blank)
             top = m_to_mm(list(annotation.GetPosition())[1])
-            if top - self._LABEL_HEIGHT_MM >= self._sheet["area_mm"][1]:
+            if top - h >= self._sheet["area_mm"][1]:
                 continue
-            annotation.SetPosition2(mm_to_m(x1 + 3.0 + self._LABEL_HALF_WIDTH_MM),
-                                    mm_to_m((y0 + y1) / 2 + self._LABEL_HEIGHT_MM / 2), 0.0)
+            # the label's position is the middle of its top line
+            # above may reach into the outline's own margin: SolidWorks' outline runs
+            # 5-7 mm wider than the drawn view (measured on 2020)
+            above = min(y1 + 2.0 + h, self._sheet["area_mm"][3])
+            spots = ([((x0 + x1) / 2, above)] if above - h >= y1 - self._OUTLINE_MARGIN_MM else []) + [
+                (x1 + 3.0 + w, (y0 + y1) / 2 + h / 2), (x0 - 3.0 - w, (y0 + y1) / 2 + h / 2)]
+            spot = next((p for p in spots if drawing_spec.box_is_free(
+                (p[0] - w, p[1] - h, p[0] + w, p[1]), self._sheet["area_mm"],
+                [o for o in outlines if o != [x0, y0, x1, y1]])), spots[1])
+            annotation.SetPosition2(mm_to_m(spot[0]), mm_to_m(spot[1]), 0.0)
 
     def _view_axes(self, iview) -> dict:
         """The model directions a view shows along the sheet's right and up, and
@@ -6447,6 +6460,10 @@ class SolidWorksSession:
             d = math.dist(point_mm, [m_to_mm(c) for c in near[:3]])
             if best_d is None or d < best_d:
                 best, best_d = e, d
+        if (best is None or best_d > self._EDGE_ON_TOLERANCE_MM) and target is not None                 and target.get("kind") in ("section", "detail"):
+            cut = self._cut_face_edge_at(target, point_mm)
+            if cut is not None:
+                return cut
         if (best is None or best_d > self._EDGE_ON_TOLERANCE_MM) and target is not None:
             line = self._silhouette_at(target, point_mm)
             if line is not None:
@@ -6611,6 +6628,17 @@ class SolidWorksSession:
                 continue
             if abs(want[0] * got[1] - want[1] * got[0]) < 1e-3:
                 return other
+        return None
+
+    def _cut_face_edge_at(self, target, point_mm):
+        """An edge of a section's cut face (the hatched outline) through a model
+        point, or None. They are no edges of the part; the view lists them with
+        its own edges (GetVisibleEntities2), in model space on the cutting plane
+        (verified on 2020: lines and arcs, also in a detail of a section)."""
+        for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_EDGE) or ():
+            edge = binding.wrap(handle, self._mod.IEdge)
+            if self._off_edge_mm(edge, point_mm) <= self._EDGE_ON_TOLERANCE_MM:
+                return edge
         return None
 
     def _off_edge_mm(self, edge, point_mm) -> float:
