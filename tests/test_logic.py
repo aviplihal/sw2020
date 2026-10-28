@@ -331,6 +331,111 @@ def test_wizard_values_follow_what_solidworks_accepts():
                for t in (True, False))
 
 
+@pytest.mark.parametrize("size,wizard_size,major_in,tpi,series,thread_class", [
+    ("7/8-9", "7/8-9", 0.875, 9, None, None),
+    (".875-9UNC", "7/8-9", 0.875, 9, "UNC", None),
+    ("0.875-9 UNC-3B", "7/8-9", 0.875, 9, "UNC", "3B"),
+    ("1/4-20unc-2b", "1/4-20", 0.25, 20, "UNC", "2B"),
+    ("1-8", "1-8", 1.0, 8, None, None),
+    ("1 1/8-7", "1-1/8-7", 1.125, 7, None, None),  # SolidWorks 2020 names mixed sizes '1-1/8'
+    ("1-1/8-7", "1-1/8-7", 1.125, 7, None, None),
+    ("#10-24", "#10-24", 0.19, 24, None, None),
+    (".190-32 UNF", "#10-32", 0.19, 32, "UNF", None),  # a numbered size by its diameter
+])
+def test_an_inch_tapped_size_is_named_as_solidworks_ansi_inch_table_names_it(
+        size, wizard_size, major_in, tpi, series, thread_class):
+    got = SolidWorksSession._inch_hole_size(size, "tapped")
+    assert got == {"wizard_size": wizard_size, "major_in": pytest.approx(major_in), "tpi": tpi,
+                   "series": series, "thread_class": thread_class}
+
+
+@pytest.mark.parametrize("size,wizard_size", [("1/4", "1/4"), (".250", "1/4"), ("#10", "#10"),
+                                              ("1/4-20", "1/4"), ("1-1/8", "1-1/8")])
+def test_an_inch_clearance_size_is_the_screw_diameter(size, wizard_size):
+    assert SolidWorksSession._inch_hole_size(size, "clearance")["wizard_size"] == wizard_size
+
+
+@pytest.mark.parametrize("size,kind,message", [
+    ("7/8", "tapped", "needs threads per inch"),
+    (".3-9", "tapped", "neither a fractional"),
+    ("#13-4", "tapped", "#0..#12"),
+    ("0-80", "tapped", "no diameter"),
+    ("seven-eighths", "tapped", "Cannot read"),
+    ("1/4-20-2B", "clearance", "thread class is for a tapped hole"),
+])
+def test_an_unreadable_inch_size_fails_loud(size, kind, message):
+    with pytest.raises(SolidWorksError, match=message):
+        SolidWorksSession._inch_hole_size(size, kind)
+
+
+def test_a_wizard_hole_that_did_not_take_the_inch_size_fails_loud(s):
+    """The size, the thread diameter and the class SolidWorks used are read back."""
+    inch = SolidWorksSession._inch_hole_size(".875-9UNC-3B", "tapped")
+    good = {"kind": "tapped", "wizard_size": "7/8-9", "thread_diameter_mm": 22.225, "thread_class": "3B"}
+    s._check_inch_wizard_size(good, inch, ".875-9UNC-3B")
+    for change, message in [({"wizard_size": "3/4-10"}, "has no tapped size"),
+                            ({"thread_diameter_mm": 19.05}, "not the"),
+                            ({"thread_class": "2B"}, "not '3B'")]:
+        with pytest.raises(SolidWorksError, match=message):
+            s._check_inch_wizard_size({**good, **change}, inch, ".875-9UNC-3B")
+
+
+@pytest.mark.parametrize("kwargs,message", [
+    ({"size": "7/8-9", "thread": "modeled"}, "needs an ISO metric size"),
+    ({"size": "7/8-9", "depth_mm": 10, "depth_in": "1.96"}, "not both"),
+    ({"size": "7/8-9", "depth_in": "0"}, "depth must be > 0"),
+])
+def test_inch_hole_wizard_arguments_are_checked_before_solidworks(s, kwargs, message):
+    with pytest.raises(SolidWorksError, match=message):
+        s.add_hole_wizard(kind="tapped", face="+z", x_mm=0, y_mm=0, z_mm=0, **kwargs)
+
+
+def test_wizard_values_carry_thread_depth_and_a_near_side_countersink():
+    """Found on 2020 by reading the feature back: Value1 is the thread depth,
+    Value2/Value3 the near-side countersink's diameter and angle."""
+    values = SolidWorksSession._wizard_values("tapped", 1, False, 0.032766, (0.023876, math.pi / 2))
+    assert values[:3] == [0.032766, 0.023876, math.pi / 2]
+    assert values[3:6] == [-1.0] * 3 and values[6:8] == [1.0, 0.0], "the rest stays as before"
+    assert SolidWorksSession._wizard_values("tapped", 1, False)[:3] == [-1.0] * 3
+
+
+@pytest.mark.parametrize("value_mm,value_in,expected", [(10, None, 10), (None, "1.96", 49.784),
+                                                        (None, 1.29, 32.766), (None, None, None)])
+def test_a_hole_length_is_given_in_mm_or_inches(value_mm, value_in, expected):
+    got = SolidWorksSession._length_mm("depth", value_mm, value_in)
+    assert got == (None if expected is None else pytest.approx(expected))
+
+
+# RayIntersections flags measured on 2020 where a plane touches a ring: the
+# material side ENTERs (16) at 0, the air side grazes and EXITs (32) at 0.
+@pytest.mark.parametrize("ahead,behind,side", [
+    ([(0.0, 17), (77.3, 33)], [(0.0, 33)], 1),              # the part lies along the normal
+    ([(0.0, 33)], [(0.0, 17), (77.3, 33)], -1),
+    ([(0.0, 17), (21.7, 33)], [(0.0, 33), (172.4, 17)], 1),  # a bore: the far wall does not count
+    ([(12.0, 33)], [(30.0, 33)], 0),                        # inside the material
+    ([], [], 0),                                            # in the air
+    ([(5.0, 17)], [], 0),                                   # a gap: the plane does not touch the part
+])
+def test_a_hole_from_a_plane_drills_where_the_plane_touches_the_part(ahead, behind, side):
+    assert SolidWorksSession._touching_side(ahead, behind, 0.01) == side
+
+
+@pytest.mark.parametrize("kwargs,message", [
+    ({"face": "+z", "plane": "Plane1"}, "one of them"),
+    ({"face": None}, "one of them"),
+    ({"thread_depth_in": "1.29", "kind": "clearance", "size": "1/4"}, "for kind='tapped'"),
+    ({"csink_diameter_in": ".94"}, "csink_angle_deg"),
+    ({"csink_angle_deg": 90}, "csink_diameter"),
+    ({"csink_diameter_in": ".94", "csink_angle_deg": 180}, "between 0 and 180"),
+    ({"depth_in": "1.29", "thread_depth_in": "1.96"}, "cannot run deeper"),
+    ({"size": "M3", "thread": "modeled", "plane": "Plane1", "face": None}, "modeled thread starts on a face"),
+])
+def test_hole_wizard_plane_and_countersink_arguments_are_checked(s, kwargs, message):
+    args = {"kind": "tapped", "size": "7/8-9", "face": "+z", "x_mm": 0, "y_mm": 0, "z_mm": 0, **kwargs}
+    with pytest.raises(SolidWorksError, match=message):
+        s.add_hole_wizard(**args)
+
+
 def test_parse_face_selector_rejects_unknown_side(s):
     with pytest.raises(SolidWorksError):
         s._parse_face_selector("+z:middle")

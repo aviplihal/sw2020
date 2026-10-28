@@ -32,10 +32,10 @@ it "looks about right".
   by role (`width@Sketch1`), so the part stays editable, in SolidWorks or
   through the agent.
 - **Real CAD, not just primitives.** Extrude, revolve, sweep, loft and splines;
-  holes, counterbores, slots and pockets on any face; rounded polygon corners; ISO holes from the Hole Wizard; real ISO metric threads;
+  holes, counterbores, slots and pockets on any face; rounded polygon corners; ISO and ANSI inch holes from the Hole Wizard; real ISO metric threads;
   fillets, chamfers, shells, patterns, mirrors, ribs, equations and materials. Assemblies
   with mates and interference checks. STEP/STL/3MF export and screenshots.
-  Engraved and embossed text. Work on existing parts: list, delete, suppress and reorder features; read, extrude and cut a person's sketches; import STEP. Colours per part or component. Joints with concentric and angle mates, checked over their range. Printability checks and dimensioned drawings. Planes at any offset or angle. Several bodies per part, combined and split. Variable fillets and full rounds. Free sketches with tangent arcs and splines. 86 tools in total.
+  Engraved and embossed text. Work on existing parts: list, delete, suppress and reorder features; read, extrude and cut a person's sketches; import STEP. Colours per part or component. Joints with concentric and angle mates, checked over their range. Printability checks and dimensioned drawings. Planes at any offset or angle. Several bodies per part, combined and split. Variable fillets and full rounds. Free sketches with tangent arcs and splines. 98 tools in total.
 - **It fails loud.** A call that cannot do what was asked returns
   `{ok: false, error}` with the cause, never silently wrong geometry.
 - **A fixed, typed tool surface.** There is no "run arbitrary code" tool; the
@@ -210,7 +210,7 @@ The server speaks MCP over **stdio**.
 | `add_counterbore_hole(clearance_diameter_mm, cbore_diameter_mm, cbore_depth_mm, x_mm, y_mm, name)` | Counterbored screw hole (flush cap-head / heat-set insert) on +Z |
 | `add_thread(size, x_mm, y_mm, z_mm, length_mm, internal, name)` | Real, printable ISO metric thread (e.g. `M10x1.5`) from a rod's end edge or a hole's mouth, via SolidWorks' Thread feature; the size is checked against the thread profiles. Internal: drill the basic minor diameter first (M10x1.5 → Ø8.376) |
 | `add_hole_on_face(diameter_mm, face, x_mm, y_mm, z_mm, depth_mm, name)` | Round hole on ANY planar face at a 3D point, through or blind (side holes, heat-set insert holes); the face through the point is used |
-| `add_hole_wizard(kind, size, face, x_mm, y_mm, z_mm, depth_mm, fit, thread, name)` | ISO hole from SolidWorks' Hole Wizard tables: clearance (ISO 273 fits), counterbore, countersink or tapped; `thread="modeled"` cuts a real, printable thread |
+| `add_hole_wizard(kind, size, face, x_mm, y_mm, z_mm, depth_mm, fit, thread, name, depth_in, plane, thread_depth_mm, thread_depth_in, csink_diameter_mm, csink_diameter_in, csink_angle_deg)` | ISO (`'M3'`) or ANSI Inch (`'7/8-9'`, `'.875-9UNC-3B'`, `'#10-24'`) hole from SolidWorks' Hole Wizard tables: clearance (ISO 273 fits), counterbore, countersink or tapped (the table's tap drill); on a face or from a reference plane tangent to a round part (`plane=`); tapped holes take a thread depth and a near-side countersink; `thread="modeled"` (ISO) cuts a real, printable thread |
 | `add_boss_on_face(diameter_mm, face, x_mm, y_mm, z_mm, height_mm, name)` | Round boss (standoff, peg) grown out of ANY planar face |
 | `add_extruded_profile_on_face(points_mm, face, depth_mm, name, corner_radii_mm)` | Polygon pad/ledge grown out of ANY planar face (3D points on the face) |
 | `add_text_on_face(text, face, x_mm, y_mm, z_mm, height_mm, depth_mm, emboss, font, name)` | Engrave text into ANY planar face, or emboss it: labels, version numbers; the position is two dimensions |
@@ -248,7 +248,9 @@ The server speaks MCP over **stdio**.
 | `check_printability(up, overhang_deg, min_wall_mm)` | For a print direction: overhanging faces (area, worst lean, centre), bed contact, height; with `min_wall_mm` the walls thinner than that |
 | `export(path, file_format, quality, deviation_mm, angle_deg, per_component)` | STEP/STL/IGES/Parasolid/3MF (silent; verifies file). STL/3MF tessellation: `quality` `coarse`/`fine`, or explicit `deviation_mm`+`angle_deg`; an assembly's STL as one file or one per component |
 | `screenshot(path, view, zoom_mm, show_planes, from_dir)` | PNG/JPG/TIF from a standard view (`iso`, `front`, `top`, …) or any direction, zoomed to fit or onto a region; planes and axes left out unless asked for |
-| `make_drawing(path)` | 2D drawing as PDF or editable `.slddrw`: front, top, right (first angle) and isometric views on A4 with the model's own dimensions, each once |
+| `make_drawing(path, spec, views, placements)` | Shop drawing as editable `.slddrw` or PDF: A-size sheet with the stock ANSI title block, third angle, inches, no isometric. With a drawing spec: every dimension at its own precision, fraction, limits or tolerance, datums, GD&T frames, thread/hole callouts, finish symbols and notes, in the views you choose (including section and detail views). Without one: front, top and right with the model's own dimensions |
+| `check_drawing(path, spec)` | Read a saved drawing back and compare it with the spec: ok / missing / differs / unreadable per item, plus anything not in the spec |
+| `arrange_drawing(path, mode, move_views)` | Tidy a saved drawing's texts: none on another text, a view, the border or the title block, each close to what it describes. Dimensions step out from their view in tiers and keep their side, angles slide out from their vertex, frames move with their dimension, leader items (radii and diameters on a leader too) stay near their point, labels under their view; nothing is left on a view. `full` lays out afresh (views may move apart), `fix` moves only what clashes; returns the problems before and after |
 | `save_part(path)` / `open_part(path)` | Save to / open a native `.sldprt`; `open_part` also imports STEP, IGES and Parasolid files as a part to build on |
 | `close_part(save)` | Close the current part or assembly; without one, SolidWorks' active document if it is saved |
 | `list_documents` / `activate_document(title)` | The open documents (path, type, unsaved changes) / make one current again, also one never saved |

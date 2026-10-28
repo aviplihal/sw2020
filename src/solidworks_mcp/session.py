@@ -16,14 +16,16 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
+from fractions import Fraction
 from xml.sax.saxutils import quoteattr
 
 import pythoncom
 import win32com.client
 import win32gui
 
-from . import __version__, binding, case_paths, free_sketch
+from . import __version__, binding, case_paths, drawing_layout, drawing_spec, free_sketch
 from .constants import (
     FEATURE_ERRORS,
     DRAWING_FORMATS,
@@ -54,7 +56,6 @@ from .constants import (
     SW_DOC_DRAWING,
     SW_DOC_PART,
     SW_DONT_REBUILD_ACTIVE_DOC,
-    SW_DWG_PAPER_A4,
     SW_END_COND_BLIND,
     SW_END_COND_MID_PLANE,
     SW_END_COND_THROUGH_ALL,
@@ -89,7 +90,13 @@ from .constants import (
     SW_ISO_SOCKET_COUNTERSUNK,
     SW_ISO_SOCKET_HEAD_CAP,
     SW_ISO_TAPPED_HOLE,
+    SW_ANSI_INCH_FLAT_SOCKET_82,
+    SW_ANSI_INCH_SCREW_CLEARANCES,
+    SW_ANSI_INCH_SOCKET_CAP_SCREW,
+    SW_ANSI_INCH_TAPPED_HOLE,
+    SW_WZD_STANDARD_ANSI_INCH,
     SW_PREF_DEFAULT_TEMPLATE_DRAWING,
+    SW_RAY_HIT_ENTER,
     SW_RAY_HIT_EXIT,
     SW_RAY_NORMALS_ENTRY_EXIT,
     SW_REF_PLANE_ANGLE,
@@ -142,7 +149,69 @@ from .errors import SolidWorksError
 from .mesh_tools import area, compare_sections, extents, load_mesh, section, simplify
 from .region_tools import swept_outline
 from .sketch_constraints import MAX_DIMENSIONED_VERTICES, SketchDefiner
-from .units import deg_to_rad, m_to_mm, mm_to_m
+from .constants import (  # shop drawings
+    SHEETS,
+    SW_ANGULAR_DIMENSION_TYPE,
+    SW_ANNOTATION_OWNER_TEMPLATE,
+    SW_ANNOTATION_TYPES,
+    SW_ARROW_CLOSED,
+    SW_DECIMAL,
+    SW_DETAIL_CIRCLE,
+    SW_DETAIL_STANDARD,
+    SW_DETAILING_ANSI,
+    SW_DIMENSION_TEXT_PREFIX,
+    SW_DIMENSION_TEXT_SUFFIX,
+    SW_DWG_TEMPLATE_CUSTOM,
+    SW_FRACTION,
+    SW_GCS,
+    SW_GCS_TOKENS,
+    SW_GTOL_MATERIAL,
+    SW_GTOL_MATERIAL_TOKENS,
+    SW_INCHES,
+    SW_LEADER_STRAIGHT,
+    SW_PREF_DIMENSION_STANDARD,
+    SW_PREF_DOUBLE_PRIME_MARK,
+    SW_PREF_SHEET_FORMAT_FOLDERS,
+    SW_PREF_UNIT_SYSTEM,
+    SW_PREF_UNITS_LINEAR,
+    SW_PREF_UNITS_LINEAR_DECIMALS,
+    SW_ROUND_HALF_AWAY,
+    SW_SECTION_CHANGE_DIRECTION,
+    SW_SF_MAX_ROUGHNESS,
+    SW_SF_SYMBOLS,
+    SW_TOLERANCE_NAMES,
+    SW_TOLERANCES,
+    SW_UNIT_SYSTEM_IPS,
+    SW_SEL_PART_GEOMETRY,
+    SW_VIEW_ENTITY_SILHOUETTE,
+    SW_VIEW_ENTITY_EDGE,
+)
+from .units import deg_to_rad, in_to_mm, m_to_mm, mm_to_in, mm_to_m
+
+
+class _SheetPick:
+    """A face picked by where it shows on the sheet: a face seen edge-on, or a
+    cone or cylinder whose silhouette the view's list leaves out (2020 does, at
+    random). Leaders attach to it; dimensions refuse it. Holds the model point,
+    its sheet position (m) and the face it lies on."""
+
+    def __init__(self, point_mm, x_m: float, y_m: float, face) -> None:
+        self.point_mm, self.x_m, self.y_m, self.face = point_mm, x_m, y_m, face
+
+
+class _Mark:
+    """A centreline, centreline circle or point drawn in a drawing view's sketch
+    (make_drawing's view "marks"), which dimensions measure to. Holds the mark
+    as validated (model points in mm) and its sketch segment or point."""
+
+    def __init__(self, mark: dict, entity) -> None:
+        self.mark, self.entity = mark, entity
+        self.kind, self.id = mark["kind"], mark["id"]
+
+    @property
+    def point_mm(self):
+        """The model point that stands for the mark: a line's start, a circle's centre."""
+        return self.mark.get("from_mm") or self.mark.get("center_mm") or self.mark["at_mm"]
 
 
 class SolidWorksSession:
@@ -154,6 +223,8 @@ class SolidWorksSession:
         self._model = None    # current IModelDoc2
         self._quiet_depth = 0  # inside _quiet_ui
         self._to_wake = []     # (document, [(object, property)]) to switch back on after it
+        self._lookups = None   # make_drawing's edges, faces and silhouettes, looked up once
+        self._timings = {"items": {}}  # make_drawing's seconds per phase and item
         self.sw_revision = None  # e.g. '28.5.0', read at connect; logged with every tool call
 
     # --- connection -----------------------------------------------------------
@@ -328,13 +399,24 @@ class SolidWorksSession:
 
     def activate_document(self, title: str) -> dict:
         """Make an open document current again by its title (list_documents),
-        also a new one that was never saved."""
+        also a new one that was never saved, or by its file path. A drawing
+        has its part's title ('DTN7' for DTN7.SLDDRW too): a title both share
+        means the part (or assembly)."""
         documents = self._open_documents()
-        key = re.sub(r"\.(sldprt|sldasm|slddrw)$", "", str(title).strip(), flags=re.IGNORECASE).lower()
-        matches = [d for d in documents if d.GetTitle() == title] or \
+        text = str(title).strip()
+        by_path = [d for d in documents if d.GetPathName()
+                   and os.path.normcase(d.GetPathName()) == os.path.normcase(os.path.abspath(text))]
+        key = re.sub(r"\.(sldprt|sldasm|slddrw)$", "", text, flags=re.IGNORECASE).lower()
+        matches = by_path or [d for d in documents if d.GetTitle() == title] or \
             [d for d in documents if re.sub(r"\.(sldprt|sldasm|slddrw)$", "", d.GetTitle(), flags=re.IGNORECASE).lower() == key]
+        if len(matches) > 1:
+            models = [d for d in matches if d.GetType() != SW_DOC_DRAWING]
+            matches = models if len(models) == 1 else matches
         if len(matches) != 1:
             listed = ", ".join(d.GetTitle() for d in documents) or "none"
+            if matches:
+                raise SolidWorksError(f"{len(matches)} open documents are titled '{title}': give its file path "
+                                      f"({', '.join(d.GetPathName() or d.GetTitle() for d in matches)}).")
             raise SolidWorksError(f"No open document '{title}' (open: {listed}).")
         self._model = matches[0]
         self._require_model()  # SolidWorks' active document too
@@ -2184,7 +2266,7 @@ class SolidWorksSession:
             "right_handed": True,
         })
 
-    # --- Hole Wizard: SolidWorks' own ISO tables -----------------------------------
+    # --- Hole Wizard: SolidWorks' own ISO and ANSI Inch tables ---------------------
 
     # kind -> (swWzdGeneralHoleTypes_e, fastener type): ISO 273 clearances,
     # counterbores for ISO 4762 socket head cap screws, countersinks for ISO 10642
@@ -2195,21 +2277,94 @@ class SolidWorksSession:
         "countersink": (SW_WZD_COUNTERSINK, SW_ISO_SOCKET_COUNTERSUNK),
         "tapped": (SW_WZD_TAP, SW_ISO_TAPPED_HOLE),
     }
+    # The same kinds in the ANSI Inch standard: screw clearances, counterbores for
+    # socket head cap screws, countersinks for 82 degree flat socket head screws,
+    # tapped holes (UNC / UNF / UNEF / UNS, by threads per inch).
+    _WIZARD_KINDS_INCH = {
+        "clearance": (SW_WZD_HOLE, SW_ANSI_INCH_SCREW_CLEARANCES),
+        "counterbore": (SW_WZD_COUNTERBORE, SW_ANSI_INCH_SOCKET_CAP_SCREW),
+        "countersink": (SW_WZD_COUNTERSINK, SW_ANSI_INCH_FLAT_SOCKET_82),
+        "tapped": (SW_WZD_TAP, SW_ANSI_INCH_TAPPED_HOLE),
+    }
     _WIZARD_THREADS = ("cosmetic", "modeled")
+    _INCH_SIZE = re.compile(
+        r"(?P<dia>#\d+|\d+[ -]\d+/\d+|\d+/\d+|\d*\.\d+|\d+)"
+        r"(?:\s*-\s*(?P<tpi>\d+)\s*(?P<series>UNC|UNF|UNEF|UNS)?)?"
+        r"(?:\s*-?\s*(?P<cls>[123]B))?",
+        re.IGNORECASE,
+    )
 
     @staticmethod
-    def _wizard_values(kind: str, fit: int, through: bool) -> list:
+    def _inch_hole_size(size: str, kind: str) -> dict:
+        """An inch size as SolidWorks' ANSI Inch Hole Wizard table names it.
+
+        Takes '7/8-9', '.875-9UNC', '0.875-9 UNC-3B', '1-1/8-7' or '1 1/8-7',
+        '#10-24' (tapped: diameter-threads per inch; the series and the class
+        are optional). The other kinds take the screw's diameter ('1/4',
+        '.250', '#10'; a pitch such as '1/4-20' is ignored). A decimal must be
+        an exact 1/64 fraction or a numbered size (#0..#12: .060 + .013 n
+        inch, ASME B1.1). Returns {'wizard_size', 'major_in', 'tpi', 'series',
+        'thread_class'}.
+        """
+        m = SolidWorksSession._INCH_SIZE.fullmatch(str(size).strip())
+        if m is None:
+            raise SolidWorksError(
+                f"Cannot read the hole size '{size}'. Use ISO metric ('M3') or inch: '7/8-9' or "
+                f"'.875-9UNC' (diameter-threads per inch, optional series and class like '-3B'), "
+                f"'#10-24'; a bare diameter such as '1/4' for clearance/counterbore/countersink."
+            )
+        dia, tpi, series, cls = m["dia"], m["tpi"], m["series"], m["cls"]
+        if kind == "tapped" and tpi is None:
+            raise SolidWorksError(f"An inch tapped hole needs threads per inch, e.g. '7/8-9' (got '{size}').")
+        if kind != "tapped" and cls:
+            raise SolidWorksError(f"A thread class is for a tapped hole, not a {kind} one (got '{size}').")
+        if dia.startswith("#"):
+            number = int(dia[1:])
+            major = Fraction("0.060") + Fraction("0.013") * number
+            if number > 12:
+                raise SolidWorksError(f"Numbered inch sizes run #0..#12 (got '{dia}').")
+        else:
+            whole, _, part = dia.replace("-", " ").rpartition(" ")
+            major = (Fraction(int(whole)) if whole else 0) + Fraction(part)  # exact: "7/8" or ".875"
+        if major <= 0:
+            raise SolidWorksError(f"The hole size '{size}' has no diameter.")
+        numbered = next((n for n in range(13) if Fraction("0.060") + Fraction("0.013") * n == major), None)
+        if numbered is not None and major < Fraction(1, 4):
+            name = f"#{numbered}"
+        elif (64 % major.denominator) == 0:
+            w, r = divmod(major, 1)
+            name = "-".join(t for t in (str(w) if w else "", str(r) if r else "") if t)  # "1-1/8"
+        else:
+            raise SolidWorksError(
+                f"{float(major):g} in is neither a fractional (1/64) nor a numbered (#0..#12) inch size."
+            )
+        if tpi is not None and kind == "tapped":
+            name = f"{name}-{int(tpi)}"
+        return {"wizard_size": name, "major_in": float(major), "tpi": int(tpi) if tpi else None,
+                "series": series.upper() if series else None, "thread_class": cls.upper() if cls else None}
+
+    @staticmethod
+    def _wizard_values(kind: str, fit: int, through: bool, thread_depth_m: float | None = None,
+                       csink: tuple | None = None) -> list:
         """HoleWizard5's Value1..Value12 for `kind`; -1 means 'from the standard'.
 
         Found by trial on SOLIDWORKS 2026, each vector verified by a volume test:
         a plain hole cut through all fails unless its unused values are 0, while a
         tapped hole given zeros cuts garbage. A tapped hole keeps its cosmetic
         thread: without one SolidWorks mills the threaded length at the major
-        diameter.
+        diameter. Tapped, found on 2020 by reading the feature back: Value1 is
+        the thread depth, Value2/Value3 a near-side countersink's diameter and
+        angle (m, rad; given together they turn it on), Value6 the drill point
+        angle.
         """
         if kind == "tapped":
             thread_end = 1.0 if through else 0.0  # swWzdHoleThreadEndCondition_e
-            return [-1.0] * 6 + [float(SW_COSMETIC_THREAD_WITH_CALLOUT), thread_end] + [-1.0] * 4
+            values = [-1.0] * 6 + [float(SW_COSMETIC_THREAD_WITH_CALLOUT), thread_end] + [-1.0] * 4
+            if thread_depth_m is not None:
+                values[0] = float(thread_depth_m)
+            if csink is not None:
+                values[1], values[2] = (float(c) for c in csink)
+            return values
         if kind == "clearance":
             return [float(fit)] + [0.0 if through else -1.0] * 11
         return [-1.0, -1.0, -1.0, float(fit)] + [-1.0] * 8  # counterbore/countersink: fit is Value4
@@ -2281,13 +2436,21 @@ class SolidWorksSession:
             model.ClearSelection2(True)
             sk.InsertSketch(True)  # leave the position sketch
 
-    def _wizard_hole_info(self, feat, kind: str, size: str, fit: str) -> dict:
-        """The sizes SolidWorks took from its standard table for this hole (mm, degrees)."""
+    def _wizard_hole_info(self, feat, kind: str, size: str, fit: str, inch: dict | None = None) -> dict:
+        """The sizes SolidWorks took from its standard table for this hole (mm, degrees;
+        for an ANSI Inch hole each length also in inches, as `*_in`)."""
         data = binding.wrap(feat.GetDefinition(), self._mod.IWizardHoleFeatureData2)
         mm = lambda v: round(m_to_mm(v), 4)
-        info = {"standard": "ISO", "kind": kind, "size": size}
+        info = {"standard": "ANSI Inch" if inch else "ISO", "kind": kind, "size": size}
+        if inch:
+            info.update(wizard_size=data.FastenerSize, series=inch["series"],
+                        thread_class=data.ThreadClass or None)
+        if kind == "tapped" and data.NearSideCounterSink:
+            info.update(near_csink=True, near_csink_diameter_mm=mm(data.NearCounterSinkDiameter),
+                        near_csink_angle_deg=round(math.degrees(data.NearCounterSinkAngle), 3))
         if kind == "tapped":
             info.update(tap_drill_diameter_mm=mm(data.TapDrillDiameter or data.ThruTapDrillDiameter),
+                        tap_drill_depth_mm=mm(data.TapDrillDepth),
                         thread_diameter_mm=mm(data.ThreadDiameter),
                         thread_depth_mm=mm(data.ThreadDepth), cosmetic_thread=data.CosmeticThreadType > 0)
         else:
@@ -2297,25 +2460,179 @@ class SolidWorksSession:
         if kind == "countersink":
             info.update(csink_diameter_mm=mm(data.CounterSinkDiameter),
                         csink_angle_deg=round(math.degrees(data.CounterSinkAngle), 3))
+        if inch:
+            info.update({k[:-3] + "_in": round(mm_to_in(v), 4) for k, v in list(info.items())
+                         if k.endswith("_mm")})
         return info
 
-    def add_hole_wizard(self, kind: str, size: str, face: str, x_mm: float, y_mm: float, z_mm: float,
+    def _check_inch_wizard_size(self, info: dict, inch: dict, size: str) -> None:
+        """Fail loud when SolidWorks did not take the inch size as asked: it may
+        fall back to another size or class rather than refuse one it lacks."""
+        if info.get("wizard_size") != inch["wizard_size"]:
+            raise SolidWorksError(
+                f"SolidWorks' ANSI Inch table has no {info['kind']} size '{inch['wizard_size']}' (from "
+                f"'{size}'): the Hole Wizard took '{info.get('wizard_size')}' instead."
+            )
+        if info["kind"] == "tapped":
+            got = info["thread_diameter_mm"]
+            if abs(got - in_to_mm(inch["major_in"])) > self._THREAD_DIAMETER_TOLERANCE_MM:
+                raise SolidWorksError(
+                    f"The Hole Wizard's '{inch['wizard_size']}' thread is Ø{got:.3f} mm, not the "
+                    f"Ø{in_to_mm(inch['major_in']):.3f} mm of '{size}'."
+                )
+        if inch["thread_class"] and info.get("thread_class") != inch["thread_class"]:
+            raise SolidWorksError(
+                f"SolidWorks made thread class '{info.get('thread_class')}', not '{inch['thread_class']}'."
+            )
+
+    @staticmethod
+    def _length_mm(label: str, value_mm, value_in) -> float | None:
+        """A length given in mm or in inches (text is read exactly, see units.in_to_mm), or None."""
+        if value_in is not None:
+            if value_mm is not None:
+                raise SolidWorksError(f"Give {label}_mm or {label}_in, not both.")
+            value_mm = in_to_mm(value_in if isinstance(value_in, str) else float(value_in))
+        if value_mm is not None and value_mm <= 0:
+            raise SolidWorksError(f"{label.replace('_', ' ')} must be > 0 (got {value_mm}).")
+        return value_mm
+
+    def _ray_hits(self, point_mm, direction) -> list:
+        """Where a ray from point_mm along `direction` meets the solid body:
+        sorted (distance mm, swRayPtsResults_e flags) pairs."""
+        start = [mm_to_m(c) for c in point_mm]
+        model = self._model
+        hits = model.RayIntersections(
+            win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, [self._solid_body()._oleobj_]),
+            win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, start),
+            win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [float(n) for n in direction]),
+            SW_RAY_NORMALS_ENTRY_EXIT, 0.0, 0.0)
+        points = model.GetRayIntersectionsPoints() if hits else ()
+        return sorted((m_to_mm(math.dist(points[h * RAY_HIT_WIDTH + 3:h * RAY_HIT_WIDTH + 6], start)),
+                       int(points[h * RAY_HIT_WIDTH + 2])) for h in range(hits or 0))
+
+    @staticmethod
+    def _touching_side(ahead: list, behind: list, tolerance_mm: float) -> int:
+        """+1 / -1: the side of a plane where the part starts at the point, from
+        the ray hits each way (see _ray_hits); 0 when it touches neither or
+        both. Measured on 2020: the material side enters (ENTER) at 0, while a
+        ray grazing the part on the air side exits (EXIT) at 0. Pure."""
+        def enters(hits):
+            return any(d <= tolerance_mm and flags & SW_RAY_HIT_ENTER for d, flags in hits)
+        a, b = enters(ahead), enters(behind)
+        return 0 if a == b else (1 if a else -1)
+
+    def _wizard_plane_side(self, plane: str, point) -> tuple:
+        """(plane, label, direction into the material, plane normal) for a hole that starts on a
+        reference plane at `point`. The point must lie on the plane, and the
+        part must start there on one side of it (the plane touches the part at
+        the point): the hole drills that way."""
+        ref, label = self._named_plane(plane)
+        frame = self._plane_frame(ref)
+        normal = frame["normal"]
+        where = ", ".join(f"{c:g}" for c in point)
+        off = sum((p - o) * n for p, o, n in zip(point, frame["origin_mm"], normal))
+        if abs(off) > self._ON_FACE_TOLERANCE_MM:
+            raise SolidWorksError(f"({where}) mm is not on the {label} but {abs(off):.3g} mm off it. "
+                                  f"Give a point on the plane.")
+        side = self._touching_side(self._ray_hits(point, normal), self._ray_hits(point, [-n for n in normal]),
+                                   self._ON_FACE_TOLERANCE_MM)
+        if not side:
+            raise SolidWorksError(
+                f"The {label} does not touch the part at ({where}) mm with the part on one side: the point lies "
+                f"in the air or inside the material. A hole from a plane starts where the plane touches the "
+                f"part, such as a plane tangent to a round part at the hole's centre."
+            )
+        return ref, label, [side * n for n in normal], normal
+
+    def _check_wizard_extras(self, info: dict, thread_depth_mm, csink_diameter_mm, csink_angle_deg) -> None:
+        """Fail loud when the thread depth or the countersink did not come out as asked."""
+        tol = self._THREAD_DIAMETER_TOLERANCE_MM
+        if thread_depth_mm is not None and abs(info["thread_depth_mm"] - thread_depth_mm) > tol:
+            raise SolidWorksError(f"SolidWorks made the thread {info['thread_depth_mm']:g} mm deep, "
+                                  f"not {thread_depth_mm:g} mm.")
+        if csink_diameter_mm is None:
+            return
+        if not info.get("near_csink"):
+            raise SolidWorksError("SolidWorks did not add the near-side countersink.")
+        if (abs(info["near_csink_diameter_mm"] - csink_diameter_mm) > tol
+                or abs(info["near_csink_angle_deg"] - csink_angle_deg) > 1e-3):
+            raise SolidWorksError(
+                f"SolidWorks made the countersink Ø{info['near_csink_diameter_mm']:g} mm x "
+                f"{info['near_csink_angle_deg']:g}°, not Ø{csink_diameter_mm:g} mm x {csink_angle_deg:g}°."
+            )
+        if csink_diameter_mm <= info["tap_drill_diameter_mm"]:
+            raise SolidWorksError(f"The countersink (Ø{csink_diameter_mm:g} mm) must be wider than the "
+                                  f"tap drill (Ø{info['tap_drill_diameter_mm']:g} mm).")
+
+    def _fix_cosmetic_thread(self, feat, major_mm: float) -> None:
+        """Give a wizard hole's cosmetic thread its major diameter.
+
+        A tapped hole started on a plane that touches a curved surface gets a
+        cosmetic thread with no edge and a made-up diameter (2020: the tap drill
+        plus 1 mm, or 0). Setting the diameter holds through rebuilds.
+        """
+        sub = next((x for x in self._sub_features(feat) if x.GetTypeName2() == "CosmeticThread"), None)
+        if sub is None:
+            raise SolidWorksError(f"The Hole Wizard hole '{feat.Name}' has no cosmetic thread.")
+        data = binding.wrap(sub.GetDefinition(), self._mod.ICosmeticThreadFeatureData)
+        if abs(m_to_mm(data.Diameter) - major_mm) <= self._THREAD_DIAMETER_TOLERANCE_MM:
+            return
+        data.AccessSelections(self._model, None)
+        data.Diameter = mm_to_m(major_mm)
+        if not sub.ModifyDefinition(data, self._model, None):
+            raise SolidWorksError(f"Could not set the cosmetic thread of '{feat.Name}' to Ø{major_mm:g} mm.")
+
+    def add_hole_wizard(self, kind: str, size: str, face: str | None, x_mm: float, y_mm: float, z_mm: float,
                         depth_mm: float | None = None, fit: str = "normal", thread: str = "cosmetic",
-                        name: str | None = None) -> dict:
-        """An ISO hole from SolidWorks' Hole Wizard, sized by its standard tables.
+                        name: str | None = None, depth_in: float | str | None = None,
+                        plane: str | None = None, thread_depth_mm: float | None = None,
+                        thread_depth_in: float | str | None = None, csink_diameter_mm: float | None = None,
+                        csink_diameter_in: float | str | None = None, csink_angle_deg: float | None = None) -> dict:
+        """An ISO or ANSI Inch hole from SolidWorks' Hole Wizard, sized by its standard tables.
 
         kind: 'clearance' (ISO 273), 'counterbore' (socket head cap screw,
         ISO 4762), 'countersink' (socket countersunk screw, ISO 10642) or
-        'tapped'. size: ISO metric, e.g. 'M3'. Centred at 3D point (x, y, z) on
-        the face through it (as add_hole_on_face); through all, or depth_mm deep
-        (a blind hole ends in a 118 degree drill point). fit: 'close', 'normal'
-        or 'loose' (not for tapped). thread (tapped only): 'cosmetic' drills the
-        ISO tap drill and adds SolidWorks' cosmetic thread; 'modeled' drills the
-        ISO basic minor diameter and cuts a real, printable thread over the
-        standard thread depth (all the way through a through hole). Returns the
-        standard's sizes in `hole`, and the position as dimensions x/y.
+        'tapped'. size: ISO metric, e.g. 'M3', or inch, which takes the ANSI
+        Inch tables (screw clearances, socket head cap screw, 82 degree flat
+        socket head screw, tapped holes): '7/8-9', '.875-9UNC', '7/8-9 UNC-3B',
+        '#10-24' (see _inch_hole_size). Centred at 3D point (x, y, z) on the
+        face through it (as add_hole_on_face); through all, or depth_mm (or
+        depth_in, inches) deep (a blind hole ends in a 118 degree drill point;
+        for a tapped hole it is the tap drill depth). fit: 'close', 'normal' or
+        'loose' (not for tapped). thread (tapped only): 'cosmetic' drills the
+        standard's tap drill and adds SolidWorks' cosmetic thread; 'modeled'
+        (ISO only) drills the ISO basic minor diameter and cuts a real,
+        printable thread over the standard thread depth (all the way through a
+        through hole). Returns the standard's sizes in `hole`, and the position
+        as dimensions x/y.
+
+        plane (with face None): start the hole on a reference plane by name,
+        such as one add_plane made tangent to a round part. The point lies on
+        the plane where it touches the part; the hole drills along the plane's
+        normal into the part (a point in the air or inside the material
+        fails), and its depth counts from the plane. A blind hole that cuts
+        nothing fails. Tapped holes only: thread_depth_mm / _in sets the
+        cosmetic thread's depth (default the standard's), and csink_diameter_mm
+        / _in with csink_angle_deg adds a near-side countersink.
         """
-        model = self._require_model()
+        depth_mm = self._length_mm("depth", depth_mm, depth_in)
+        thread_depth_mm = self._length_mm("thread_depth", thread_depth_mm, thread_depth_in)
+        csink_diameter_mm = self._length_mm("csink_diameter", csink_diameter_mm, csink_diameter_in)
+        if (face is None) == (plane is None):
+            raise SolidWorksError("Give face (a planar face, e.g. '+z') or plane (a reference plane by name), "
+                                  "one of them.")
+        extras = thread_depth_mm is not None or csink_diameter_mm is not None or csink_angle_deg is not None
+        if extras and kind != "tapped":
+            raise SolidWorksError("thread_depth and a near-side countersink are for kind='tapped'.")
+        if (csink_diameter_mm is None) != (csink_angle_deg is None):
+            raise SolidWorksError("A near-side countersink needs csink_diameter (mm or in) and csink_angle_deg.")
+        if csink_angle_deg is not None and not 0 < csink_angle_deg < 180:
+            raise SolidWorksError(f"csink_angle_deg must be between 0 and 180 (got {csink_angle_deg}).")
+        if thread_depth_mm is not None and depth_mm is not None and thread_depth_mm > depth_mm + 1e-9:
+            raise SolidWorksError(f"The thread ({thread_depth_mm:g} mm) cannot run deeper than the tap drill "
+                                  f"({depth_mm:g} mm).")
+        iso = bool(re.fullmatch(r"M\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?", str(size).strip()))
+        inch = None if iso else self._inch_hole_size(size, kind) if kind in self._WIZARD_KINDS else None
         if kind not in self._WIZARD_KINDS:
             raise SolidWorksError(f"Unknown hole kind '{kind}'. Use one of {sorted(self._WIZARD_KINDS)}.")
         if fit not in SCREW_FITS:
@@ -2324,8 +2641,13 @@ class SolidWorksSession:
             raise SolidWorksError(f"Unknown thread '{thread}'. Use 'cosmetic' or 'modeled'.")
         if thread == "modeled" and kind != "tapped":
             raise SolidWorksError("A modeled thread needs kind='tapped'.")
-        if depth_mm is not None and depth_mm <= 0:
-            raise SolidWorksError(f"depth must be > 0 (got {depth_mm}).")
+        if thread == "modeled" and inch:
+            raise SolidWorksError("A modeled thread needs an ISO metric size; an inch tapped hole "
+                                  "gets SolidWorks' cosmetic thread (thread='cosmetic').")
+        if thread == "modeled" and (plane is not None or extras):
+            raise SolidWorksError("A modeled thread starts on a face, over the standard thread depth, "
+                                  "without a countersink.")
+        model = self._require_model()
         point = (x_mm, y_mm, z_mm)
         coarse = self._coarse_thread_size(size) if thread == "modeled" else None
         diameter_m = -1.0  # from the standard
@@ -2333,41 +2655,76 @@ class SolidWorksSession:
             major, pitch = self._parse_thread_size(coarse)
             diameter_m = mm_to_m(self._thread_minor_diameter(major, pitch))
 
-        normal, side = self._parse_face_selector(face, default_side=None)
-        target = self._select_face_through(self._solid_body(), normal, side, point, face)
-        off = self._off_face_mm(target, point)
-        if off > self._ON_FACE_TOLERANCE_MM:  # the pick would land on whatever lies there, e.g. a countersink
-            raise SolidWorksError(
-                f"({x_mm:g}, {y_mm:g}, {z_mm:g}) mm is not on the {face} face but {off:.3g} mm off it: "
-                f"beyond its edge, or over an opening such as an earlier hole. Give a point on the face."
-            )
-        model.ClearSelection2(True)
         ext = binding.wrap(model.Extension, self._mod.IModelDocExtension)
-        # The wizard drills where the face is picked. SelectByID2 picks what the
-        # view shows first at that spot (in a side view: another face, or none),
-        # so a ray from just above the point straight into the face picks it.
-        start = [mm_to_m(c + n * self._PICK_ABOVE_MM) for c, n in zip(point, normal)]
-        if not ext.SelectByRay(*start, *(-n for n in normal), mm_to_m(self._ON_FACE_TOLERANCE_MM),
-                               SW_SEL_FACES, False, 0, 0):
-            raise SolidWorksError(f"Could not pick the {face} face at ({x_mm:g}, {y_mm:g}, {z_mm:g}) mm.")
-        hole_type, fastener = self._WIZARD_KINDS[kind]
+        if plane is None:
+            normal, side = self._parse_face_selector(face, default_side=None)
+            target = self._select_face_through(self._solid_body(), normal, side, point, face)
+            off = self._off_face_mm(target, point)
+            if off > self._ON_FACE_TOLERANCE_MM:  # the pick would land on whatever lies there, e.g. a countersink
+                raise SolidWorksError(
+                    f"({x_mm:g}, {y_mm:g}, {z_mm:g}) mm is not on the {face} face but {off:.3g} mm off it: "
+                    f"beyond its edge, or over an opening such as an earlier hole. Give a point on the face."
+                )
+        else:
+            ref, label, into, plane_normal = self._wizard_plane_side(plane, point)
+            normal = [-n for n in into]  # the hole runs along -normal, as from a face
+        hole_type, fastener = (self._WIZARD_KINDS_INCH if inch else self._WIZARD_KINDS)[kind]
+        standard = SW_WZD_STANDARD_ANSI_INCH if inch else SW_WZD_STANDARD_ISO
+        wizard_size = inch["wizard_size"] if inch else size
         through = depth_mm is None
+        csink = None if csink_diameter_mm is None else (mm_to_m(csink_diameter_mm), math.radians(csink_angle_deg))
+        values = self._wizard_values(kind, SCREW_FITS[fit], through,
+                                     None if thread_depth_mm is None else mm_to_m(thread_depth_mm), csink)
         feat_mgr = binding.wrap(model.FeatureManager, self._mod.IFeatureManager)
+        volume_before = self.get_mass_properties()["mass_properties"]["volume_mm3"]
+        model.ClearSelection2(True)
+        reverse = False
+        if plane is None:
+            # The wizard drills where the face is picked. SelectByID2 picks what the
+            # view shows first at that spot (in a side view: another face, or none),
+            # so a ray from just above the point straight into the face picks it.
+            start = [mm_to_m(c + n * self._PICK_ABOVE_MM) for c, n in zip(point, normal)]
+            if not ext.SelectByRay(*start, *(-n for n in normal), mm_to_m(self._ON_FACE_TOLERANCE_MM),
+                                   SW_SEL_FACES, False, 0, 0):
+                raise SolidWorksError(f"Could not pick the {face} face at ({x_mm:g}, {y_mm:g}, {z_mm:g}) mm.")
+        else:
+            if not ext.SelectByID2(ref.Name, "PLANE", *(mm_to_m(c) for c in point), False, 0, None, 0):
+                raise SolidWorksError(f"Could not select the {label}.")
+            # From a plane the wizard drills against its normal (2020), so
+            # RevDir turns it round when the part lies on the normal's side.
+            reverse = sum(i * n for i, n in zip(into, plane_normal)) > 0
         feat = feat_mgr.HoleWizard5(
-            hole_type, SW_WZD_STANDARD_ISO, fastener, size,
+            hole_type, standard, fastener, wizard_size,
             SW_END_COND_THROUGH_ALL if through else SW_END_COND_BLIND,
             diameter_m, -1.0 if through else mm_to_m(depth_mm), -1.0,  # Diameter, Depth, Length (slots)
-            *self._wizard_values(kind, SCREW_FITS[fit], through),
-            "", False, False, True, False, False, False,  # ThreadClass (inch only), RevDir, scope flags
+            *values,
+            (inch or {}).get("thread_class") or "",  # ThreadClass (inch only)
+            reverse, False, True, False, False, False,  # RevDir, scope flags
         )
-        if feat is None:
+        if feat is None and plane is not None:
             raise SolidWorksError(
-                f"The Hole Wizard made no {kind} hole of size '{size}'. Is it an ISO metric size "
-                f"in SolidWorks' table (e.g. 'M3', 'M4', 'M10'), with material at the point?"
+                f"The Hole Wizard made no {kind} hole of size '{wizard_size}' from the {label}. "
+                f"On 2020 that happens from a plane that also cuts through the part elsewhere, such "
+                f"as one tangent to a bore. Use a plane that only touches the part."
+            )
+        if feat is None:
+            table, examples = ("ANSI Inch", "'1/4-20', '7/8-9'") if inch else ("ISO", "'M3', 'M4', 'M10'")
+            raise SolidWorksError(
+                f"The Hole Wizard made no {kind} hole of size '{wizard_size}'. Is it a size in "
+                f"SolidWorks' {table} table (e.g. {examples}), with material at the point?"
             )
         feat = binding.wrap(feat, self._mod.IFeature)
         dims, fully_defined = self._pin_wizard_position(feat, point)
-        info = self._wizard_hole_info(feat, kind, size, fit)
+        if plane is not None and kind == "tapped":
+            model.ForceRebuild3(False)  # the cosmetic thread appears with the rebuild
+            major_mm = in_to_mm(inch["major_in"]) if inch else float(re.match(r"M(\d+(?:\.\d+)?)", size)[1])
+            self._fix_cosmetic_thread(feat, major_mm)
+        if plane is not None and self.get_mass_properties()["mass_properties"]["volume_mm3"] > volume_before - 1e-3:
+            raise SolidWorksError(f"The hole from the {label} cut nothing: it drilled away from the part.")
+        info = self._wizard_hole_info(feat, kind, size, fit, inch)
+        if inch:
+            self._check_inch_wizard_size(info, inch, size)
+        self._check_wizard_extras(info, thread_depth_mm, csink_diameter_mm, csink_angle_deg)
         result = self._finish_feature(feat, name or feat.Name, dimensions=dims,
                                       fully_defined=fully_defined, hole=info)
         if coarse:
@@ -3983,8 +4340,11 @@ class SolidWorksSession:
         """Delete what the history gained since `before`, newest first; returns
         the names that could not be removed."""
         model = self._require_model()
+        added = [f for f in self._history() if f.Name not in before]
+        if not added:
+            return []  # nothing to undo: a rebuild would only mark the part changed (a failed drawing did)
         extension = binding.wrap(model.Extension, self._mod.IModelDocExtension)
-        for feat in reversed([f for f in self._history() if f.Name not in before]):
+        for feat in reversed(added):
             model.ClearSelection2(True)
             if feat.Select2(False, 0):
                 extension.DeleteSelection2(SW_DELETE_ABSORBED)
@@ -5545,55 +5905,1607 @@ class SolidWorksSession:
                   for corner in itertools.product(*zip(*corners_mm))]
         return [min(t[i] for t in turned) for i in range(3)], [max(t[i] for t in turned) for i in range(3)]
 
-    def make_drawing(self, path: str | None = None) -> dict:
-        """A 2D drawing of the current part, saved as PDF or as an editable .slddrw.
+    # --- shop drawings (Docs/SHOP-DRAWINGS.md) ----------------------------------
+    #
+    # make_drawing places what a drawing spec says on a clean drawing, and
+    # check_drawing reads the SAVED drawing back and compares it with the spec.
+    # Facts this code depends on, verified on SOLIDWORKS 2020 SP4 (28.4):
+    # - The default drawing template carries no sheet format; SetupSheet5 with a
+    #   custom format file gives the stock title block, and SheetFormatVisible
+    #   must be switched on or it does not show.
+    # - IView.Angle turns a view anticlockwise (radians); -90 deg lays a part
+    #   whose axis is model Y along the sheet.
+    # - IView.ModelToViewTransform's translation and scale are right, but
+    #   IMathPoint.MultiplyTransform with it ignores the view's rotation, so
+    #   model points are projected here from the orientation (drawing_spec).
+    # - A model IEdge can be selected in a view with IView.SelectEntity, then
+    #   dimensioned. A circle seen edge-on is dimensioned as a diameter with
+    #   AddVerticalDimension2/AddHorizontalDimension2 on that one edge (SolidWorks
+    #   adds the diameter prefix itself); AddDiameterDimension2 on it gives twice
+    #   the diameter. Two edge-on circles dimension centre to centre.
+    # - IAnnotation.SetName names a drawing annotation ('RD1' -> 'SPEC_D10'), so
+    #   the spec id travels inside the saved drawing.
 
-        Front, top and right views in European (first angle) projection plus an
-        isometric view, on an A4 sheet at the scale SolidWorks picks, with the
-        model's own dimensions, each shown once. The drawing refers to the part's
-        file, so the part must have been saved; unsaved changes show in a PDF
-        but not when a saved drawing is opened later. With a knowledge-base case
-        open the server names the file (case_paths).
+    _EDGE_ON_TOLERANCE_MM = 0.01
+
+    # The sheet the drawing being made is on (make_drawing sets it).
+    _sheet = SHEETS["A"]
+
+    def make_drawing(self, path: str | None = None, spec: dict | None = None, views: list | None = None,
+                     placements: dict | None = None, sheet: str = "A") -> dict:
+        """A shop drawing of the current part, saved as .slddrw (or .pdf).
+
+        An A-size sheet (or `sheet` "B", "C", landscape) with SolidWorks' stock
+        ANSI title block (left empty),
+        third-angle projection, inches, never an isometric view. Without a spec
+        it shows front, top and right views with the model's own dimensions.
+        With a spec (drawing_spec, §4.1) and placements it places every read
+        item of the spec where the placements say and nothing else. The part
+        must be saved, with no unsaved changes: the drawing refers to its file.
         """
         path = case_paths.resolve("drawing", path)
         fmt = os.path.splitext(path)[1].lstrip(".").lower()
         if fmt not in DRAWING_FORMATS:
             raise SolidWorksError(f"A drawing is saved as {' or '.join(sorted(DRAWING_FORMATS))} (got '{fmt}').")
+        key = str(sheet).strip().upper()
+        if key not in SHEETS:
+            raise SolidWorksError(f"sheet is one of {', '.join(SHEETS)} (ANSI landscape; got {sheet!r}).")
+        checked = drawing_spec.validate(spec) if spec is not None else None
+        plan = drawing_spec.validate_views(views)
+        view_ids = {v["id"] for v in plan}
+        if checked is None and placements:
+            raise SolidWorksError("placements go with a spec: give the spec too.")
+        marks = {v["id"]: v["marks"] for v in plan}
+        places = drawing_spec.validate_placements(placements, checked, view_ids, marks) if checked else {}
         self._require_part()
-        part_path = self._model.GetPathName()
+        part = self._model
+        part_path = part.GetPathName()
         if not part_path:
             raise SolidWorksError("Save the part first (save_part): the drawing refers to its file.")
-        template = self._sw.GetUserPreferenceStringValue(SW_PREF_DEFAULT_TEMPLATE_DRAWING)
-        drawing = binding.wrap(self._sw.NewDocument(template, SW_DWG_PAPER_A4, 0.0, 0.0), self._mod.IModelDoc2)
-        if drawing is None:
-            raise SolidWorksError(f"SolidWorks could not start a drawing from the template '{template}'.")
+        if part.GetSaveFlag():
+            raise SolidWorksError("The part has unsaved changes. Save it first (save_part): the drawing shows "
+                                  "the part's file, and a reopened drawing would show the old shape.")
+        front = plan[0]
+        orient = drawing_spec.view_orientations(front["model_view"], front["up"])
+        box = self._bounding_box()
+        if box is None:
+            raise SolidWorksError("The part has no solid body to draw.")
+        notes = [i for i in (checked or {"items": []})["items"]
+                 if i["kind"] == "note" and i["status"] == "read" and i["id"] not in places]
+        self._sheet = SHEETS[key]
+        x0, y0, x1, y1 = self._sheet["area_mm"]
+        notes_height = sum(len(drawing_spec.to_sw_text(n["text"]).splitlines()) for n in notes) * 5.0
+        self._notes_at = self._notes_corner(notes_height)
+        if self._notes_at[1] >= y0 and notes:  # the notes stack in the area: the views go above them
+            y0 += notes_height + 4
+        lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0, x1, y1], self._part_span())
+        started = time.perf_counter()
+        self._timings = {"items": {}}
+        doc, drawing = self._new_shop_drawing()
+        # a detail view's geometry goes stale while the window is still, and SolidWorks
+        # then puts a dimension's text up to 250 mm off (2020): redraw with details
+        stilled = [] if any(v["kind"] == "detail" for v in plan) else self._still_drawing(doc)
+        closed = False
         try:
-            sheets = binding.wrap(drawing, self._mod.IDrawingDoc)
-            if not sheets.Create1stAngleViews2(part_path):
-                raise SolidWorksError("SolidWorks could not place the front, top and right views.")
-            iso = binding.wrap(sheets.CreateDrawViewFromModelView3(part_path, "*Isometric", 0.24, 0.16, 0.0),
-                               self._mod.IView)
-            if iso is None:
-                raise SolidWorksError("SolidWorks could not place the isometric view.")
-            iso.UseSheetScale = True
-            # DuplicateDims True leaves out repeats: each dimension in one view
-            dimensions = sheets.InsertModelAnnotations3(SW_IMPORT_ENTIRE_MODEL, SW_INSERT_DIMENSIONS,
-                                                        True, True, False, False) or ()
-            views = []
-            view = binding.wrap(sheets.GetFirstView(), self._mod.IView)  # the sheet itself comes first
-            view = binding.wrap(view.GetNextView(), self._mod.IView)
-            while view is not None:
-                views.append(view.GetName2())
-                view = binding.wrap(view.GetNextView(), self._mod.IView)
-            scale = binding.wrap(sheets.GetCurrentSheet(), self._mod.ISheet).GetProperties2()[2:4]
+            made = self._place_views(doc, drawing, part_path, plan, orient, lay, box)
+            self._timings["views"] = time.perf_counter() - started
+            if checked is None:
+                # DuplicateDims True leaves out repeats: each dimension in one view
+                placed = {"model_dimensions": len(drawing.InsertModelAnnotations3(
+                    SW_IMPORT_ENTIRE_MODEL, SW_INSERT_DIMENSIONS, True, True, False, False) or ())}
+            else:
+                placed = self._place_spec(doc, drawing, checked, places, made, notes)
+            doc.ClearSelection2(True)
+            saving = time.perf_counter()
+            doc.EditRebuild3()
             abs_path = os.path.abspath(path)
-            self._write_via_saveas3(abs_path, drawing)
+            if fmt == "pdf":
+                # a never-saved drawing with section/detail views took minutes to
+                # print to PDF on 2020; saved first, it took 0.3 s (verified)
+                with tempfile.TemporaryDirectory() as folder:
+                    # named like the PDF: the title block shows the file name
+                    stem = os.path.splitext(os.path.basename(abs_path))[0]
+                    self._write_via_saveas3(os.path.join(folder, f"{stem}.slddrw"), doc)
+                    self._write_via_saveas3(abs_path, doc)
+                    self._sw.CloseDoc(doc.GetPathName())  # lets go of the temporary file
+                    closed = True
+            else:
+                self._write_via_saveas3(abs_path, doc)
+            self._timings["save"] = time.perf_counter() - saving
         finally:
+            # never switch a closed drawing's window back on: its view is gone
+            self._to_wake = [w for w in self._to_wake if not any(w[0] is d for d in stilled)]
+            self._lookups = None  # they hold this drawing's views
             # saved, the drawing is named after the part ('holed_box - Sheet1'),
             # so the title it started with no longer closes it (verified)
-            self._sw.CloseDoc(drawing.GetTitle())
-        return {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path), "views": views,
-                "dimensions": len(dimensions), "scale": f"{scale[0]:g}:{scale[1]:g}"}
+            if not closed:
+                # by path once saved: a drawing has its part's title, so the title is ambiguous
+                self._sw.CloseDoc(doc.GetPathName() or doc.GetTitle())
+            self._sw.ActivateDoc3(part.GetTitle(), False, SW_DONT_REBUILD_ACTIVE_DOC, 0)
+        if fmt == "slddrw":
+            # measured on the saved file: in the drawing still being made some texts'
+            # display data was stale (a datum 300 mm off, a frame 20 mm too wide)
+            placed["layout"] = self._saved_layout_report(abs_path)
+            self._sw.ActivateDoc3(part.GetTitle(), False, SW_DONT_REBUILD_ACTIVE_DOC, 0)
+        result = {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path),
+                  "views": {vid: info["name"] for vid, info in made.items()},
+                  "sheet": key, "scale": f"{lay['scale'][0]}:{lay['scale'][1]}", **placed,
+                  "timings_s": self._timing_report(time.perf_counter() - started),
+                  "note": "The drawing refers to the part by file name: rename the two together with "
+                          "SolidWorks' Pack and Go, never in Explorer."}
+        if checked is not None:
+            result["unreadable"] = [i["id"] for i in checked["items"] if i["status"] == "unreadable"]
+            result["next"] = "check_drawing reads the saved drawing back and compares it with the spec."
+        return result
+
+    # Off for a timing comparison only (a probe sets it on the session).
+    _STILL_DRAWING = True
+
+    def _still_drawing(self, doc) -> list:
+        """Keep the new drawing's window from redrawing while it is made: every
+        dimension and note redrew the sheet with its views. The drawing is
+        closed at the end, so it is never switched back on or redrawn (a redraw
+        of a stilled drawing was in the run that crashed SOLIDWORKS 2020).
+        Returns the documents stilled here."""
+        if not self._STILL_DRAWING:
+            return []
+        before = len(self._to_wake)
+        self._quiet(doc)
+        return [w[0] for w in self._to_wake[before:]]
+
+    def _timing_report(self, total: float) -> dict:
+        """Seconds per phase of make_drawing, rounded; the slowest items first."""
+        return self._timing_summary(self._timings, total)
+
+    @staticmethod
+    def _timing_summary(timings: dict, total: float) -> dict:
+        """Pure: {total, views, items, save, slowest_items} from raw seconds."""
+        items = sorted(timings["items"].items(), key=lambda kv: -kv[1])
+        return {"total": round(total, 1), "views": round(timings.get("views", 0.0), 1),
+                "items": round(sum(v for _, v in items), 1), "save": round(timings.get("save", 0.0), 1),
+                "slowest_items": {k: round(v, 2) for k, v in items[:8]}}
+
+    def _part_span(self):
+        """A function giving the part's size along a model direction (mm), from
+        its bodies' extreme points: a round part seen at a slant is as wide as
+        it is round, where its bounding box says nearly half as much again."""
+        bodies = self._part_bodies()
+        cache = {}
+
+        def span(direction):
+            key = tuple(round(c, 9) for c in direction)
+            if key not in cache:
+                hi = max(sum(c * d for c, d in zip(self._extreme_point(b, direction), direction)) for b in bodies)
+                back = tuple(-c for c in direction)
+                lo = min(sum(c * d for c, d in zip(self._extreme_point(b, back), direction)) for b in bodies)
+                cache[key] = m_to_mm(hi - lo)
+            return cache[key]
+        return span
+
+    def _notes_corner(self, notes_height: float) -> tuple:
+        """Where the general notes start (their bottom left, mm): in the free box
+        left of the title block when they fit there (B, C), else on the area's
+        bottom edge, above the title block."""
+        box = self._sheet["notes_box_mm"]
+        if box is not None and notes_height <= box[3] - box[1]:
+            return box[0], box[1]
+        return self._sheet["area_mm"][0], self._sheet["area_mm"][1]
+
+    def _new_shop_drawing(self):
+        """A new drawing from the default template on the sheet make_drawing
+        chose (A, B or C landscape) with the stock ANSI title block, third
+        angle, in inches."""
+        sw = self._sw
+        paper, format_file = self._sheet["paper"], self._sheet["format"]
+        template = sw.GetUserPreferenceStringValue(SW_PREF_DEFAULT_TEMPLATE_DRAWING)
+        folders = [f.strip() for f in (sw.GetUserPreferenceStringValue(SW_PREF_SHEET_FORMAT_FOLDERS) or "").split(";")]
+        sheet_format = next((os.path.join(f, format_file) for f in folders
+                             if f and os.path.isfile(os.path.join(f, format_file))), None)
+        if sheet_format is None:
+            raise SolidWorksError(f"No sheet format '{format_file}' in SolidWorks' sheet format folders "
+                                  f"({'; '.join(f for f in folders if f) or 'none set'}).")
+        doc = binding.wrap(sw.NewDocument(template, paper, 0.0, 0.0), self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not start a drawing from the template '{template}'.")
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        sheet = binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet)
+        width, height = (mm_to_m(c) for c in self._sheet["size_mm"])
+        if not drawing.SetupSheet5(sheet.GetName(), paper, SW_DWG_TEMPLATE_CUSTOM, 1.0, 1.0, False,
+                                   sheet_format, width, height, "Default", True):
+            self._sw.CloseDoc(doc.GetTitle())
+            raise SolidWorksError(f"SolidWorks could not set up the sheet with '{sheet_format}'.")
+        binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).SheetFormatVisible = True
+        ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+        for pref, value in ((SW_PREF_UNIT_SYSTEM, SW_UNIT_SYSTEM_IPS), (SW_PREF_UNITS_LINEAR, SW_INCHES),
+                            (SW_PREF_DIMENSION_STANDARD, SW_DETAILING_ANSI)):
+            ext.SetUserPreferenceInteger(pref, 0, value)
+        ext.SetUserPreferenceToggle(SW_PREF_DOUBLE_PRIME_MARK, 0, False)  # no " after fractions (ANSI)
+        return doc, drawing
+
+    # --- views ------------------------------------------------------------------
+
+    def _place_views(self, doc, drawing, part_path, plan, orient, lay, box) -> dict:
+        """Create the planned views at the layout's scale and centres. Returns
+        {id: {name, view, orientation}}; standard views first, then sections and
+        details, which are cut from views made before them."""
+        num, den = lay["scale"]
+        sheet = binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet)
+        props = list(sheet.GetProperties2())
+        made = {}
+        for view in plan:
+            cx, cy = (mm_to_m(c) for c in lay["centres_mm"][view["id"]])
+            if view["kind"] == "standard":
+                o = orient[view["direction"]]
+                handle = drawing.CreateDrawViewFromModelView3(part_path, f"*{o['model_view'].capitalize()}", cx, cy, 0.0)
+                iview = binding.wrap(handle, self._mod.IView)
+                if iview is None:
+                    raise SolidWorksError(f"SolidWorks could not place the {view['id']} view.")
+                iview.UseSheetScale = False
+                iview.ScaleRatio = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [float(num), float(den)])
+                if list(iview.ScaleRatio)[:2] != [num, den]:
+                    raise SolidWorksError(f"Could not set the {view['id']} view to {num}:{den}.")
+                if o["angle_deg"]:
+                    iview.Angle = math.radians(o["angle_deg"])
+            elif view["kind"] == "section":
+                iview = self._section_view(doc, drawing, made[view["from"]], view, cx, cy)
+            else:
+                iview = self._detail_view(doc, drawing, made[view["from"]], view, cx, cy)
+            free = {"vertical": "x", "horizontal": "y"}.get(view.get("cut"), "xy")
+            self._move_view(iview, cx, cy, free)
+            # how the view shows the model, from the view itself (a section's
+            # axes are not its parent's; an angled one is turned upright)
+            made[view["id"]] = {"name": iview.GetName2(), "view": iview, "orientation": self._view_axes(iview),
+                                "kind": view["kind"], "doc": doc}
+            if view["kind"] == "detail":
+                # where the detail shows the model: its circle's centre at the spot it was
+                # put, at its own scale (its transform and outline go stale, below)
+                made[view["id"]]["detail_map"] = {
+                    "centre_sheet_mm": tuple(lay["centres_mm"][view["id"]]), "centre_model_mm": view["center_mm"],
+                    "scale": view["scale"][0] / view["scale"][1], "radius_mm": view["radius_mm"]}
+        props[2:4] = [float(num), float(den)]
+        sheet.SetProperties2(*props)
+        doc.EditRebuild3()
+        for view in plan:  # a rebuild can move views made from others: put them back
+            self._move_view(made[view["id"]]["view"], *(mm_to_m(c) for c in lay["centres_mm"][view["id"]]),
+                            {"vertical": "x", "horizontal": "y"}.get(view.get("cut"), "xy"))
+            made[view["id"]]["orientation"] = self._view_axes(made[view["id"]]["view"])
+        outlines, labels = [self._outline_mm(info) for info in made.values()], []
+        for view in plan:
+            if view["kind"] != "standard":
+                self._keep_label_on_area(made[view["id"]], outlines, labels)
+        for view in plan:
+            made[view["id"]]["marks"] = self._draw_marks(doc, drawing, made[view["id"]], view["marks"])
+        return made
+
+    # A section's or detail's label ('DETAIL D' / 'SCALE 1 : 1') is a note of the
+    # view, its position the middle of its top line, two lines of 3.5 mm text.
+    _LABEL_HEIGHT_MM = 9.0
+    _LABEL_HALF_WIDTH_MM = 13.0
+    _OUTLINE_MARGIN_MM = 5.0
+    _LIVE_OUTLINE_MARGIN_MM = 10.0
+
+    def _keep_label_on_area(self, made_view, outlines, labels) -> None:
+        """Move a view's label when SolidWorks put it off the drawing area (over
+        the title block: a tall section, or a detail on the bottom row, hangs its
+        label some 10 mm under its outline) or onto another view (a detail's label
+        landed 55 mm under it, inside the detail below): just under the view,
+        else above it, right of it, left of it, wherever it stays on the area and
+        off the other views and their labels (`labels`, which grows). Every
+        label goes there: SolidWorks' own place for a detail's label was 38 mm
+        above it on one run and 55 mm below it on the next."""
+        x0, y0, x1, y1 = self._outline_mm(made_view)
+        # while the drawing is made an outline runs some 10 mm past the drawn view
+        # (5 mm once saved): DTN7's A-A then seemed to touch the detail under it
+        h, w, m = self._LABEL_HEIGHT_MM, self._LABEL_HALF_WIDTH_MM, self._LIVE_OUTLINE_MARGIN_MM
+        if made_view["kind"] != "detail":
+            h /= 2  # a section at the sheet's scale shows no scale line: 'SECTION A-A' alone
+        area = self._sheet["area_mm"]
+        # the other views as they are drawn: SolidWorks' outline runs 5-7 mm wider
+        others = [(o[0] + m, o[1] + m, o[2] - m, o[3] - m) for o in outlines if o != [x0, y0, x1, y1]]
+        box = lambda p: (p[0] - w, p[1] - h, p[0] + w, p[1])
+        free = lambda p: drawing_spec.box_is_free(box(p), area, others + labels, gap=0.5)
+        for handle in made_view["view"].GetAnnotations() or ():
+            annotation = binding.wrap(handle, self._mod.IAnnotation)
+            if SW_ANNOTATION_TYPES.get(annotation.GetType()) != "note":
+                continue
+            if (binding.wrap(annotation.GetSpecificAnnotation(), self._mod.INote).GetText() or "").strip():
+                continue  # a placed note, not the label (which reads back blank)
+            # the label's position is the middle of its top line; under the view
+            # and above it may reach into the outline's own margin
+            # just under the outline as it is while the drawing is made: the drawn
+            # view ends 5 to 15 mm inside it (A-A 5.6, B-B 4: no closer)
+            below, above = y0 + 2.0, min(y1 + 2.0 + h, area[3])
+            beside = [(x1 + 3.0 + w, (y0 + y1) / 2 + h / 2), (x0 - 3.0 - w, (y0 + y1) / 2 + h / 2)]
+            top = [((x0 + x1) / 2, above)] if above - h >= y1 - m else []
+            # a detail's dimensions go above it (the slot width on DTN7's detail E): beside first
+            spots = [((x0 + x1) / 2, below)] + (beside + top if made_view["kind"] == "detail" else top + beside)
+            spot = next((p for p in spots if free(p)), spots[0])
+            annotation.SetPosition2(mm_to_m(spot[0]), mm_to_m(spot[1]), 0.0)
+            labels.append(box(spot))
+
+    def _view_axes(self, iview) -> dict:
+        """The model directions a view shows along the sheet's right and up, and
+        towards the viewer, from IView.ModelToViewTransform: its rotation rows
+        map a model vector to the sheet as p . R, so the columns are the axes
+        (verified on 2020 for a turned front view and a section, view angle
+        included)."""
+        data = binding.wrap(iview.ModelToViewTransform, self._mod.IMathTransform).ArrayData
+        clean = lambda v: tuple(round(c, 12) + 0.0 for c in v)
+        return {"right": clean(data[0:9:3]), "up": clean(data[1:9:3]), "towards_viewer": clean(data[2:9:3])}
+
+    def _move_view(self, iview, x_m: float, y_m: float, free: str = "xy") -> None:
+        """Put the centre of the view's outline at (x, y). IView.Position takes a
+        VARIANT array of doubles (a Python tuple is dropped silently), and it is
+        not the outline's centre for a detail view (verified: 69, 152 for a view
+        drawn round 275, 127), so the view is moved by the difference and the
+        outline read back. A section view stays aligned with its parent: only
+        its `free` axis moves."""
+        def centre():
+            x0, y0, x1, y1 = iview.GetOutline()
+            return (x0 + x1) / 2, (y0 + y1) / 2
+        pos, now = list(iview.Position)[:2], centre()
+        new = [p + (w - c if axis in free else 0.0) for p, w, c, axis in zip(pos, (x_m, y_m), now, "xy")]
+        iview.Position = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, new)
+        got = centre()
+        if any(abs(g - w) > 5e-4 for g, w, axis in zip(got, (x_m, y_m), "xy") if axis in free):
+            raise SolidWorksError(f"Could not move {iview.GetName2()} to ({m_to_mm(x_m):.1f}, {m_to_mm(y_m):.1f}) mm; "
+                                  f"it stays at ({m_to_mm(got[0]):.1f}, {m_to_mm(got[1]):.1f}).")
+
+    def _sheet_point(self, made_view, point_mm) -> tuple:
+        """A model point on the sheet (mm) in this view: the view's own origin
+        and scale, with the rotation from its orientation (see the notes above).
+        A detail view's own transform is stale while the drawing is kept still
+        (on 2020: 250 mm off for a detail of a turned view, until the drawing is
+        redrawn), so a detail maps from where its circle's centre was put."""
+        mapping = made_view.get("detail_map")
+        if mapping is not None:
+            (cx, cy), centre, k = mapping["centre_sheet_mm"], mapping["centre_model_mm"], mapping["scale"]
+            o = made_view["orientation"]
+            d = [p - c for p, c in zip(point_mm, centre)]
+            return cx + k * drawing_spec._dot(d, o["right"]), cy + k * drawing_spec._dot(d, o["up"])
+        iview = made_view["view"]
+        data = binding.wrap(iview.ModelToViewTransform, self._mod.IMathTransform).ArrayData
+        tx, ty, scale = m_to_mm(data[9]), m_to_mm(data[10]), data[12]
+        o = made_view["orientation"]
+        return (tx + scale * drawing_spec._dot(point_mm, o["right"]),
+                ty + scale * drawing_spec._dot(point_mm, o["up"]))
+
+    def _view_sketch_point(self, made_view, x_mm: float, y_mm: float) -> tuple:
+        """A sheet point (mm) in the view's own sketch (m), where SketchManager
+        draws while the view is active: at model scale, from the view's centre,
+        turned with the view. ISketch.ModelToSketchTransform maps sheet to sketch
+        as sketch = scale * (sheet . R) + t, with R's rows in ArrayData[0:9]
+        (verified: a vertical line on a view turned -90 deg cut across the part)."""
+        data = binding.wrap(binding.wrap(made_view["view"].GetSketch(), self._mod.ISketch).ModelToSketchTransform,
+                            self._mod.IMathTransform).ArrayData
+        x, y = mm_to_m(x_mm), mm_to_m(y_mm)
+        return (data[12] * (x * data[0] + y * data[3]) + data[9],
+                data[12] * (x * data[1] + y * data[4]) + data[10])
+
+    # SolidWorks' outline of a detail runs this far past its circle (measured: 9.6
+    # and 10.4 mm for circles of 20 and 24 mm radius on paper)
+    _DETAIL_OUTLINE_MARGIN_MM = 10.0
+
+    def _outline_mm(self, made_view) -> list:
+        """The view's outline on the sheet (mm). A detail's from its circle: its
+        own goes stale while the drawing is kept still (see _sheet_point)."""
+        mapping = made_view.get("detail_map")
+        if mapping is not None:
+            (cx, cy), half = mapping["centre_sheet_mm"], mapping["radius_mm"] * mapping["scale"]
+            half += self._DETAIL_OUTLINE_MARGIN_MM
+            return [cx - half, cy - half, cx + half, cy + half]
+        return [m_to_mm(c) for c in made_view["view"].GetOutline()]
+
+    def _section_view(self, doc, drawing, parent, view, cx, cy):
+        """A section through view['through_mm'], cut by a line across the parent:
+        vertical, horizontal, or at an angle (angle_deg, or through the two
+        points of line_mm), which is then turned upright (_turn_upright)."""
+        px, py = self._sheet_point(parent, view["through_mm"])
+        ox0, oy0, ox1, oy1 = self._outline_mm(parent)
+        if view["cut"] == "vertical":
+            ends = ((px, oy0 - 3), (px, oy1 + 3))
+        elif view["cut"] == "horizontal":
+            ends = ((ox0 - 3, py), (ox1 + 3, py))
+        else:
+            if view.get("line_mm"):
+                (ax, ay), (bx, by) = (self._sheet_point(parent, q) for q in view["line_mm"])
+                angle = math.degrees(math.atan2(by - ay, bx - ax))
+            else:
+                angle = view["angle_deg"]
+            direction = (math.cos(math.radians(angle)), math.sin(math.radians(angle)))
+            ends = drawing_spec.clip_line((px, py), direction, (ox0 - 3, oy0 - 3, ox1 + 3, oy1 + 3))
+            if ends is None:
+                raise SolidWorksError(f"{view['id']}: the cutting line misses {parent['name']}.")
+        if not drawing.ActivateView(parent["name"]):
+            raise SolidWorksError(f"Could not activate {parent['name']} to cut a section.")
+        (x1, y1), (x2, y2) = (self._view_sketch_point(parent, *e) for e in ends)
+        sketch = binding.wrap(doc.SketchManager, self._mod.ISketchManager)
+        line = sketch.CreateLine(x1, y1, 0.0, x2, y2, 0.0)
+        if line is None:
+            raise SolidWorksError(f"Could not draw the cutting line for {view['id']}.")
+        doc.ClearSelection2(True)
+        binding.wrap(line, self._mod.ISketchSegment).Select4(False, None)
+        options = SW_SECTION_CHANGE_DIRECTION if view["flip"] else 0
+        iview = binding.wrap(drawing.CreateSectionViewAt5(cx, cy, 0.0, view["label"], options, None, 0.0),
+                             self._mod.IView)
+        if iview is None:
+            raise SolidWorksError(f"SolidWorks could not make section {view['label']}-{view['label']}.")
+        if view["cut"] == "angled":
+            p = parent["orientation"]
+            along = [math.cos(math.radians(angle)) * r + math.sin(math.radians(angle)) * u
+                     for r, u in zip(p["right"], p["up"])]
+            self._turn_upright(iview, view.get("up") or along, view.get("up") is None, view["id"])
+        return iview
+
+    def _turn_upright(self, iview, up, either_way: bool, label: str) -> None:
+        """Turn a view so model direction `up` points up the sheet (either_way:
+        or down, whichever is the smaller turn), and free it from its parent's
+        alignment so it can be placed. An angled section comes out lying along
+        its cutting line."""
+        axes = self._view_axes(iview)
+        sx, sy = drawing_spec._dot(up, axes["right"]), drawing_spec._dot(up, axes["up"])
+        if math.hypot(sx, sy) < 1e-6:
+            raise SolidWorksError(f"{label}: up points along the section's line of sight; give a direction in "
+                                  "the cutting plane.")
+        if either_way and sy < 0:
+            sx, sy = -sx, -sy
+        turn = math.pi / 2 - math.atan2(sy, sx)
+        iview.RemoveAlignment()
+        iview.Angle = iview.Angle + turn
+        axes = self._view_axes(iview)
+        sx, sy = drawing_spec._dot(up, axes["right"]), drawing_spec._dot(up, axes["up"])
+        if abs(sx) > 1e-6 * max(1.0, abs(sy)):
+            raise SolidWorksError(f"{label}: SolidWorks did not turn the section upright (the up direction "
+                                  f"shows at {math.degrees(math.atan2(sy, sx)):.2f} deg).")
+
+    def _detail_view(self, doc, drawing, parent, view, cx, cy):
+        """A detail view of the circle around view['center_mm'] on the parent."""
+        px, py = self._sheet_point(parent, view["center_mm"])
+        if not drawing.ActivateView(parent["name"]):
+            raise SolidWorksError(f"Could not activate {parent['name']} to draw the detail circle.")
+        cx, cy = self._view_sketch_point(parent, px, py)
+        sketch = binding.wrap(doc.SketchManager, self._mod.ISketchManager)
+        # the view's sketch is at model scale: the radius goes in as it is on the part
+        circle = sketch.CreateCircle(cx, cy, 0.0, cx + mm_to_m(view["radius_mm"]), cy, 0.0)
+        if circle is None:
+            raise SolidWorksError(f"Could not draw the detail circle for {view['id']}.")
+        doc.ClearSelection2(True)
+        binding.wrap(circle, self._mod.ISketchSegment).Select4(False, None)
+        num, den = view["scale"]
+        iview = binding.wrap(drawing.CreateDetailViewAt4(cx, cy, 0.0, SW_DETAIL_STANDARD, float(num), float(den),
+                                                         view["label"], SW_DETAIL_CIRCLE, True, False, False, 5),
+                             self._mod.IView)
+        if iview is None:
+            raise SolidWorksError(f"SolidWorks could not make detail {view['label']}.")
+        return iview
+
+    # --- marks: centre marks and centrelines ------------------------------------
+
+    _CENTRE_LINE_STYLE = 4  # swLineStyles_e: swLineCENTER
+    _CENTER_MARK_SINGLE = 2  # swCenterMarkStyle_e
+
+    def _draw_marks(self, doc, drawing, target, marks) -> dict:
+        """Draw a view's marks; each point that defines one must be a hole or arc
+        centre, lie on an axis or on an edge of the part (checked here), so a
+        dimension to a mark measures the model. Returns {mark id: _Mark}."""
+        if not marks:
+            return {}
+        part_edges = [binding.wrap(e, self._mod.IEdge) for body in self._part_bodies() for e in body.GetEdges() or ()]
+        faces = [binding.wrap(f, self._mod.IFace2) for body in self._part_bodies() for f in body.GetFaces() or ()]
+        if not drawing.ActivateView(target["name"]):
+            raise SolidWorksError(f"Could not activate {target['name']} to draw its marks.")
+        sk = binding.wrap(doc.SketchManager, self._mod.ISketchManager)
+        out = {}
+        sk.AddToDB = True  # no snapping to the view's edges: the marks sit exactly where computed
+        try:
+            for mark in marks:
+                label = f"{target['name']} mark {mark['id'] or mark['kind']}"
+                at = lambda key: self._view_sketch_point(target, *self._sheet_point(target, mark[key]))
+                if mark["kind"] == "center_mark":
+                    circle = self._circle_edge_at(part_edges, mark["at_mm"], target, label)
+                    doc.ClearSelection2(True)
+                    if not target["view"].SelectEntity(circle, False):
+                        raise SolidWorksError(f"{label}: could not select the circle at {mark['at_mm']}.")
+                    made = drawing.InsertCenterMark3(self._CENTER_MARK_SINGLE, False, False)
+                    if made is None:
+                        raise SolidWorksError(f"{label}: SolidWorks made no centre mark.")
+                    continue
+                for key in ("at_mm", "from_mm", "to_mm", "center_mm", "through_mm"):
+                    if key in mark:
+                        self._check_anchor(part_edges, faces, mark[key], f"{label} {key}")
+                if mark["kind"] == "point":
+                    entity = sk.CreatePoint(*at("at_mm"), 0.0)
+                elif mark["kind"] == "circle":
+                    (cx, cy), (tx, ty) = at("center_mm"), at("through_mm")
+                    entity = sk.CreateCircle(cx, cy, 0.0, tx, ty, 0.0)
+                else:
+                    (ax, ay), (bx, by) = (self._sheet_point(target, mark[k]) for k in ("from_mm", "to_mm"))
+                    length = math.hypot(bx - ax, by - ay)
+                    if length < 0.1:
+                        raise SolidWorksError(f"{label}: from_mm and to_mm lie one behind the other in this view.")
+                    ex, ey = ((bx - ax) / length * mark["extend_mm"], (by - ay) / length * mark["extend_mm"])
+                    (x1, y1), (x2, y2) = (self._view_sketch_point(target, *q)
+                                          for q in ((ax - ex, ay - ey), (bx + ex, by + ey)))
+                    entity = sk.CreateLine(x1, y1, 0.0, x2, y2, 0.0)
+                if entity is None:
+                    raise SolidWorksError(f"{label}: SolidWorks did not draw the {mark['kind']}.")
+                if mark["kind"] != "point":
+                    segment = binding.wrap(entity, self._mod.ISketchSegment)
+                    segment.Style = self._CENTRE_LINE_STYLE
+                    entity = segment
+                else:
+                    entity = binding.wrap(entity, self._mod.ISketchPoint)
+                out[mark["id"]] = _Mark(mark, entity)
+        finally:
+            sk.AddToDB = False
+            doc.ClearSelection2(True)
+        return out
+
+    def _circle_edge_at(self, part_edges, centre_mm, target, label: str):
+        """The circular part edge centred at centre_mm that faces the viewer in this view."""
+        towards = target["orientation"]["towards_viewer"]
+        for edge in part_edges:
+            circle = self._circle_of(edge)
+            if (circle is not None and math.dist(circle[0], centre_mm) <= self._EDGE_ON_TOLERANCE_MM
+                    and abs(drawing_spec._dot(circle[1], towards)) > 0.999):
+                return edge
+        raise SolidWorksError(f"{label}: no circle of the part is centred at "
+                              f"({', '.join(f'{c:g}' for c in centre_mm)}) mm facing the viewer in this view.")
+
+    def _check_anchor(self, part_edges, faces, point_mm, label: str) -> None:
+        """A mark's point must be a hole or arc centre, lie on the axis of a
+        cylinder or cone, or on an edge of the part: else it fails."""
+        tol = self._EDGE_ON_TOLERANCE_MM
+        for edge in part_edges:
+            circle = self._circle_of(edge)
+            if circle is not None and math.dist(circle[0], point_mm) <= tol:
+                return
+        for face in faces:
+            turned = self._turned_surface(face)
+            if turned is None:
+                continue
+            origin, axis = [m_to_mm(c) for c in turned[1][0:3]], turned[1][3:6]
+            along = sum((q - o) * a for q, o, a in zip(point_mm, origin, axis))
+            if math.dist(point_mm, [o + along * a for o, a in zip(origin, axis)]) <= tol:
+                return
+        for edge in part_edges:
+            near = edge.GetClosestPointOn(*(mm_to_m(c) for c in point_mm))
+            if near and math.dist(point_mm, [m_to_mm(c) for c in near[:3]]) <= tol:
+                return
+        raise SolidWorksError(f"{label}: ({', '.join(f'{c:g}' for c in point_mm)}) mm is no hole or arc centre, "
+                              "lies on no axis and on no edge of the part. A mark is drawn from the model's "
+                              "own geometry: give such a point.")
+
+    # --- spec items -------------------------------------------------------------
+
+    def _place_spec(self, doc, drawing, checked, places, made, notes) -> dict:
+        """Place every placed spec item; general notes stack in the notes block."""
+        items = {i["id"]: i for i in checked["items"]}
+        order = {"dimension": 0, "thread": 1, "hole": 1, "datum": 2, "gdt": 2, "finish": 3, "note": 4}
+        annotations, text_at, out = {}, {}, {"placed": []}
+        self._slots, self._on_host = drawing_spec.TextSlots(self._sheet["area_mm"]), {}
+        for info in made.values():  # a section's or detail's label sits under it: leader text goes below that
+            if info["kind"] != "standard":
+                self._slots.reserve(info["name"], "below", drawing_spec.VIEW_LABEL_MM)
+        # the part and its views do not change while annotations go on: each
+        # edge, face, silhouette list and point is looked up once
+        part_edges = [binding.wrap(e, self._mod.IEdge) for e in self._solid_body().GetEdges() or ()]
+        self._lookups = {"faces": None, "silhouettes": {}, "edge_at": {}}
+        timings = self._timings["items"]
+        for sid in sorted(places, key=lambda s: order[items[s]["kind"]]):
+            item, place = items[sid], places[sid]
+            began = time.perf_counter()
+            target = made.get(place["view"])
+            doc.ClearSelection2(True)
+            if item["kind"] == "dimension":
+                annotations[sid], text_at[sid] = self._place_dimension(doc, target, item, place, part_edges)
+            elif item["kind"] in ("datum", "gdt"):
+                hosts = {k: v for k, v in annotations.items() if items[k]["kind"] == "dimension"}
+                host_points = {k: p["point_mm"] for k, p in places.items() if "point_mm" in p}
+                annotations[sid] = self._place_frame(doc, drawing, target, item, place, hosts, text_at, host_points,
+                                                     part_edges)
+            elif item["kind"] == "finish":
+                annotations[sid] = self._place_finish(doc, target, item, place, part_edges)
+            else:
+                text = (drawing_spec.thread_text(item) if item["kind"] == "thread" else
+                        item["callout"] if item["kind"] == "hole" else item["text"])
+                annotations[sid] = self._place_note(doc, target, sid, text, place, part_edges)
+            annotation = binding.wrap(annotations[sid].GetAnnotation(), self._mod.IAnnotation)
+            if not annotation.SetName(drawing_spec.annotation_name(sid)):
+                raise SolidWorksError(f"Could not name the annotation for {sid}.")
+            out["placed"].append(sid)
+            timings[sid] = time.perf_counter() - began
+        x, y = self._notes_at
+        for item in reversed(notes):  # the first note on top
+            doc.ClearSelection2(True)
+            drawing.ActivateSheet(binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).GetName())
+            note = binding.wrap(doc.InsertNote(drawing_spec.to_sw_text(item["text"])), self._mod.INote)
+            if note is None:
+                raise SolidWorksError(f"SolidWorks could not place note {item['id']}.")
+            lines = len(item["text"].splitlines())
+            y += 5.0 * lines
+            annotation = binding.wrap(note.GetAnnotation(), self._mod.IAnnotation)
+            annotation.SetPosition2(mm_to_m(x), mm_to_m(y), 0.0)
+            annotation.SetName(drawing_spec.annotation_name(item["id"]))
+            out["placed"].append(item["id"])
+        return out
+
+    def _edge_at(self, part_edges, point_mm, label: str, target=None):
+        """The part edge through a model point (within 0.01 mm); with a target
+        view, else the view's silhouette line through it (the side of a cone or
+        cylinder, which is no model edge). Returns an IEdge or an ISilhouetteEdge.
+        Remembered per view and point for one make_drawing (_place_spec)."""
+        lookups = self._lookups
+        key = (target["name"] if target is not None else None, tuple(round(c, 6) for c in point_mm))
+        if lookups is not None and key in lookups["edge_at"]:
+            return lookups["edge_at"][key]
+        found = self._find_edge_at(part_edges, point_mm, label, target)
+        if lookups is not None:
+            lookups["edge_at"][key] = found
+        return found
+
+    def _part_faces(self) -> list:
+        """The part's faces (IFace2), listed once per make_drawing."""
+        lookups = self._lookups
+        if lookups is not None and lookups["faces"] is not None:
+            return lookups["faces"]
+        faces = [binding.wrap(f, self._mod.IFace2) for body in self._part_bodies() for f in body.GetFaces() or ()]
+        if lookups is not None:
+            lookups["faces"] = faces
+        return faces
+
+    def _find_edge_at(self, part_edges, point_mm, label: str, target=None):
+        best, best_d = None, None
+        for edge in part_edges:
+            e = binding.wrap(edge, self._mod.IEdge)
+            near = e.GetClosestPointOn(*(mm_to_m(c) for c in point_mm))
+            if not near:
+                continue
+            d = math.dist(point_mm, [m_to_mm(c) for c in near[:3]])
+            if best_d is None or d < best_d:
+                best, best_d = e, d
+        if (best is None or best_d > self._EDGE_ON_TOLERANCE_MM) and target is not None                 and target.get("kind") in ("section", "detail"):
+            cut = self._cut_face_edge_at(target, point_mm)
+            if cut is not None:
+                return cut
+        if (best is None or best_d > self._EDGE_ON_TOLERANCE_MM) and target is not None:
+            line = self._silhouette_at(target, point_mm)
+            if line is not None:
+                return line
+            face = next((f for f in self._part_faces() if self._off_face_mm(f, point_mm) <= self._EDGE_ON_TOLERANCE_MM),
+                        None)
+            if face is not None:  # a face seen edge-on, or a silhouette the view did not list: pick it on the sheet
+                x, y = self._sheet_point(target, point_mm)
+                return _SheetPick(point_mm, mm_to_m(x), mm_to_m(y), face)
+        if best is None or best_d > self._EDGE_ON_TOLERANCE_MM:
+            raise SolidWorksError(f"{label}: no edge of the part passes through "
+                                  f"({', '.join(f'{c:g}' for c in point_mm)}) mm"
+                                  + (f"; the nearest is {best_d:.3f} mm away" if best_d is not None else "")
+                                  + ", and no silhouette line in that view does"
+                                  + (f" (it lists lines at {getattr(self, '_last_silhouettes', [])})" if target is not None else "")
+                                  + ". Give a point on an edge "
+                                  "(list_edges) or on the outline of a curved surface as the view shows it."
+                                  + (" A detail view's silhouettes carry no geometry on SOLIDWORKS 2020: "
+                                     "dimension the side of a cone or cylinder in a standard view."
+                                     if target is not None and target.get("kind") == "detail" else ""))
+        return best
+
+    def _silhouette_at(self, target, point_mm):
+        """The view's silhouette line through a model point, or None. On 2020
+        ISilhouetteEdge.GetStartPoint throws and GetCurve is an unbounded line
+        (or None), so a point counts when it is on that line and on its face."""
+        lines = self._silhouette_lines(target)
+        # 2020 lists some silhouettes once and leaves others out (a cone showed only
+        # its -x side, twice): the other side of a turned face, mirrored across its
+        # axis, has the same lengths and angles
+        candidates = [point_mm] + [self._mirrored_on_turned_face(face, point_mm) for _, _, face in lines
+                                   if self._off_face_mm(face, point_mm) <= self._EDGE_ON_TOLERANCE_MM]
+        self._last_silhouettes = [[round(m_to_mm(c), 3) for c in params[0:2]] for _, params, _ in lines]
+        for point in filter(None, candidates):
+            for line, params, face in lines:
+                root, direction = [m_to_mm(c) for c in params[0:3]], params[3:6]
+                far = [r + 1000.0 * d for r, d in zip(root, direction)]
+                near = [r - 1000.0 * d for r, d in zip(root, direction)]
+                if (self._off_segment_mm(point, near, far) <= self._EDGE_ON_TOLERANCE_MM
+                        and self._off_face_mm(face, point) <= self._EDGE_ON_TOLERANCE_MM):
+                    return line
+        return None
+
+    def _silhouette_lines(self, target) -> list:
+        """[(ISilhouetteEdge, line params, IFace2)] of a view's straight
+        silhouettes, listed once per view and make_drawing."""
+        lookups = self._lookups
+        cache = lookups["silhouettes"] if lookups is not None else {}
+        if target["name"] not in cache:
+            lines = []
+            for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_SILHOUETTE) or ():
+                line = binding.wrap(handle, self._mod.ISilhouetteEdge)
+                curve = binding.wrap(line.GetCurve(), self._mod.ICurve)
+                face = binding.wrap(line.GetFace(), self._mod.IFace2)
+                if curve is not None and face is not None and curve.IsLine():
+                    lines.append((line, curve.LineParams, face))
+            cache[target["name"]] = lines
+        return cache[target["name"]]
+
+    def _turned_surface(self, face):
+        """('cylinder' | 'cone', params) of a face, or None."""
+        surface = binding.wrap(face.GetSurface(), self._mod.ISurface)
+        if surface.IsCylinder():
+            return "cylinder", surface.CylinderParams
+        if surface.IsCone():
+            return "cone", surface.ConeParams
+        return None
+
+    def _generator(self, face, point_mm) -> tuple:
+        """The direction of the straight line on a cylinder or cone through a
+        point: the axis, or towards the cone's apex."""
+        kind, params = self._turned_surface(face)
+        axis = tuple(params[3:6])
+        if kind == "cylinder":
+            return axis
+        origin, radius, half = [m_to_mm(c) for c in params[0:3]], m_to_mm(params[6]), params[7]
+        apex = [o + a * radius / math.tan(half) for o, a in zip(origin, axis)]
+        d = [a - p for a, p in zip(apex, point_mm)]
+        n = math.hypot(*d)
+        return tuple(c / n for c in d)
+
+    def _mirrored_on_turned_face(self, face, point_mm):
+        """A point mirrored across the axis of the cone or cylinder it lies on, or None."""
+        turned = self._turned_surface(face)
+        if turned is None:
+            return None
+        params = turned[1]
+        origin, axis = [m_to_mm(c) for c in params[0:3]], params[3:6]
+        along = sum((p - o) * a for p, o, a in zip(point_mm, origin, axis))
+        foot = [o + along * a for o, a in zip(origin, axis)]
+        return [2 * f - p for f, p in zip(foot, point_mm)]
+
+    @staticmethod
+    def _off_segment_mm(p, a, b) -> float:
+        """Distance from point p to segment ab; pure."""
+        ab = [y - x for x, y in zip(a, b)]
+        length2 = sum(c * c for c in ab)
+        t = 0.0 if not length2 else max(0.0, min(1.0, sum((q - x) * c for q, x, c in zip(p, a, ab)) / length2))
+        return math.dist(p, [x + t * c for x, c in zip(a, ab)])
+
+    def _mark_middle(self, target, mark: _Mark) -> tuple:
+        """Where a mark is on the sheet (mm): a line's middle, a circle's centre, a point."""
+        if mark.kind == "line":
+            a, b = (self._sheet_point(target, mark.mark[k]) for k in ("from_mm", "to_mm"))
+            return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        return self._sheet_point(target, mark.point_mm)
+
+    def _select_in(self, target, edge, append: bool, label: str, lines_only: bool = False, point_mm=None) -> None:
+        if isinstance(edge, _Mark):
+            if not edge.entity.Select4(append, None):
+                raise SolidWorksError(f"{label}: SolidWorks could not select mark {edge.id} in {target['name']}.")
+            return
+        if isinstance(edge, _SheetPick):
+            if lines_only:  # picked on the sheet, a silhouette comes back as its face (verified)
+                raise SolidWorksError(f"{label}: SOLIDWORKS 2020 did not list the silhouette through "
+                                      f"({', '.join(f'{c:g}' for c in edge.point_mm)}) mm in {target['name']}, "
+                                      "and a dimension needs it. Measure to an edge (a circle seen edge-on, a "
+                                      "line) or use the other side of the part. "
+                                      f"(It lists lines at {getattr(self, '_last_silhouettes', [])}.)")
+            doc = target["doc"]
+            ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+            picked = ext.SelectByID2("", "", edge.x_m, edge.y_m, 0.0, append, 0, None, 0)
+            manager = binding.wrap(doc.SelectionManager, self._mod.ISelectionMgr)
+            count = manager.GetSelectedObjectCount2(-1)
+            kind = manager.GetSelectedObjectType3(count, -1) if count else None
+            if not picked or kind not in SW_SEL_PART_GEOMETRY:
+                raise SolidWorksError(f"{label}: nothing of the part shows at ({m_to_mm(edge.x_m):.2f}, "
+                                      f"{m_to_mm(edge.y_m):.2f}) mm on the sheet in {target['name']}.")
+            return
+        if isinstance(edge, self._mod.ISilhouetteEdge):
+            if not edge.Select2(append, None):
+                raise SolidWorksError(f"{label}: SolidWorks could not select that silhouette in {target['name']}.")
+            return
+        if not lines_only and point_mm is not None and target.get("kind") in ("section", "detail"):
+            # a leader ends at an end of its edge, which SolidWorks picks again on
+            # every rebuild (setting the end does not hold): a circle seen edge-on
+            # runs across the whole section, the cut face's own edge through the
+            # point is short (DTN7's chamfer note ran 95 mm to the far side)
+            cut = self._cut_face_edge_at(target, point_mm, shortest=True)
+            if cut is not None and target["view"].SelectEntity(cut, append):
+                return
+        if target["view"].SelectEntity(edge, append):
+            return
+        # a detail view refuses the part's edge on 2020 but takes its own copy of it
+        twin = self._view_twin(target, edge, point_mm) if point_mm is not None else None
+        if twin is not None and target["view"].SelectEntity(twin, append):
+            return
+        if not lines_only and point_mm is not None:
+            # a leader (note, datum, frame, finish) only needs something drawn at the
+            # point: where the part's edge hides behind a section's cut face, the cut
+            # face's own outline through it
+            cut = self._cut_face_edge_at(target, point_mm)
+            if cut is not None and target["view"].SelectEntity(cut, append):
+                return
+        raise SolidWorksError(f"{label}: SolidWorks could not select that edge in view {target['name']}.")
+
+    def _view_twin(self, target, edge, point_mm):
+        """The view's own edge (IView.GetVisibleEntities2) that shows the part
+        edge at point_mm, or None. A detail view of a section refuses the part's
+        edges on 2020 but takes its own copies, which are flat: a circle seen
+        edge-on is a straight line there. So the copy is the one through the
+        point that runs the same way on the sheet."""
+        sheet_dir = lambda e: self._sheet_line(target, e, point_mm)[1]
+        try:
+            want = drawing_spec._unit2(sheet_dir(edge))
+        except SolidWorksError:
+            want = None
+        for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_EDGE) or ():
+            other = binding.wrap(handle, self._mod.IEdge)
+            if self._off_edge_mm(other, point_mm) > self._EDGE_ON_TOLERANCE_MM:
+                continue
+            if want is None:
+                return other
+            try:
+                got = drawing_spec._unit2(sheet_dir(other))
+            except (SolidWorksError, ZeroDivisionError):
+                continue
+            if abs(want[0] * got[1] - want[1] * got[0]) < 1e-3:
+                return other
+        return None
+
+    def _cut_face_edge_at(self, target, point_mm, shortest: bool = False):
+        """An edge of a section's cut face (the hatched outline) through a model
+        point, or None (with `shortest`: the shortest such edge). They are no
+        edges of the part; the view lists them with its own edges
+        (GetVisibleEntities2), in model space on the cutting plane (verified on
+        2020: lines and arcs, also in a detail of a section)."""
+        found = []
+        for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_EDGE) or ():
+            edge = binding.wrap(handle, self._mod.IEdge)
+            if self._off_edge_mm(edge, point_mm) <= self._EDGE_ON_TOLERANCE_MM:
+                if not shortest:
+                    return edge
+                found.append(edge)
+        if not found:
+            return None
+        return min(found, key=self._edge_length_mm)
+
+    def _edge_length_mm(self, edge) -> float:
+        """An edge's length (mm), as list_edges measures it; inf if it has no curve."""
+        curve = binding.wrap(edge.GetCurve(), self._mod.ICurve)
+        params = edge.GetCurveParams2()  # start xyz, end xyz (m), start and end parameter
+        if curve is None or not params:
+            return math.inf
+        return m_to_mm(curve.GetLength3(params[6], params[7]))
+
+    def _off_edge_mm(self, edge, point_mm) -> float:
+        near = edge.GetClosestPointOn(*(mm_to_m(c) for c in point_mm))
+        return math.dist(point_mm, [m_to_mm(c) for c in near[:3]]) if near else math.inf
+
+    def _circle_of(self, edge):
+        """(centre mm, axis, radius mm) of a circular edge, or None."""
+        curve = binding.wrap(edge.GetCurve(), self._mod.ICurve)
+        if not curve.IsCircle():
+            return None
+        p = curve.CircleParams
+        return [m_to_mm(c) for c in p[0:3]], tuple(p[3:6]), m_to_mm(p[6])
+
+    def _place_dimension(self, doc, target, item, place, part_edges):
+        sid, measure = item["id"], place["measure"]
+        edges = [target["marks"][p] if isinstance(p, str) else self._edge_at(part_edges, p, f"{sid} point {n + 1}", target)
+                 for n, p in enumerate(place["points_mm"])]
+        points_mm = [e.point_mm if isinstance(e, _Mark) else p for e, p in zip(edges, place["points_mm"])]
+        if any(isinstance(e, _Mark) for e in edges):  # a dimension to the view's sketch needs the view active
+            binding.wrap(doc, self._mod.IDrawingDoc).ActivateView(target["name"])
+        sheet_pts = [self._mark_middle(target, e) if isinstance(e, _Mark) else self._sheet_point(target, p)
+                     for e, p in zip(edges, points_mm)]
+        ox0, oy0, ox1, oy1 = self._outline_mm(target)
+        mx = sum(p[0] for p in sheet_pts) / len(sheet_pts)
+        my = sum(p[1] for p in sheet_pts) / len(sheet_pts)
+        off, side = place["offset_mm"], place.get("side")
+        upper = side == "above" if side in ("above", "below") else my >= (oy0 + oy1) / 2
+        right = side == "right" if side in ("left", "right") else mx >= (ox0 + ox1) / 2
+        ax0, ay0, ax1, ay1 = self._sheet["area_mm"]
+        if (oy1 + off > ay1 - 3.0 if upper else oy0 - off < ay0 + 3.0):
+            upper = not upper  # its text would leave the drawing area (over the border or the title block)
+        if (ox1 + off > ax1 - 3.0 if right else ox0 - off < ax0 + 3.0):
+            right = not right
+        if measure not in ("vertical", "angle"):  # its text sits above or below the view
+            self._slots.reserve(target["name"], "above" if upper else "below", off)
+        above = oy1 + off if upper else oy0 - off  # the text's height for a dimension across the view
+        beside = ox1 + off if right else ox0 - off
+        for n, edge in enumerate(edges):
+            self._select_in(target, edge, n > 0, sid, lines_only=True, point_mm=points_mm[n])
+        spot = (mx, above)
+        if measure in ("diameter", "radius") and isinstance(edges[0], _Mark):  # a centreline circle
+            cx, cy = self._sheet_point(target, edges[0].mark["center_mm"])
+            tx, ty = self._sheet_point(target, edges[0].mark["through_mm"])
+            r = math.hypot(tx - cx, ty - cy)
+            sx, sy = (-1 if side == "left" else 1), (-1 if side == "below" else 1)  # the corner it goes out to
+            spot = (cx + sx * (r + off) * 0.7071, cy + sy * (r + off) * 0.7071)
+            add = doc.AddDiameterDimension2 if measure == "diameter" else doc.AddRadialDimension2
+            handle = add(mm_to_m(spot[0]), mm_to_m(spot[1]), 0.0)
+        elif measure in ("diameter", "radius"):
+            circle = None if isinstance(edges[0], (self._mod.ISilhouetteEdge, _SheetPick)) else self._circle_of(edges[0])
+            if circle is None:
+                raise SolidWorksError(f"{sid}: a {measure} needs a point on a circular edge.")
+            centre, axis, _ = circle
+            towards = target["orientation"]["towards_viewer"]
+            along = abs(drawing_spec._dot(axis, towards))
+            if along > 0.999:  # the circle faces the viewer
+                add = doc.AddDiameterDimension2 if measure == "diameter" else doc.AddRadialDimension2
+                cx, cy = self._sheet_point(target, centre)
+                spot = (cx + off, cy + off)
+                handle = add(mm_to_m(cx + off), mm_to_m(cy + off), 0.0)
+            elif along < 0.001 and measure == "diameter":  # seen edge-on, as a line
+                # the text goes where `side` says: beyond the view's end, along the
+                # line (a shaft's diameters, the default), or across it, beside the view
+                cx, cy = self._sheet_point(target, centre)
+                if abs(drawing_spec._dot(axis, target["orientation"]["right"])) > 0.999:  # a vertical line
+                    spot = (beside, cy) if side in ("left", "right") else (mx, above)
+                    handle = doc.AddVerticalDimension2(*(mm_to_m(c) for c in spot), 0.0)
+                else:  # a horizontal line
+                    spot = (cx, above) if side in ("above", "below") else (beside, my)
+                    handle = doc.AddHorizontalDimension2(*(mm_to_m(c) for c in spot), 0.0)
+            else:
+                raise SolidWorksError(f"{sid}: the circle is seen at a slant in {target['name']}; dimension its "
+                                      "diameter in a view that shows it face-on or edge-on.")
+        elif measure == "horizontal":
+            handle = doc.AddHorizontalDimension2(mm_to_m(mx), mm_to_m(above), 0.0)
+        elif measure == "vertical":
+            spot = (beside, my)
+            handle = doc.AddVerticalDimension2(mm_to_m(beside), mm_to_m(my), 0.0)
+        elif measure == "angle":
+            handle, spot = self._add_angle(doc, target, item, edges, points_mm, off,
+                                           ((ox0 + ox1) / 2, (oy0 + oy1) / 2))
+        else:  # distance: SolidWorks chooses from the selection
+            handle = doc.AddDimension2(mm_to_m(mx), mm_to_m(above), 0.0)
+        dd = binding.wrap(handle, self._mod.IDisplayDimension)
+        if dd is None:
+            raise SolidWorksError(f"SolidWorks could not add dimension {sid} ({measure}) in {target['name']}.")
+        self._format_dimension(dd, item)
+        return dd, tuple(mm_to_m(c) for c in spot)
+
+    def _format_dimension(self, dd, item) -> None:
+        """Show a placed dimension as the spec says: inches or degrees, places or
+        a fraction, and its tolerance. Limits are set from the measured value so
+        they show exactly the spec's two numbers."""
+        sid, show = item["id"], drawing_spec.display_settings(item)
+        dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)
+        if not show["angle"]:
+            base = SW_FRACTION if show["fraction"] else SW_DECIMAL
+            dd.SetUnits2(False, SW_INCHES, base, drawing_spec.FRACTION_DENOMINATOR, True, SW_ROUND_HALF_AWAY)
+        places = show["decimals"]
+        tol_places = show.get("tol_decimals", places)
+        dd.SetPrecision3(places, places, tol_places, tol_places)
+        tolerance = binding.wrap(dim.Tolerance, self._mod.IDimensionTolerance)
+        tolerance.Type = SW_TOLERANCES[show["tolerance"]]
+        dd.ShowParenthesis = bool(show["reference"])
+        if show["prefix"]:  # before SolidWorks' own Ø or R, which stays
+            dd.SetText(SW_DIMENSION_TEXT_PREFIX, f"{show['prefix']} {dd.GetText(SW_DIMENSION_TEXT_PREFIX) or ''}")
+        if show["suffix"]:
+            dd.SetText(SW_DIMENSION_TEXT_SUFFIX, f" {show['suffix']}")
+        if show["tolerance"] == "limits":
+            value_in = mm_to_in(m_to_mm(dim.SystemValue))
+            low, high = show["lower_in"] - value_in, show["upper_in"] - value_in
+            if not tolerance.SetValues(mm_to_m(in_to_mm(low)), mm_to_m(in_to_mm(high))):
+                raise SolidWorksError(f"Could not set the limits of {sid}.")
+        elif show["tolerance"] in ("bilateral", "symmetric"):
+            unit = math.radians if show["angle"] else (lambda v: mm_to_m(in_to_mm(v)))
+            if not tolerance.SetValues(-unit(show["minus_in"]), unit(show["plus_in"])):
+                raise SolidWorksError(f"Could not set the tolerance of {sid}.")
+
+    def _sheet_line(self, target, entity, point_mm) -> tuple:
+        """The sheet line ((x, y), (dx, dy)) an edge or silhouette shows as in the
+        view: a straight one along its direction, a circle seen edge-on across
+        its axis."""
+        o = target["orientation"]
+        flat = lambda v: (drawing_spec._dot(v, o["right"]), drawing_spec._dot(v, o["up"]))
+        at = self._sheet_point(target, point_mm)
+        if isinstance(entity, _Mark):
+            if entity.kind != "line":
+                raise SolidWorksError(f"An angle is measured between lines; mark {entity.id} is a {entity.kind}.")
+            b = self._sheet_point(target, entity.mark["to_mm"])
+            return at, (b[0] - at[0], b[1] - at[1])
+        if isinstance(entity, _SheetPick):  # along the surface's line through the point
+            return at, flat(self._generator(entity.face, point_mm))
+        curve = binding.wrap(entity.GetCurve(), self._mod.ICurve)
+        if curve is not None and curve.IsLine():
+            return at, flat(curve.LineParams[3:6])
+        circle = None if isinstance(entity, (self._mod.ISilhouetteEdge, _SheetPick)) else self._circle_of(entity)
+        if circle is not None:
+            ax, ay = flat(circle[1])
+            if math.hypot(ax, ay) > 0.999:  # seen edge-on
+                return at, (-ay, ax)
+        raise SolidWorksError("An angle is measured between lines as the view shows them: straight edges, "
+                              "silhouettes, or circles seen edge-on.")
+
+    def _add_angle(self, doc, target, item, edges, points_mm, off, centre) -> tuple:
+        """An angle dimension that shows the spec's angle. Two lines make four
+        angles (and their reflex ones); SolidWorks picks one from where the text
+        goes, not always the sector the text is in (45 came out 135, and 225 on
+        the real DTN6), and on 2020 SupplementaryAngle & co. return True but
+        change nothing (verified). So each text spot in a sector of the right
+        angle is tried; a dimension with another angle is deleted again."""
+        sid, nominal = item["id"], float(item["parsed"].nominal)
+        lines = [self._sheet_line(target, e, p) for e, p in zip(edges, points_mm)]
+        ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+        got = []
+        spots = drawing_spec.angle_text_spots(*lines, nominal, off + 8.0, centre)
+        if all(isinstance(e, _Mark) for e in edges):  # centrelines out from a centre: text between them
+            # between the rays first, then the nearer spot before the one twice as far out
+            spots.sort(key=lambda q: (drawing_spec.ray_side(q, *lines) <= 0, math.dist(q, lines[0][0])))
+        for spot in spots:
+            doc.ClearSelection2(True)
+            for n, edge in enumerate(edges):
+                self._select_in(target, edge, n > 0, sid, lines_only=True, point_mm=points_mm[n])
+            handle = doc.AddDimension2(mm_to_m(spot[0]), mm_to_m(spot[1]), 0.0)
+            dd = binding.wrap(handle, self._mod.IDisplayDimension)
+            if dd is None:
+                continue
+            dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)
+            shown = math.degrees(dim.SystemValue)
+            if abs(shown - nominal) <= drawing_spec.EXACT_DEG:
+                return handle, spot
+            got.append(round(shown, 4))
+            before = target["view"].GetDisplayDimensionCount()
+            doc.ClearSelection2(True)
+            ext.SelectByID2(dim.FullName, "DIMENSION", 0.0, 0.0, 0.0, False, 0, None, 0)
+            ext.DeleteSelection2(0)
+            if target["view"].GetDisplayDimensionCount() != before - 1:
+                raise SolidWorksError(f"{sid}: an angle of {shown:g} deg was placed and could not be removed again.")
+        raise SolidWorksError(f"{sid}: SolidWorks measured {', '.join(f'{g:g}' for g in got) or 'nothing'} deg "
+                              f"between those lines, never the spec's {nominal:g}: check the model or the points.")
+
+    def _annotation_spot(self, target, point_mm, width_mm: float = 12.0, lines: int = 1, place=None) -> tuple:
+        """Where a leader's text goes (its top-left corner, m): as the placement
+        says (text_mm from the attach point; side and offset_mm beyond the
+        view's outline), else off the view on the point's side, beyond the
+        dimensions there, on the first line where it overlaps nothing."""
+        x, y = self._sheet_point(target, point_mm)
+        ox0, oy0, ox1, oy1 = self._outline_mm(target)
+        place = place or {}
+        if place.get("text_mm"):
+            dx, dy = place["text_mm"]
+            return mm_to_m(x + dx), mm_to_m(y + dy)
+        if place.get("side") in ("left", "right"):
+            off = place.get("offset_mm", 10.0)
+            tx = ox1 + off if place["side"] == "right" else ox0 - off - width_mm
+            return mm_to_m(tx), mm_to_m(y + drawing_spec.LINE_MM * lines / 2)
+        if place.get("side") in ("above", "below") and "offset_mm" in place:
+            off, tall = place["offset_mm"], drawing_spec.LINE_MM * lines
+            return mm_to_m(x + 4.0), mm_to_m(oy1 + off + tall if place["side"] == "above" else oy0 - off)
+        side = place.get("side") or ("above" if y >= (oy0 + oy1) / 2 else "below")
+        x0, y0, x1, y1 = self._sheet["area_mm"]
+        for _ in range(2):  # off the drawing area on this side: the other side
+            sx, sy = self._slots.place(target["name"], side, x + 4.0, oy1 if side == "above" else oy0, width_mm, lines)
+            if y0 + 4.0 <= sy <= y1 - 2.0:
+                break
+            side = "below" if side == "above" else "above"
+        return mm_to_m(sx), mm_to_m(sy)
+
+    @staticmethod
+    def _text_size(text: str) -> tuple:
+        """(width mm, lines) of a note's text on the sheet."""
+        rows = text.splitlines() or [""]
+        return max(len(r) for r in rows) * drawing_spec.CHAR_MM, len(rows)
+
+    @staticmethod
+    def _frame_width(item) -> float:
+        if item["kind"] == "datum":
+            return 8.0
+        cells = len(item["datums"]) + 1
+        return 10.0 + len(item["tolerance"]) * drawing_spec.CHAR_MM + 7.0 * cells
+
+    def _place_frame(self, doc, drawing, target, item, place, hosts, text_at, host_points, part_edges):
+        """A datum feature symbol or a feature control frame, on a placed
+        dimension's annotation (a feature of size) or on an edge."""
+        sid = item["id"]
+        if "on" in place and place["on"] in hosts:  # a feature of size: on its dimension
+            dim = binding.wrap(hosts[place["on"]].GetDimension2(0), self._mod.IDimension)
+            ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+            drawing.ActivateView(target["name"])  # else the symbol lands on the sheet, not in the view
+            # IAnnotation.Select3 refuses a dimension; selecting it by name works (verified).
+            # The pick point is where the symbol attaches: at the dimension's text.
+            x, y = list(binding.wrap(hosts[place["on"]].GetAnnotation(), self._mod.IAnnotation).GetPosition())[:2]
+            n = self._on_host.get(place["on"], 0)  # a second symbol on it sits beside the first
+            self._on_host[place["on"]] = n + 1
+            x += mm_to_m(14.0 * n)
+            if not ext.SelectByID2(dim.FullName, "DIMENSION", x, y, 0.0, False, 0, None, 0):
+                raise SolidWorksError(f"{sid}: could not select dimension {place['on']} to attach to.")
+            # SolidWorks put a symbol on a dimension where it liked (datum C on DTN7's
+            # slot width went to the top of the sheet): under the dimension's text,
+            # or text_mm from it (the text's top-centre is the annotation's position)
+            dx, dy = place.get("text_mm") or (-4.0, -4.0)
+            spot = (x + mm_to_m(dx), y + mm_to_m(dy))
+        elif "on" in place:  # a thread or hole callout: on the edge its leader points at
+            point = host_points[place["on"]]
+            self._select_in(target, self._edge_at(part_edges, point, sid, target), False, sid, point_mm=point)
+            spot = self._annotation_spot(target, point, self._frame_width(item), 1, place)
+        else:
+            self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid, point_mm=place["point_mm"])
+            spot = self._annotation_spot(target, place["point_mm"], self._frame_width(item), 1, place)
+        if item["kind"] == "datum":
+            made = binding.wrap(doc.InsertDatumTag2(), self._mod.IDatumTag)
+            if made is None:
+                raise SolidWorksError(f"SolidWorks could not place datum {item['label']} ({sid}).")
+            if made.GetLabel() != item["label"] and not made.SetLabel(item["label"]):
+                raise SolidWorksError(f"SolidWorks placed datum {made.GetLabel()!r} and would not relabel it "
+                                      f"{item['label']} ({sid}).")
+        else:
+            made = binding.wrap(doc.InsertGtol(), self._mod.IGtol)
+            if made is None:
+                raise SolidWorksError(f"SolidWorks could not place the feature control frame {sid}.")
+            tol = item["tolerance"].strip()
+            diameter = tol[:1] in ("Ø", "⌀")
+            tol = tol.lstrip("Ø⌀").strip()
+            datums = list(item["datums"]) + [""] * (3 - len(item["datums"]))
+            # SetFrameSymbols2 takes the symbols as TEXT on 2020 and stores a number
+            # as a literal ('24'); SetFrameSymbols with the enum gives <GTOL-CONC> (verified)
+            made.SetFrameSymbols(1, SW_GCS[item["characteristic"]], diameter, SW_GTOL_MATERIAL[item["modifier"]],
+                                 False, 0, 0, 0, 0)
+            if not made.SetFrameValues2(1, tol, "", *datums):
+                raise SolidWorksError(f"SolidWorks did not take the values of frame {sid}.")
+            if item.get("projected") and not made.SetPTZHeight2(1, 1, True, item["projected"].strip()):
+                raise SolidWorksError(f"SolidWorks did not take the projected tolerance zone of frame {sid}.")
+        binding.wrap(made.GetAnnotation(), self._mod.IAnnotation).SetPosition2(*spot, 0.0)
+        if "on" not in place or place["on"] not in hosts:
+            self._leader_side(made, target, host_points[place["on"]] if "on" in place else place["point_mm"],
+                              spot, self._frame_width(item))
+        return made
+
+    def _place_finish(self, doc, target, item, place, part_edges):
+        sid = item["id"]
+        self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid, point_mm=place["point_mm"])
+        x, y = self._annotation_spot(target, place["point_mm"], 12.0, 2, place)
+        ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+        made = binding.wrap(ext.InsertSurfaceFinishSymbol3(SW_SF_SYMBOLS[item["symbol"]], SW_LEADER_STRAIGHT, x, y,
+                                                           0.0, 0, SW_ARROW_CLOSED, "", "", "", "", item["value"],
+                                                           "", ""), self._mod.ISFSymbol)
+        if made is None:
+            raise SolidWorksError(f"SolidWorks could not place the finish symbol {sid}.")
+        return made
+
+    def _place_note(self, doc, target, sid, text, place, part_edges):
+        """A note with a leader to an edge: thread and hole callouts, local notes."""
+        self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid, point_mm=place["point_mm"])
+        note = binding.wrap(doc.InsertNote(drawing_spec.to_sw_text(text)), self._mod.INote)
+        if note is None:
+            raise SolidWorksError(f"SolidWorks could not place the note '{text}'.")
+        width, lines = self._text_size(text)
+        spot = self._annotation_spot(target, place["point_mm"], width, lines, place)
+        binding.wrap(note.GetAnnotation(), self._mod.IAnnotation).SetPosition2(*spot, 0.0)
+        self._leader_side(note, target, place["point_mm"], spot, width, lines, text)
+        return note
+
+    _LEADER_LEFT, _LEADER_RIGHT = 1, 2  # swLeaderSide_e
+    # swLeaderStyle_e: swSTRAIGHT, with swAttachLeaderTop / Center / Bottom
+    _LEADER_STRAIGHT, _LEADER_TOP, _LEADER_CENTER, _LEADER_BOTTOM = 1, 256, 512, 1024
+
+    def _leader_side(self, made, target, point_mm, spot, width_mm: float, lines: int = 1,
+                     text: str | None = None) -> None:
+        """A straight leader from the end and line of the text that face its
+        attach point. SolidWorks' own drew from the last line with a 6 mm
+        shoulder (DTN7's bore callout, the bore above it: 61 mm of leader;
+        swAttachLeaderNearest did not change the line). From the top or the
+        bottom line the leader starts at an end of that line."""
+        x, y = self._sheet_point(target, point_mm)
+        top = m_to_mm(spot[1])
+        line = (self._LEADER_TOP if y > top else
+                self._LEADER_BOTTOM if y < top - drawing_spec.LINE_MM * lines else self._LEADER_CENTER)
+        rows = (text or "").splitlines()
+        if rows and line != self._LEADER_CENTER:
+            width_mm = self._text_size(rows[0] if line == self._LEADER_TOP else rows[-1])[0]
+        side = self._LEADER_RIGHT if x > m_to_mm(spot[0]) + width_mm / 2 else self._LEADER_LEFT
+        annotation = binding.wrap(made.GetAnnotation(), self._mod.IAnnotation)
+        annotation.SetLeader3(self._LEADER_STRAIGHT | line, side, True, False, False, False)
+
+    # --- the check --------------------------------------------------------------
+
+    def check_drawing(self, path: str, spec: dict) -> dict:
+        """Read a saved .slddrw back from SolidWorks and compare it with the spec:
+        one line per spec item (ok / missing / differs / unreadable) and what is
+        on the drawing but not in the spec. Leaves the current part current."""
+        abs_path = os.path.abspath(path)
+        if not abs_path.lower().endswith(".slddrw") or not os.path.isfile(abs_path):
+            raise SolidWorksError(f"check_drawing reads a saved .slddrw (got '{path}').")
+        drawing_spec.validate(spec)
+        sw = self._ensure()
+        title = os.path.basename(abs_path)
+        already = any(os.path.normcase(d.GetPathName()) == os.path.normcase(abs_path) for d in self._open_documents())
+        result = sw.OpenDoc6(abs_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
+        doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not open the drawing {abs_path}.")
+        try:
+            read = self._read_drawing(doc)
+            layout = self._layout_report(doc)
+        finally:
+            if not already:
+                # by path: a drawing has its part's title ('DTN6'), so the title is ambiguous
+                sw.CloseDoc(doc.GetPathName() or title)
+        return {**drawing_spec.compare(spec, read), "layout": layout, "path": abs_path}
+
+    def _read_drawing(self, doc) -> dict:
+        """Every dimension, note, datum, frame and finish symbol on the drawing,
+        as SolidWorks has them (drawing_spec.compare's input)."""
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+        doc_places = ext.GetUserPreferenceInteger(SW_PREF_UNITS_LINEAR_DECIMALS, 0)
+        read = {"dimensions": [], "notes": [], "datums": [], "gtols": [], "finishes": []}
+        view = binding.wrap(drawing.GetFirstView(), self._mod.IView)  # the sheet first, then its views
+        while view is not None:
+            vname = view.GetName2()
+            for handle in view.GetAnnotations() or ():
+                annotation = binding.wrap(handle, self._mod.IAnnotation)
+                kind = SW_ANNOTATION_TYPES.get(annotation.GetType())
+                if kind is None or annotation.OwnerType == SW_ANNOTATION_OWNER_TEMPLATE:
+                    continue  # the title block's own notes belong to the sheet format
+                entry = {"name": annotation.GetName(), "view": vname}
+                specific = annotation.GetSpecificAnnotation()
+                if kind == "dimension":
+                    read["dimensions"].append({**entry, **self._read_dimension(
+                        binding.wrap(specific, self._mod.IDisplayDimension), doc_places)})
+                elif kind == "note":
+                    text = binding.wrap(specific, self._mod.INote).GetText() or ""
+                    if text.strip():  # a section or detail view's own label reads back blank
+                        read["notes"].append({**entry, "text": text})
+                elif kind == "datum":
+                    read["datums"].append({**entry, "label": binding.wrap(specific, self._mod.IDatumTag).GetLabel()})
+                elif kind == "gtol":
+                    read["gtols"].append({**entry, **self._read_gtol(binding.wrap(specific, self._mod.IGtol))})
+                else:
+                    symbol = binding.wrap(specific, self._mod.ISFSymbol)
+                    names = {v: k for k, v in SW_SF_SYMBOLS.items()}
+                    read["finishes"].append({**entry, "symbol": names.get(symbol.GetSymbol(), symbol.GetSymbol()),
+                                             "value": symbol.GetText(SW_SF_MAX_ROUGHNESS)})
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        return read
+
+    _FRAME_PAD_MM = 1.5  # a frame's or datum box's border past its text (measured on DTN7's sheet)
+
+    def _saved_layout_report(self, abs_path: str) -> dict:
+        """_layout_report of a saved drawing, opened and closed again."""
+        result = self._sw.OpenDoc6(abs_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
+        doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not open the saved drawing {abs_path} to measure its layout.")
+        try:
+            return self._layout_report(doc)
+        finally:
+            self._sw.CloseDoc(doc.GetPathName() or abs_path)
+
+    def _layout_report(self, doc, handles: dict | None = None, view_handles: dict | None = None) -> dict:
+        """Every text on the drawing (dimensions, notes, callouts, datums,
+        frames, finish symbols, view labels) with its box on the sheet and its
+        leader length in paper mm, the box each view draws in, and the problems
+        drawing_spec.layout_problems finds. Measured from SolidWorks' own
+        display data: each text run's position, height and width. `handles`,
+        when given, is filled with {(view, name): (annotation, its display
+        lines (x1, y1, x2, y2) in mm, swDimensionType_e or None, the dimension a
+        datum or frame is attached to, its display arcs (start, end and centre
+        x, y) in mm)} and `view_handles` with {view name: IView} for
+        arrange_drawing."""
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        props = list(binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).GetProperties2())
+        size = (round(m_to_mm(props[5]), 1), round(m_to_mm(props[6]), 1))
+        sheet = next((v for v in SHEETS.values() if all(abs(a - b) < 1 for a, b in zip(v["size_mm"], size))), None)
+        border = (12.7, 12.7, size[0] - 12.7, size[1] - 12.7)
+        title_block = sheet["title_block_mm"] if sheet else None
+        items, views = [], {}
+        view = binding.wrap(drawing.GetFirstView(), self._mod.IView)
+        first = True
+        while view is not None:
+            name = None if first else view.GetName2()
+            if not first:
+                x0, y0, x1, y1 = (m_to_mm(c) for c in view.GetOutline())
+                m = min(self._OUTLINE_MARGIN_MM, (x1 - x0) / 4, (y1 - y0) / 4)
+                views[name] = tuple(round(c, 2) for c in (x0 + m, y0 + m, x1 - m, y1 - m))
+                if view_handles is not None:
+                    view_handles[name] = view
+            for handle in view.GetAnnotations() or ():
+                annotation = binding.wrap(handle, self._mod.IAnnotation)
+                kind = SW_ANNOTATION_TYPES.get(annotation.GetType())
+                if kind is None or annotation.OwnerType == SW_ANNOTATION_OWNER_TEMPLATE:
+                    continue
+                data = binding.wrap(annotation.GetDisplayData(), self._mod.IDisplayData)
+                runs = []
+                for i in range(data.GetTextCount() if data is not None else 0):
+                    x, y = list(data.GetTextPositionAtIndex(i))[:2]
+                    runs.append((m_to_mm(x), m_to_mm(y), m_to_mm(data.GetTextInBoxWidthAtIndex(i)),
+                                 m_to_mm(data.GetTextHeightAtIndex(i)), data.GetTextAngleAtIndex(i)))
+                box = drawing_spec.text_box(runs)
+                if box is None:
+                    continue
+                if kind in ("gtol", "datum"):  # the frame's border runs past its text
+                    pad = self._FRAME_PAD_MM
+                    box = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
+                if kind == "note" and not (binding.wrap(annotation.GetSpecificAnnotation(),
+                                                        self._mod.INote).GetText() or "").strip():
+                    kind = "label"  # a section's or detail's own label
+                leader = None
+                if kind in ("note", "datum", "gtol", "finish"):
+                    try:
+                        points = list(annotation.GetLeaderPointsAtIndex(0) or ())
+                    except pythoncom.com_error:
+                        points = []
+                    xy = [(m_to_mm(points[i]), m_to_mm(points[i + 1])) for i in range(0, len(points) - 2, 3)]
+                    leader = round(sum(math.dist(a, b) for a, b in zip(xy, xy[1:])), 1) if len(xy) > 1 else None
+                    path = [tuple(round(c, 2) for c in q) for q in xy]
+                else:
+                    path = []
+                if handles is not None:
+                    lines, arcs = [], []
+                    for i in range(data.GetLineCount() if kind == "dimension" else 0):
+                        line = list(data.GetLineAtIndex3(i) or ())
+                        if len(line) >= 9:  # [colour, type, style, weight, x1, y1, z1, x2, y2, ...] in m (2020)
+                            lines.append(tuple(m_to_mm(line[k]) for k in (4, 5, 7, 8)))
+                    for i in range(data.GetArcCount() if kind == "dimension" else 0):
+                        arc = list(data.GetArcAtIndex2(i) or ())
+                        if len(arc) >= 13:  # [..., start xyz, end xyz, centre xyz, ...] in m (2020)
+                            arcs.append(tuple(m_to_mm(arc[k]) for k in (4, 5, 7, 8, 10, 11)))
+                    dim_type = (binding.wrap(annotation.GetSpecificAnnotation(), self._mod.IDisplayDimension).Type2
+                                if kind == "dimension" else None)
+                    handles[(name, annotation.GetName())] = (annotation, lines, dim_type,
+                                                             self._attached_dimension(annotation) if kind in ("datum", "gtol") else None,
+                                                             arcs)
+                items.append({"name": annotation.GetName(), "view": name, "kind": kind,
+                              "box": tuple(round(c, 2) for c in box), "leader_mm": leader,
+                              **({"leader_end_mm": path[-1], "leader_points_mm": path} if path else {})})
+            first = False
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        problems = drawing_spec.layout_problems(items, views, border, title_block,
+                                                round_views=self._detail_view_names(drawing))
+        counts = {}
+        for p in problems:
+            counts[p["problem"]] = counts.get(p["problem"], 0) + 1
+        return {"sheet_mm": size, "border_mm": border, "title_block_mm": title_block, "views": views,
+                "items": items, "problems": problems, "problem_counts": counts}
+
+    # --- arranging a sheet ------------------------------------------------------
+
+    _LEADER_KINDS = ("note", "datum", "gtol", "finish")
+
+    def arrange_drawing(self, path: str, mode: str = "full", move_views: bool = True) -> dict:
+        """Lay out a saved .slddrw: every text gets a box and a label of what it
+        is and what it belongs to (its view, the dimension it rides on, the
+        point its leader touches); the texts move so none overlaps another, a
+        view, the border or the title block, each stays close to what it
+        describes, and stacked dimensions step out from their view
+        (drawing_layout). In "full" mode with move_views the views first move
+        apart where their texts need room (projected views stay aligned);
+        "fix" leaves the views and every text that clashes with nothing. Saves the drawing
+        and measures it again."""
+        abs_path = os.path.abspath(path)
+        if not abs_path.lower().endswith(".slddrw") or not os.path.isfile(abs_path):
+            raise SolidWorksError(f"arrange_drawing works on a saved .slddrw (got '{path}').")
+        if mode not in drawing_layout.MODES:
+            raise SolidWorksError(f"mode is {' or '.join(drawing_layout.MODES)} (got {mode!r}).")
+        started = time.perf_counter()
+        sw = self._ensure()
+        already = any(os.path.normcase(d.GetPathName()) == os.path.normcase(abs_path) for d in self._open_documents())
+        result = sw.OpenDoc6(abs_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
+        doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not open the drawing {abs_path}.")
+        views_moved, stuck = {}, []
+        try:
+            handles, view_handles = {}, {}
+            before = self._layout_report(doc, handles, view_handles)
+            # texts may go anywhere inside the border but on the title block
+            b = before["border_mm"]
+            area = (b[0] + 1.5, b[1] + 1.5, b[2] - 1.5, b[3] - 1.5)
+            marks = self._cut_marks(view_handles)
+            round_views = [n for n, v in view_handles.items() if v.Type == self._DETAIL_VIEW]
+            report, items = before, self._layout_items(before, handles)
+            plan = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], mode,
+                                          marks, round_views)
+            if move_views and mode == "full":
+                envelope = drawing_layout.envelopes(report["views"], plan["objects"])
+                views_moved = drawing_layout.spread_views(report["views"], envelope, area, report["title_block_mm"],
+                                                          balance=mode == "full")
+                if views_moved:
+                    stuck = self._shift_views(view_handles, views_moved)
+                    doc.EditRebuild3()
+                    handles = {}
+                    report = self._layout_report(doc, handles)
+                    items = self._layout_items(report, handles)
+                    marks = self._cut_marks(view_handles)
+                    plan = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], mode,
+                                                  marks, round_views)
+            self._apply_layout(items, handles, plan)
+            doc.EditRebuild3()
+            # SolidWorks may set a text otherwise than planned: measure, and fix what clashes
+            handles = {}
+            report = self._layout_report(doc, handles)
+            if report["problems"]:
+                items = self._layout_items(report, handles)
+                check = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], "fix",
+                                               marks, round_views)
+                if check["moves"]:
+                    self._apply_layout(items, handles, check)
+                    doc.EditRebuild3()
+                plan["unplaced"], plan["lines_crossed"] = check["unplaced"], check["lines_crossed"]
+            self._write_via_saveas3(abs_path, doc)
+            after = self._layout_report(doc) if already else None
+        finally:
+            if not already:
+                sw.CloseDoc(doc.GetPathName() or abs_path)
+        if after is None:
+            after = self._saved_layout_report(abs_path)
+        out = {"ok": True, "path": abs_path, "mode": mode, "moved": len(plan["moves"]),
+               "views_moved": {n: [round(c, 1) for c in d] for n, d in views_moved.items()},
+               "problems_before": before["problem_counts"], "problems_after": after["problem_counts"],
+               "problems": after["problems"], "unplaced": plan["unplaced"], "lines_crossed": plan["lines_crossed"],
+               "objects": plan["objects"], "seconds": round(time.perf_counter() - started, 1)}
+        if stuck:
+            out["views_not_moved"] = stuck
+        return out
+
+    def _detail_view_names(self, drawing) -> list:
+        """The names of a drawing's detail views (they draw a circle)."""
+        names = []
+        view = binding.wrap(drawing.GetFirstView(), self._mod.IView)
+        while view is not None:
+            if view.Type == self._DETAIL_VIEW:
+                names.append(view.GetName2())
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        return names
+
+    _MARK_LETTER_MM = 2.5  # half the box kept round a cutting line's or detail circle's letter
+    _DETAIL_VIEW = 3  # swDrawingViewTypes_e.swDrawingDetailView (IView.Type)
+
+    def _cut_marks(self, view_handles) -> dict:
+        """What the views draw outside themselves that texts must keep off: each
+        cutting line (from arrow to arrow) with its arrows and letters, and each
+        detail circle's letter, in sheet mm (IDrSection.GetArrowInfo /
+        GetTextInfo, IDetailCircle.GetLabelPosition: sheet metres on 2020)."""
+        boxes, lines = [], []
+        r = self._MARK_LETTER_MM
+        letter = lambda x, y: (x - r, y - r, x + r, y + r)
+        for iview in view_handles.values():
+            for handle in iview.GetSectionLines() or ():
+                section = binding.wrap(handle, self._mod.IDrSection)
+                arrows = [m_to_mm(c) for c in section.GetArrowInfo() or ()]
+                ends = [(arrows[i], arrows[i + 1]) for i in range(0, len(arrows) - 2, 3)]
+                lines += [(ends[i], ends[i + 1]) for i in range(0, len(ends) - 1, 2)]  # tail to head
+                if len(ends) >= 4:
+                    lines.append((ends[0], ends[2]))  # the cutting line, tail to tail
+                text = [m_to_mm(c) for c in section.GetTextInfo() or ()]
+                boxes += [letter(text[i], text[i + 1]) for i in range(0, len(text) - 2, 3)]
+            for handle in iview.GetDetailCircles() or ():
+                circle = binding.wrap(handle, self._mod.IDetailCircle)
+                at = circle.GetLabelPosition()
+                if at and len(at) >= 2 and at[0] is not None:
+                    boxes.append(letter(m_to_mm(at[0]), m_to_mm(at[1])))
+        return {"boxes": boxes, "lines": lines}
+
+    def _apply_layout(self, items, handles, plan) -> None:
+        """Move each text by its planned (dx, dy) and redraw a moved leader from
+        the end of the text that faces the point it touches."""
+        by_key = {i["key"]: i for i in items}
+        for key, (dx, dy) in plan["moves"].items():
+            item = by_key[key]
+            annotation = handles[item["handle"]][0]
+            x, y, z = list(annotation.GetPosition())[:3]
+            if not annotation.SetPosition2(x + mm_to_m(dx), y + mm_to_m(dy), z):
+                raise SolidWorksError(f"SolidWorks would not move {item['handle'][1]}.")
+            if item["anchor"] is not None and item["kind"] in ("note", "datum", "gtol"):
+                self._leader_from_box(annotation, item["anchor"], drawing_layout._shift(item["box"], dx, dy))
+
+    def _shift_views(self, view_handles, moves) -> list:
+        """Move views by {name: (dx, dy)} mm. Moving a view can drag the views
+        projected from it, so every view is put at its own target afterwards,
+        along the axes it is off by. Returns the views SolidWorks kept back
+        (an aligned view cannot leave its parent's line)."""
+        targets = {}
+        for name, iview in view_handles.items():
+            x0, y0, x1, y1 = iview.GetOutline()
+            dx, dy = moves.get(name, (0.0, 0.0))
+            targets[name] = ((x0 + x1) / 2 + mm_to_m(dx), (y0 + y1) / 2 + mm_to_m(dy))
+        stuck = []
+        for _ in range(2):
+            stuck = []
+            for name, iview in view_handles.items():
+                x0, y0, x1, y1 = iview.GetOutline()
+                tx, ty = targets[name]
+                free = ("x" if abs((x0 + x1) / 2 - tx) > 5e-5 else "") + ("y" if abs((y0 + y1) / 2 - ty) > 5e-5 else "")
+                if not free:
+                    continue
+                try:
+                    self._move_view(iview, tx, ty, free)
+                except SolidWorksError:
+                    stuck.append(name)
+        return stuck
+
+    _SEL_DIMENSIONS = 14  # swSelectType_e: what GetAttachedEntityTypes gives for a symbol on a dimension
+
+    def _attached_dimension(self, annotation) -> str | None:
+        """The name of the dimension a datum or frame is attached to (its text
+        follows that dimension's), None when it is attached to the part, or ""
+        when SolidWorks names no attachment at all (then drawing_layout takes
+        the nearest dimension; DTN7's datum C on a detail's dimension). Verified
+        on 2020: type 14 and the IDisplayDimension in GetAttachedEntities3."""
+        types = list(annotation.GetAttachedEntityTypes() or ())
+        if not types:
+            return ""
+        entities = list(annotation.GetAttachedEntities3() or ())
+        for kind, entity in zip(types, entities):
+            if kind == self._SEL_DIMENSIONS:
+                dd = binding.wrap(entity, self._mod.IDisplayDimension)
+                return binding.wrap(dd.GetAnnotation(), self._mod.IAnnotation).GetName()
+        return None
+
+    def _layout_items(self, report, handles) -> list:
+        """The layout report's texts as drawing_layout.arrange takes them: each
+        with its view, box, the point its leader touches and, for a dimension,
+        how it may move."""
+        items = []
+        for it in report["items"]:
+            handle = (it["view"], it["name"])
+            if handle not in handles:
+                continue
+            _, lines, dim_type, host, arcs = handles[handle]
+            end = it.get("leader_end_mm")
+            prefix = f"{it['view'] or 'sheet'}/"
+            entry = {"key": prefix + it["name"], "handle": handle, "kind": it["kind"],
+                     "view": it["view"], "box": tuple(it["box"]),
+                     "anchor": tuple(end) if end and it["kind"] in self._LEADER_KINDS else None}
+            if it["kind"] in ("datum", "gtol") and host != "":  # SolidWorks says what it is attached to
+                entry["host"] = prefix + host if host else None
+            if it["kind"] == "dimension":
+                entry["dimension"] = drawing_layout.classify_dimension(dim_type, lines, arcs)
+            items.append(entry)
+        return items
+
+    def _leader_from_box(self, annotation, anchor_mm, box_mm) -> None:
+        """Draw a moved text's leader from its end and line facing the point it
+        touches (see _leader_side)."""
+        ax, ay = anchor_mm
+        line = (self._LEADER_TOP if ay > box_mm[3] else
+                self._LEADER_BOTTOM if ay < box_mm[1] else self._LEADER_CENTER)
+        side = self._LEADER_RIGHT if ax > (box_mm[0] + box_mm[2]) / 2 else self._LEADER_LEFT
+        annotation.SetLeader3(self._LEADER_STRAIGHT | line, side, True, False, False, False)
+
+    def _read_dimension(self, dd, doc_places: int) -> dict:
+        dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)
+        angle = dd.Type2 == SW_ANGULAR_DIMENSION_TYPE
+        value = math.degrees(dim.SystemValue) if angle else mm_to_in(m_to_mm(dim.SystemValue))
+        places = dd.GetPrimaryPrecision2()
+        tol_places = dd.GetPrimaryTolPrecision2()
+        # the prefix as written: SolidWorks' own Ø or R at its end is not part of it
+        prefix = re.sub(r"\s*(<MOD-DIAM>|<MOD-RAD>|R)$", "", dd.GetText(SW_DIMENSION_TEXT_PREFIX) or "")
+        out = {"value": value, "angle": angle, "decimals": doc_places if places < 0 else places,
+               "fraction": (not dd.GetUseDocUnits()) and dd.GetFractionBase() == SW_FRACTION,
+               "denominator": dd.GetFractionValue(), "prefix": drawing_spec.from_sw_text(prefix).strip(),
+               "suffix": drawing_spec.from_sw_text(dd.GetText(SW_DIMENSION_TEXT_SUFFIX) or "").strip(),
+               "reference": bool(dd.ShowParenthesis)}
+        tolerance = binding.wrap(dim.Tolerance, self._mod.IDimensionTolerance)
+        kind = SW_TOLERANCE_NAMES.get(tolerance.Type, f"type {tolerance.Type}")
+        out["tolerance"] = kind
+        if kind != "none":
+            convert = math.degrees if angle else (lambda v: mm_to_in(m_to_mm(v)))
+            out.update(tol_min=convert(tolerance.GetMinValue()), tol_max=convert(tolerance.GetMaxValue()),
+                       tol_decimals=out["decimals"] if tol_places < 0 else tol_places)
+        out["shown"] = drawing_spec.shown_text(out)
+        return out
+
+    def _read_gtol(self, gtol) -> dict:
+        """One frame read back: its symbols come as note tokens ('<GTOL-CONC>'),
+        the diameter signs separately (GetFrameDiameterSymbols)."""
+        values = list(gtol.GetFrameValues(1) or ("", "", "", "", ""))
+        symbols = list(gtol.GetFrameSymbols2(1) or ("", ""))
+        diameter = bool((list(gtol.GetFrameDiameterSymbols(1) or (False,)) or [False])[0])
+        gcs, material = symbols[0], symbols[1] if len(symbols) > 1 else ""
+        tolerance = ("Ø" if diameter else "") + drawing_spec.from_sw_text(values[0] or "")
+        shown, height = self._read_ptz(gtol)
+        return {"characteristic": SW_GCS_TOKENS.get(gcs, gcs), "tolerance": tolerance,
+                "modifier": SW_GTOL_MATERIAL_TOKENS.get(material, material or None),
+                "datums": [d for d in values[2:5] if d], "projected": height if shown and height else None}
+
+    @staticmethod
+    def _read_ptz(gtol) -> tuple:
+        """(shown, height text) of a frame's projected tolerance zone."""
+        got = gtol.GetPTZHeight2(1, 1)
+        if isinstance(got, tuple) and len(got) == 3:
+            return bool(got[0] and got[1]), (got[2] or "").strip()
+        return False, ""
 
     # --- assemblies -----------------------------------------------------------
     #

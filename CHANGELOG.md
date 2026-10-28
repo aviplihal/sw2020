@@ -39,6 +39,146 @@ All notable changes to this project are documented here. This project follows
   it (not seen since, and 3 successes after). An error result carries the
   card's line for that failure as `kb_hint`.
 
+### Shop drawings
+- `make_drawing(path, spec, views, placements)` makes a shop drawing: the
+  default drawing template on an A-size sheet with SolidWorks' stock ANSI
+  title block (left empty), third-angle projection, inches, never an
+  isometric view. `views` chooses the front view (and how it is turned) and
+  the projected, section and detail views. With a drawing spec, each spec
+  dimension is placed between model edges or silhouettes at the spec's
+  places, fraction, limits or tolerance; datums, feature control frames,
+  thread and hole callouts, finish symbols and notes are placed too, each
+  named after its spec id inside the drawing. Without a spec it still makes
+  front, top and right views with the model's own dimensions.
+- `check_drawing(path, spec)` reads a saved drawing back and lists every spec
+  item as ok, missing, differs (both values) or unreadable, plus what is on
+  the drawing and not in the spec. A dimension also differs when the model
+  behind it is not the spec's value.
+- `drawing_spec`: validates the drawing-spec format and reads inch values
+  exactly as written (`.375`, `5 15/16`, `.500/.498`, `45°`).
+- Spec dimensions can be BASIC (boxed), REFERENCE (in parentheses) and carry
+  prefix/suffix text (`10X [36°]`, `R.033 MAX`); frames can carry a projected
+  tolerance zone (`Ø.041 Ⓟ .56`). make_drawing shows them and check_drawing
+  reads them back, so a lost box or bracket reads `differs`. A reference value
+  is checked against the model to the places it shows.
+- Angled section views: cut through two model points (`line_mm`) or at an
+  angle (`angle_deg`), turned upright (`up`) and placed freely. Sections and
+  details can be cut from a section view.
+- View `marks`: centre marks, centreline points, bolt circles and centrelines,
+  checked against the model, which dimensions measure to by id (a basic bolt
+  circle diameter, angles between centrelines, centre to a slot floor, a face
+  to a hole axis).
+- Views that are not aligned with another (angled sections, details) take the
+  free spot on the sheet that keeps the largest scale (and of those the most
+  compact); a detail's label that would land on the title block goes beside
+  the view. A dimension whose text would leave the drawing area goes on the
+  view's other side.
+- `make_drawing(..., sheet="B")`: an A (default), B (17 x 11 in) or C
+  (22 x 17 in) landscape sheet with SolidWorks' stock ANSI format; the layout
+  uses that sheet's area above the title block, and on B and C the general
+  notes go in the free strip left of the title block.
+
+### Fixed (shop drawings)
+- Points in a section view were projected with its parent's axes, so
+  dimensions and details in a section went to the wrong place. Every view's
+  axes now come from the view itself.
+- Dimensions in a section view or a detail of a section can measure to the
+  cut face's outline (its lines and arcs, such as a fillet's arc for a
+  radius), which is no edge of the part: same point syntax. Leader notes,
+  datums, frames and finish symbols there attach to the cut face's outline
+  where the part's edge hides behind it.
+- A section or detail label that would land on the title block goes above
+  the view, else beside it, wherever no other view is.
+- Views take `"at_mm": [x, y]` (the centre on the sheet, paper mm); a view on
+  another view or the title block is refused. An aligned section's `[x, null]`
+  follows a placed parent (down a chain: B-B from A-A from the front); with
+  every view placed, the scale is the largest at which they fit there. Free views keep a margin round
+  them for their neighbours' text when that costs no scale.
+- Leader items (notes, callouts, datums, frames, finishes) take `"side"` with
+  `"offset_mm"`, or `"text_mm": [dx, dy]` from the attach point; a datum or
+  frame on a dimension follows the dimension's text (it went to the top of
+  the sheet).
+- make_drawing and check_drawing report the layout: each text's box and
+  leader length on the sheet, and the problems found (overlaps, text on a
+  view or nearer another view, off the border or on the title block, long
+  leaders, dimensions stacked too close).
+- `arrange_drawing(path, mode="full", move_views=True)` tidies a saved
+  drawing: every text gets a box and a label of what it belongs to (its view,
+  the dimension it rides on, the point its leader touches) and moves where it
+  overlaps nothing, stays inside the border and off the title block and stays
+  near what it describes. Linear dimensions step out from their view in tiers
+  (smaller span nearest) and keep their side; datums and frames on a dimension
+  move with it; leader items stay near their point; view labels stay under
+  their view. `full` lays every text out afresh but charges each mm moved and
+  each change of side, so a hand-laid sheet keeps its layout; with
+  `move_views` the views first move apart where their texts need room. `fix`
+  moves only what clashes. The drawing is saved and measured again (DTN4's
+  crowded test sheet: 11 layout problems to 0 in either mode, under 5 s;
+  DTN7, hand-laid: no overlaps left, only texts inside their own view, 6 s
+  in `fix`, 27 s in `full`).
+- arrange_drawing leaves no text on a view, its own included: an angle
+  slides out from its vertex along its own direction (SolidWorks redraws its
+  arc and runs the extension lines out to it), a radius or diameter drawn
+  with a leader moves like a leader note, and any other dimension may go up
+  to 60 mm to leave a view. In `fix` every text keeps its spot until it has
+  been placed, so a text leaving its view cannot take a neighbour's.
+  The layout check treats a detail view as the circle it draws: texts in
+  its corners are not on it. DTN7: 7 texts on views to 0 in both modes
+  (fix 7.9 s, full 29 s).
+
+### Fixed (shop drawing layout, found on the real DTN7 drawing)
+- Dimensions and leaders in a detail of a turned view (a detail of the front
+  view turned 90 degrees, of an upright section) landed up to 250 mm away: a
+  detail's geometry goes stale while the drawing's window is kept still. A
+  drawing with detail views now redraws while it is made (DTN7: 15 s), and a
+  detail maps model points from where its circle was put.
+- Leaders ran to the far end of their edge (95 mm on a circle seen edge-on):
+  in sections they now attach to the cut face's own short edge, and every
+  leader is straight, from the end and line of the text that face its feature.
+- `side` now places a diameter of a circle seen edge-on beside or above the
+  view, and a bolt circle's diameter in that corner.
+- An angle between centrelines took the far text spot first (off the sheet).
+- View labels go just under their view (one line for a section at the sheet's
+  scale), else above or beside it, off other views and labels.
+- The layout uses the part's own extent along each view's axes: a round part
+  seen at a slant was sized from its bounding box, 40 % too wide.
+- The layout report pads frames and datum boxes to their borders and gives
+  each leader's points.
+
+### Fixed (documents)
+- `activate_document("DTN7")` failed ("No open document") with the part's
+  drawing open too, which has the part's title: a shared title now means the
+  part or assembly, and a file path works as well.
+
+### Fixed (hole symbols)
+- Countersink and counterbore symbols printed as `<HOLE-CSINK>` /
+  `<HOLE-CBORE>` on 2020: its symbols are `<HOLE-SINK>` and `<HOLE-SPOT>`.
+- A dimension in a detail view of a section could not select its edges
+  (SOLIDWORKS 2020 refuses the part's edge there); the view's own copy of the
+  edge is selected instead.
+- A failed tool call no longer marks the part as changed when there was
+  nothing to undo.
+
+### Hole Wizard
+- `add_hole_wizard` takes inch sizes and then uses SolidWorks' ANSI Inch
+  tables: tapped holes (`'7/8-9'`, `'.875-9UNC-3B'`, `'1-1/8-7'`, `'#10-24'`;
+  the tap drill comes from the table, the thread class is passed on and read
+  back) and clearance, counterbore and countersink holes by screw diameter
+  (`'1/4'`, `'#10'`). `depth_in` gives a blind depth in inches. `hole`
+  reports the size SolidWorks used and each length also in inches (`*_in`),
+  plus the tap drill depth. A size, thread diameter or class SolidWorks did
+  not take fails loud.
+- `add_hole_wizard(face=None, plane=...)` starts a hole on a reference plane,
+  such as one tangent to a round part: it drills along the plane's normal
+  into the part, the depth counting from the plane. A point where the plane
+  does not touch the part, or a hole that cuts nothing, fails. The cosmetic
+  thread such a hole gets (SolidWorks gives it a wrong diameter) is set to
+  the thread's major diameter.
+- Tapped holes take `thread_depth_mm` / `thread_depth_in` (the cosmetic
+  thread's depth, apart from the tap drill depth) and a near-side countersink
+  (`csink_diameter_mm` / `csink_diameter_in` with `csink_angle_deg`); both
+  are read back and checked.
+
 ## [0.16.0] — 2026-10-10
 
 ### Fixed

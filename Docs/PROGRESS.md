@@ -138,3 +138,288 @@ remove the workaround.
 ## Log
 
 _(Add dated entries here as the phases are worked through.)_
+
+### 2026-10-19 — Shop drawings on 2020 (branch `feat/shop-drawings`)
+
+Verified on SOLIDWORKS 2020 SP4 (28.4.0) through the file-queue bridge (never from the
+Claude app's own shell). Enum values were read from the 2020 `swconst.tlb` (typelib 28.0)
+with `sw_bridge\dump_swconst.py`. Phase 1 (probe, `--selftest`, full pytest) was **not** run
+by this branch: pytest against SolidWorks is not run from the Claude app on this machine.
+
+API findings (all used in `session.py`'s shop-drawing section):
+- The default drawing template (`templates\Drawing.DRWDOT`) has **no sheet format**: through
+  the API a new drawing gets a bare sheet. `IDrawingDoc.SetupSheet5(name, swDwgPaperAsize,
+  swDwgTemplateCustom, 1, 1, FirstAngle=False, "<...>\a - landscape.slddrt", w, h, "Default",
+  True)` attaches the stock format; **`ISheet.SheetFormatVisible = True`** is needed or the
+  title block does not show. The format folder is `swFileLocationsSheetFormat` (7).
+- `swTolFITWITHTOL` is 8 on 2020 (`swTolFIT` and `swTolMETRIC` are both 7).
+- **`IView.Position` and `IView.ScaleRatio` need a VARIANT array of doubles**; a Python tuple
+  is dropped without an error. For a detail view, `Position` is not the centre of its
+  outline (69, 152 mm for a view drawn round 275, 127): move views by their outline.
+- `IView.Angle` (radians) turns a view anticlockwise. `ModelToViewTransform`'s translation
+  (ArrayData[9:11]) and scale ([12]) are right, but `IMathPoint.MultiplyTransform` with it
+  ignored the rotation; rows of [0:9] map a model vector to the sheet as `p · R`.
+- With a view active, `SketchManager.CreateLine/CreateCircle` take the view's **sketch**
+  coordinates: model scale, from the view centre, turned with the view
+  (`ISketch.ModelToSketchTransform`: sketch = scale · (sheet · R) + t). Sheet coordinates
+  cut a turned view the wrong way.
+- A model `IEdge` is selected in a view with `IView.SelectEntity`, then dimensioned with
+  `AddHorizontalDimension2` / `AddVerticalDimension2` / `AddDimension2`. A circle seen edge-on
+  gives its diameter with the Ø prefix from Add{Vertical,Horizontal}Dimension2;
+  **`AddDiameterDimension2` on it gives twice the diameter**. Two edge-on circles dimension
+  centre to centre.
+- `IView.GetVisibleEntities2(None, swViewEntityType_SilhouetteEdge=4)` lists silhouettes, but
+  **`ISilhouetteEdge.GetStartPoint` throws**, `GetCurve` is an unbounded line or None, and the
+  list is incomplete (a cone gave only its −x side, twice). `Select2` works.
+- `IAnnotation.SetName("SPEC_D10")` names a drawing annotation, and the name survives save
+  and reopen. `IAnnotation.OwnerType == 2` marks the sheet format's own notes.
+- `IAnnotation.Select3` refuses a dimension; `SelectByID2(dimension.FullName, "DIMENSION",
+  x, y, ...)` selects it, and **the pick point is where a datum attaches** ((0, 0) put the
+  datum at the sheet's edge). Activate the view first or the datum lands on the sheet.
+- **`IGtol.SetFrameSymbols2` takes the symbols as text** on 2020 and stored the enum number
+  `24` as literal text (no symbol shown); `SetFrameSymbols` with `swGtolGeomCharSymbol_e`
+  works. `GetFrameSymbols2` reads back tokens: `<GTOL-CONC>`, `<GTOL-POSI>`, `<MOD-MMC>`,
+  `<MOD-FMC>` (for RFS), …; the diameter sign comes from `GetFrameDiameterSymbols`.
+- Fractions show an inch mark (`5 15/16"`) unless the document toggle
+  `swDoublePrimeMark` (410) is off.
+- `IDisplayDimension.SupplementaryAngle()` returns True and changes nothing; the angle shown
+  is the one whose sector holds the text, so the text is placed in the spec angle's sector.
+- `InsertSurfaceFinishSymbol3` returns the `ISFSymbol`; `InsertDatumTag2`, `InsertGtol`,
+  `InsertNote` attach to the selected entity. `CreateSectionViewAt5` and
+  `CreateDetailViewAt4` work with a selected sketch line / circle.
+- A section view stays aligned with its parent; only the free axis moves.
+- Saving a never-saved drawing with section and detail views as PDF ran for minutes (the
+  bridge timed out at 120 s); saved as `.slddrw` first, the PDF took 0.3 s.
+- A drawing has its part's title (`DTN6`), so `CloseDoc(title)` is ambiguous: close by path.
+- The guard's rollback rebuilt the part after any failed call (`ForceRebuild3`), which marked
+  it changed even when nothing was undone; it now rebuilds only when it removed something.
+
+### 2026-10-19 (later) — The real DTN6 job (33 items)
+
+- An angle placed with its text in the right sector still came out reflex (225 for 45): the
+  tool now tries each spot in a sector of the spec's angle and deletes a dimension that shows
+  another angle (`DeleteSelection2`; `EditDelete` is void, so success is read back from
+  `IView.GetDisplayDimensionCount`).
+- The silhouette list differs from drawing to drawing: in one 1:1 drawing it held neither side
+  of DTN6's bearing cylinder, in another both. A detail view lists silhouettes with no curve
+  and no face. Picked by position on the sheet (`SelectByID2("", "", x, y)`) a silhouette comes
+  back as its face, or as the drawing view: fine for a leader, useless for a dimension. A
+  centerline (`InsertCenterLine2`) selected by name with a silhouette gave a linear dimension,
+  not an angle. So an angle to the side of a cone or cylinder works only when 2020 lists that
+  silhouette; DTN6's 30° chamfer (from the axis) could not be placed reliably.
+- Leader texts now stack on separate lines and keep to the drawing area; detail views go in
+  a row at the bottom; a second datum on one dimension sits beside the first.
+- **SOLIDWORKS 2020 crashed** during a make_drawing run of the DTN6 job copy (16:44). That run
+  included a GraphicsRedraw2 + EditRebuild3 retry inside the quiet-UI guard (removed since,
+  it did not help). The crash is not explained; the last layout changes were not run on
+  SolidWorks after it.
+
+### 2026-10-27 — ANSI Inch Hole Wizard on 2020 (branch `feat/shop-drawings`)
+
+- `HoleWizard5` with `swStandardAnsiInch` (0) and `swStandardAnsiInchTappedHole` (27) works on
+  2020 SP4 with the same Value1..12 vectors as ISO. Clearance (`...ScrewClearances`, 22),
+  counterbore (`...SocketCapScrew`, 9) and countersink (`...FlatSocket82`, 13) work too.
+- Size strings are the table's own names: `7/8-9`, `1/4-20`, `#10-24`, `1-8`, and mixed sizes
+  with a hyphen, `1-1/8-7` (`1 1/8-7` is refused). Clearance sizes are the bare diameter (`1/4`).
+- An unknown size (`7/8-10`) makes `HoleWizard5` return None, as for ISO; `run_guarded` rolls
+  back cleanly. The tool also reads `FastenerSize`, `ThreadDiameter` and `ThreadClass` back.
+- The `ThreadClass` argument ('3B', '2B') is kept and reads back from
+  `IWizardHoleFeatureData2.ThreadClass`; empty gives an empty class.
+- Measured: `.875-9UNC-3B`, blind 1.96 in: tap drill .7656 in (the table stores 49/64 rounded
+  to four places; the cut volume matches .7656, not 49/64), drill depth 49.784 mm, thread depth
+  1.75 in (2 x D) with a cosmetic thread. `1/4-20` through: .201 (#7); `#10-24`: .1495 (#25);
+  `1-1/8-7`: .9844 (63/64); `1-8` blind 1.96: .875, thread depth clamped to the drill depth.
+  Clearance `1/4` normal: .266; counterbore `1/4`: Ø.4375 x .25; countersink `1/4`: Ø.531, 82°.
+- A through tapped hole (no depth) reports `ThreadDepth` 0: threaded all the way.
+- Later: holes from a plane, thread depth and near-side countersink (DTN7's radial holes).
+  - HoleWizard5 tapped values, by reading the feature back: Value1 = thread depth, Value2/Value3
+    = near-side countersink diameter / angle (both given turn `NearSideCounterSink` on, and
+    `Type` reads 47 instead of 46), Value6 = drill point angle. Value4/5 and 9-12 changed nothing.
+  - A hole can start on a reference plane selected with `SelectByID2(name, "PLANE", x, y, z)`; it
+    lands at that point and `_pin_wizard_position` defines it as on a face. With RevDir False
+    it drills against the plane's normal, with True along it (a hole into the air is still
+    made: 0 mm3 cut, not None). The tool picks RevDir from where the plane touches the part:
+    a ray from the point ENTERs the body at 0 on the material side and EXITs at 0 on the air
+    side (`swRayPtsResults_e`).
+  - From a plane tangent to a cylinder (no circular edge on the plane) the cosmetic thread gets
+    no edge and a wrong diameter: 0 right after creation, then the tap drill + 1 mm (20.446 for
+    7/8-9), with an empty callout. Setting `ICosmeticThreadFeatureData.Diameter` by
+    `ModifyDefinition` after the rebuild fixes it and holds through rebuilds and a moved
+    position. The cosmetic thread only exists after the first rebuild.
+  - From a plane tangent to the bore (it also cuts through the ring elsewhere) HoleWizard5 returns
+    None in both directions, at any depth: not supported, fails loud.
+  - Ring test (OD 163.5125 mm radius, revolved about Y, plane turned 30 degrees, offset 163.5125):
+    .875-9UNC, drill 1.96 in, thread 1.29 in, countersink .94 x 90. Rays down the axis: drill
+    tip at 55.6262 mm (49.784 + the 118 degree point), countersink cone at 0.938 mm, 11 mm off
+    the axis both ways, as calculated. Removed 15471.41 mm3; the hand integral over the curved OD
+    gives 15479.31 (drill alone: measured 15337.51, hand 15342.92). SolidWorks' mass properties
+    on the saddle-shaped intersection faces run about 0.05 % low; the ring alone and flat-face
+    holes match to 0.1 mm3. Bounding box unchanged (327.025 x 88.9 x 327.025).
+
+### 2026-10-27 (later) — Shop drawing features for DTN7 (branch `feat/shop-drawings`)
+
+Verified on SOLIDWORKS 2020 SP4 through the dev bridge on a copy of DTN7
+(`_tmp\drawings\dtn7copy.SLDPRT`) and an inch test box: every item placed and read back `ok`
+by check_drawing, the PDFs rendered and looked at.
+- **View axes**: `IView.ModelToViewTransform.ArrayData[0:9]` holds the view's rotation, view
+  angle included: sheet right = `data[0:9:3]`, up = `data[1:9:3]`, towards the viewer =
+  `data[2:9:3]` (checked on a front view turned 90° and on sections). The old code projected
+  a section's points with its parent's axes, which put section dimensions and details of
+  sections in the wrong place; every view now reads its own axes.
+- **Angled sections**: `CreateSectionViewAt5` takes any sketch line; the section comes out
+  aligned with the cutting line. `IView.RemoveAlignment` then `IView.Angle += turn` turns it
+  upright (read back from the transform).
+- **Sections of sections and details of sections** work. In a **detail view of a section**
+  `IView.SelectEntity(part edge)` returns False, and picking by sheet position selects the
+  view; the view's own edges (`GetVisibleEntities2(None, swViewEntityType_Edge=1)`) select,
+  but they are flat copies (a circle seen edge-on is a straight line), so the copy is found by
+  the point and its direction on the sheet.
+- **Basic**: `IDimensionTolerance.Type = swTolBASIC (1)` boxes the value. **Reference**:
+  `IDisplayDimension.ShowParenthesis = True`. **Prefix/suffix**: `SetText(swDimensionTextPrefix
+  (1) / Suffix (2))`. The written prefix goes before whatever prefix SolidWorks had, and a
+  trailing `<MOD-DIAM>` / `R` is left out when it is read back (a prefix on a diameter or a
+  radius was not tried on 2020).
+- **Projected tolerance zone**: `IGtol.SetPTZHeight2(1, 1, True, ".56")` shows `Ⓟ .56` after
+  the tolerance; `GetPTZHeight2(1, 1)` reads (ok, shown, height) back.
+- **Marks**: sketch entities drawn in the view (`SketchManager.CreatePoint/CreateLine/
+  CreateCircle` with the view active, `AddToDB = True` so they do not snap), styled
+  `ISketchSegment.Style = swLineCENTER (4)`. A dimension to them needs **their view active**
+  (`AddVerticalDimension2` returned None while another view was active). Centre marks:
+  `InsertCenterMark3(swCenterMark_Single, False, False)` on a selected circle. The default
+  template already auto-inserts centre marks (with a dashed circle through hole patterns),
+  which cannot be dimensioned to through the API; the sketch marks can.
+- An angle between two centrelines that meet at a centre: of the sectors that show the
+  angle, the one between the lines' directions is tried first.
+- A **detail view's label** sits some 27 mm under its centre (its outline is wider than the
+  circle); on the bottom row it landed on the title block, so it is moved beside the view.
+- Layout: DTN7 (Ø13.548 × 3.5) with front + A-A + B-B (from A-A) + a 1:1 detail fits at 1:5;
+  front + angled C-C + a 1:2 detail at 1:5. Four big views plus an angled one in a row drop
+  to 1:10: the A sheet's drawing area is 246 × 135 mm.
+- Dimensions on model edges print grey and those on sketch marks black in the PDF (SolidWorks'
+  colours for driven and driving dimensions in a drawing); not changed.
+- Not verified: `angle_deg` cuts (the `line_mm` form was), `radius` to a mark circle, a
+  `center_mark` on a circle that already has an automatic one. The new integration tests in
+  `tests/test_drawing.py` were run as the same calls through the bridge, not under pytest.
+- **Sheet sizes** (later): `SetupSheet5(name, swDwgPaperBsize (2) / Csize (3), swDwgTemplateCustom,
+  ..., "b - landscape.slddrt", 0.4318, 0.2794, ...)` sets up the stock B / C formats like the A
+  one. Measured on rendered blank sheets: the border runs 12.7 mm in from every edge, the title
+  block's top is at 62.7 mm on all three, and on B / C it is the A block moved right
+  (it starts 180 / 307 mm from the left), leaving a free strip left of it for the notes.
+  Areas: A (16, 64, 262, 199), B (16, 64, 415, 263), C (16, 64, 542, 415) mm. DTN7 with front,
+  A-A, B-B from A-A, angled C-C and a 1:1 detail of A-A: **1:4 on B** (1:10 on A); all 13 items
+  read back ok and nothing overlaps the title block. A dimension placed 10 mm above a view at the
+  top of the area went over the border; such text now goes on the other side.
+- **Cut-face edges** (later): a section's hatched outline is no edge of the part, but
+  `IView.GetVisibleEntities2(None, swViewEntityType_Edge)` lists it with the view's own edges, in
+  model space on the cutting plane (lines and arcs, also in a detail of a section). The tool
+  falls back to them when no part edge passes through the point: DTN7's R.04 ±.03 flange fillet
+  (arc centre (164.5285, 80.1116, 0), R 1.016) placed as a radius in detail D (1:1) of A-A and
+  read back ok. On B at 1:2 the tall A-A hung its label over the title block and the "beside"
+  spot sat on the detail: a label now goes above the view (into the outline's own margin,
+  which runs 5-7 mm wider than the drawn view), else right, else left, wherever it is free.
+- A leader note at a point where the part's edge hides behind the cut face (DTN7's flange OD
+  circle at its chamfer, [172.0596, 87.884, 0], in detail D of A-A) found no copy of that edge
+  in the view; leaders (notes, datums, frames, finishes) now attach to the cut face's outline
+  through the point. Note C1, datum B and a parallelism frame there read back ok.
+
+### 2026-10-28 — Layout tools for the real DTN7 drawing (branch `feat/shop-drawings`)
+
+- **Hole symbols**: 2020's `gtol.sym` ("Hole Symbols") has `SPOT` (counterbore), `SINK`
+  (countersink), `DEPTH`, `DIAM`. `<HOLE-CBORE>` and `<HOLE-CSINK>` are not symbols there and
+  print as literal text (rendered in a PDF); now `⌴` → `<HOLE-SPOT>`, `⌵` → `<HOLE-SINK>`.
+- **Text boxes**: `IAnnotation.GetDisplayData()` gives each text run's position (its
+  baseline's left end), height, angle and width (`GetTextInBoxWidthAtIndex`, the real width).
+  `GetLeaderPointsAtIndex(0)` gives the leader as x, y, z triples, the attach point last.
+  In the drawing still being made, some display data was stale (datum A reported 300 mm off,
+  a frame 20 mm too wide); measured on the reopened saved file it is right, so make_drawing's
+  layout report reads the saved file.
+- **Datum or frame on a dimension**: SolidWorks put datum C on DTN7's slot width at the top of
+  the sheet; its position is now set from the dimension's text (the dimension annotation's
+  position is its text's top centre).
+- A view's `at_mm` that collides at the sheet's scale is refused, not shrunk to a smaller scale
+  (it first dropped the sheet to 1:10).
+- Real DTN7 job on a fresh copy of DTN7.SLDPRT, B sheet: 36/36 ok, the layout report lists the
+  overlaps visible on the rendered sheet (e.g. the A-A label on detail D, T2 on G7).
+
+### 2026-10-28 (later) — The real DTN7 drawing laid out (B sheet, 1:4)
+
+Done on the real job (`DTN7\make_dtn7_drawing.py B --final`, run by `run_dtn7_drawing.sh`):
+36/36 ok, the layout report clean except texts inside their own view (the angles in the front
+view's flange ring and in B-B, items in the 2:1 details' outline margins). Findings on 2020:
+- **Detail views go stale while the window is still**: their `GetOutline` and
+  `ModelToViewTransform` keep pre-move values (detail D of an upright A-A: 20 mm wide, origin
+  250 mm off), and SolidWorks itself puts a dimension's text from the stale transform (D6 in a
+  detail of the turned front view: 144 mm off). Activating the view does not refresh it. A
+  drawing with details now redraws while made: the 36-item job took 15 s.
+- **Leaders**: a note or frame attached to an edge leads to an end of that edge (a circle seen
+  edge-on: the far end of the line across the view). `IAnnotation.SetLeaderAttachmentPointAtIndex`
+  moves the end live, but the rebuild puts it back and shifts the text by as much. In a section
+  the cut face's own edges (`GetVisibleEntities2`) are short segments: attached to the shortest
+  one through the point, the leader ends there. `SetLeader3(swSTRAIGHT | swAttachLeaderTop /
+  Bottom, swLS_LEFT / RIGHT, ...)` takes; from the top or bottom line the leader starts at an end
+  of that line. `swAttachLeaderNearest` did not change the line.
+- **Outlines** while a drawing is made run about 10 mm past the drawn view (A-A 5.6, C-C 15);
+  saved, about 5. A detail's label landed 38 mm above it on one run and 55 mm below on the next;
+  a section at the sheet's scale has a one-line label.
+- `bridge_probe pdf_of` closed the drawing by title, which is its part's title: it closed the
+  part's window instead, and the part was unloaded with the drawing (the bridge's handle then
+  "disconnected from its clients"). Fixed in `sw_bridge\probes.py` (closes by path).
+- Layout choices (see the job file): A-A through the slot stood upright (`angle_deg` 90, `up`
+  +y) so the diameters step above it with their runout frames under them; B-B cut from A-A and
+  turned like the front view; detail E (2:1) of the key slot carries the slot width, datum C,
+  the slot's position and profile frames, the lead-in and the corner radius.
+
+### 2026-10-28 (evening) — `arrange_drawing`: tidy a drawing's texts (branch `feat/arrange-drawing`)
+
+Pure planner `drawing_layout.py` plus `SolidWorksSession.arrange_drawing`. Every text gets a box,
+what it is and what it belongs to; dimensions step out in tiers, leader items stay near their point,
+frames ride with their dimension, labels go under their view, views spread where texts need room.
+Test drawings in `Projects\_tmp\drawings\arrange\`.
+- DTN4's crowded test sheet: `fix` 11 problems → 0 (4.4 s); `full` → 1 (two dimensions exactly
+  6.0 mm apart, the limit).
+- DTN7 (hand-laid, B sheet): the first version moved texts up to 116 mm (a dimension sent to the
+  far side of its view for balance, a detail's label above another view). Fixed in the planner:
+  a text's current spot is always a candidate, each mm moved costs 0.15, a change of side 15, a
+  leader over 40 mm counts as a fault, a view's label keeps its spot reserved while the others
+  are placed, and labels too must be nearest their own view. Now `full` keeps the layout (23 texts
+  moved, mostly a few mm; 23 s with views moved, 7.7 s without), leaving one frame overlap at the
+  top of A-A and datum C touching the .753 text; the 10 texts inside their own views (face-on
+  radii and angles, detail-circle corners) are left as they are.
+- 2020: `IAnnotation.GetAttachedEntityTypes` returns None for datum C on detail E's dimension
+  (no attachment named); treated as unknown, so the planner rides it on the nearest dimension.
+  A symbol on a dimension reports type 14 (swSelDIMENSIONS) and its `IDisplayDimension`.
+- The dev bridge's `bridge_reload` does not reload `drawing_layout`; `bridge_probe reload_layout`
+  does.
+- Offline replay: `bridge_probe layout_input <slddrw>` dumps the planner's inputs as JSON
+  (`in_dtn7.json`, `in_messy.json`), so the planner can be tuned without SolidWorks.
+- Second round (the last two DTN7 flaws, a frame overlap over A-A and datum C on `.753`):
+  leader spots on finer rings (17 radii, 48 angles; the free gap beside A-A's stack was
+  between two rings); a text within 1.5 mm of a view or 2 mm of another text but touching
+  neither is "tight" (0.5), not wrong (1 or 20); a detail circle, estimated from its outline
+  to about 1 mm (detail E: 19.6 for 19.4 drawn), counts as hit only 1 mm in; stacked
+  dimensions keep 6.1 mm between their own texts (a frame riding on one no longer lets the
+  next dimension close in: DTN4's Ø3.615/Ø3.800 at 4.8 mm), and the nearer-view rule tests a
+  dimension's own text too; a moved text's leader is priced from the end SolidWorks draws it
+  from (`_leader_from_box`), not the nearest point (DTN7's 82 mm wide hole callout: 26 mm
+  planned, 47 drawn); views spread to 0.5 mm short of the area, since a text the spread puts
+  exactly on the edge counted as off it.
+  Result: DTN4 0 problems in both modes (4.3-4.7 s); DTN7 only the 10 texts inside their own
+  view in both modes (fix 5.9 s, 4 texts moved; full 26.6 s, 18 moved).
+- Third round: nothing on a view. DTN7 had six angles inside round views (front view, B-B), a
+  radius in detail D and three items in detail views' corners (only the check's square box).
+  2020 findings (probe `dim_geometry` in `sw_bridge\probes.py`): `IDisplayData.GetArcAtIndex2`
+  gives [4 header values, start xyz, end xyz, centre xyz, ...] in metres; an angle's arcs,
+  split round its text, are centred on its vertex. Moving an angle's text straight out from the
+  vertex (`SetPosition2`) makes SolidWorks redraw the arc through it and lengthen the extension
+  lines (10X 36 degrees, 15 mm out: arc radius 40 to 56). A radius or diameter drawn with a
+  leader has the leader as its second-to-last display line (start on the arc) and a level
+  shoulder last (a basic one's box adds four lines in front). An angle with its arrows outside
+  draws its arc past its sides (18 degrees spans 39), so the text turns at most into the middle
+  60 % of the span. The bridge passes probes positional arguments only.
+  Planner: angles slide out along their direction (or turned up to 10 degrees inside the
+  angle), radial/diameter dimensions on a leader are leader items, no text may stay on its own
+  view, a cutting line within 1 mm of a text is tight (0.5), and in `fix` every text's spot is
+  reserved until it is placed (the 18 degrees leaving the front view took the hole callout's
+  spot, which went 99 mm); a reservation does not count against a text that stays.
+  Result: DTN7 0 problems in both modes (fix 7.9 s, 15 moved; full 29.0 s, 27 moved); DTN4 0 in
+  both (4.3-4.7 s).

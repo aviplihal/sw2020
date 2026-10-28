@@ -101,6 +101,11 @@ SW_ISO_SOCKET_HEAD_CAP = 139       # swWzdHoleStandardFastenerTypes_e (ISO 4762)
 SW_ISO_SOCKET_COUNTERSUNK = 140    # ISO 10642
 SW_ISO_SCREW_CLEARANCES = 144      # ISO 273
 SW_ISO_TAPPED_HOLE = 147
+SW_WZD_STANDARD_ANSI_INCH = 0      # swWzdHoleStandards_e (typelib 28.0, SOLIDWORKS 2020)
+SW_ANSI_INCH_SOCKET_CAP_SCREW = 9  # swWzdHoleStandardFastenerTypes_e
+SW_ANSI_INCH_FLAT_SOCKET_82 = 13   # flat socket head cap screw, 82 degrees
+SW_ANSI_INCH_SCREW_CLEARANCES = 22
+SW_ANSI_INCH_TAPPED_HOLE = 27
 SW_COSMETIC_THREAD_WITH_CALLOUT = 1  # swWzdHoleCosmeticThreadTypes_e
 SCREW_FITS = {"close": 0, "normal": 1, "loose": 2}  # swWzdHoleScrewClearanceTypes_e
 SW_SEL_FACES = 2                   # swSelectType_e, for IModelDocExtension.SelectByRay
@@ -250,11 +255,80 @@ SW_SAVE_AS_OPTIONS_SILENT = 1
 SW_VIEW_ISOMETRIC = 7
 VIEWS = {"front": 1, "back": 2, "left": 3, "right": 4, "top": 5, "bottom": 6, "iso": SW_VIEW_ISOMETRIC}
 
-# Drawings (make_drawing): an A4 sheet (swDwgPaperSizes_e) with the model's
-# dimensions (IDrawingDoc.InsertModelAnnotations3: swImportModelItemsSource_e,
-# swInsertAnnotation_e dimensions + those marked for drawings).
-SW_DWG_PAPER_A4 = 6
+# Drawings (make_drawing / check_drawing). Every value below was read from the
+# SOLIDWORKS 2020 swconst.tlb (typelib v28.0); several differ from web docs
+# for later releases (swTolFITWITHTOL is 8 here, not 9).
+# A shop drawing is an A-, B- or C-size landscape sheet (swDwgPaperSizes_e)
+# with SolidWorks' stock ANSI sheet format, set up through
+# IDrawingDoc.SetupSheet5 with a custom format file (swDwgTemplates_e): the
+# user's default drawing template on 2020 carries no sheet format of its own
+# (verified).
+SW_DWG_TEMPLATE_CUSTOM = 12
+# Per sheet: paper size, format file, size, the free drawing area inside the
+# border and above the title block, and a free box left of the title block for
+# the general notes (None: they stack above the title block, in the area).
+# Measured on the stock 2020 formats: the border runs 12.7 mm in from the edge,
+# the title block's top is at 62.7 mm on all three; on B and C the title block
+# starts 180 / 307 mm from the left edge, leaving room for notes beside it.
+SHEETS = {
+    "A": {"paper": 0, "format": "a - landscape.slddrt", "size_mm": (279.4, 215.9),
+          "area_mm": (16.0, 64.0, 262.0, 199.0), "notes_box_mm": None,
+          "title_block_mm": (27.8, 12.7, 266.7, 62.7)},
+    "B": {"paper": 2, "format": "b - landscape.slddrt", "size_mm": (431.8, 279.4),
+          "area_mm": (16.0, 64.0, 415.0, 263.0), "notes_box_mm": (16.0, 16.0, 175.0, 60.0),
+          "title_block_mm": (180.2, 12.7, 419.1, 62.7)},
+    "C": {"paper": 3, "format": "c - landscape.slddrt", "size_mm": (558.8, 431.8),
+          "area_mm": (16.0, 64.0, 542.0, 415.0), "notes_box_mm": (16.0, 16.0, 302.0, 60.0),
+          "title_block_mm": (307.2, 12.7, 546.2, 62.7)},
+}
+SHEET_VIEW_AREA_MM = SHEETS["A"]["area_mm"]  # the default sheet's
+SW_PREF_SHEET_FORMAT_FOLDERS = 7            # swUserPreferenceStringValue_e.swFileLocationsSheetFormat
+SW_PREF_UNIT_SYSTEM = 263                   # swUserPreferenceIntegerValue_e
+SW_PREF_UNITS_LINEAR = 47
+SW_PREF_UNITS_LINEAR_DECIMALS = 49
+SW_PREF_DIMENSION_STANDARD = 13
+SW_PREF_DOUBLE_PRIME_MARK = 410             # swUserPreferenceToggle_e: the " after inch fractions
+SW_UNIT_SYSTEM_IPS = 3                      # swUnitSystem_e
+SW_INCHES = 3                               # swLengthUnit_e
+SW_DETAILING_ANSI = 1                       # swDetailingStandard_e
+SW_DECIMAL, SW_FRACTION = 1, 2              # swFractionDisplay_e
+SW_ROUND_HALF_AWAY = 0                      # swUnitsDecimalRounding_e
+SW_TOLERANCES = {"none": 0, "basic": 1, "bilateral": 2, "limits": 3, "symmetric": 4}   # swTolType_e
+SW_TOLERANCE_NAMES = {0: "none", 1: "basic", 2: "bilateral", 3: "limits", 4: "symmetric", 5: "min", 6: "max"}
+SW_DIMENSION_TEXT_PREFIX = 1                # swDimensionTextParts_e
+SW_DIMENSION_TEXT_SUFFIX = 2
+SW_ANGULAR_DIMENSION_TYPE = 3               # swDimensionType_e
+SW_ANNOTATION_TYPES = {2: "datum", 4: "dimension", 5: "gtol", 6: "note", 7: "finish"}   # swAnnotationType_e
+SW_ANNOTATION_OWNER_TEMPLATE = 2           # swAnnotationOwner_e: the sheet format (title block)
+SW_GCS = {  # swGtolGeomCharSymbol_e
+    "symmetry": 13, "straightness": 14, "flatness": 15, "circularity": 16, "cylindricity": 17,
+    "profile of a line": 18, "profile of a surface": 19, "angularity": 20, "perpendicularity": 21,
+    "parallelism": 22, "position": 23, "concentricity": 24, "circular runout": 25, "total runout": 26,
+}
+SW_GTOL_MATERIAL = {None: 0, "MMC": 1, "RFS": 2, "LMC": 3}      # swGtolMatCondition_e
+# What IGtol.GetFrameSymbols2 gives back on 2020 for those (read, not documented)
+SW_GCS_TOKENS = {
+    "<GTOL-SYMMETRY>": "symmetry", "<GTOL-STRAIGHT>": "straightness", "<GTOL-FLAT>": "flatness",
+    "<GTOL-CIRC>": "circularity", "<GTOL-CYL>": "cylindricity", "<GTOL-LPROF>": "profile of a line",
+    "<GTOL-SPROF>": "profile of a surface", "<GTOL-ANGULAR>": "angularity", "<GTOL-PERP>": "perpendicularity",
+    "<GTOL-PARA>": "parallelism", "<GTOL-POSI>": "position", "<GTOL-CONC>": "concentricity",
+    "<GTOL-SRUN>": "circular runout", "<GTOL-TRUN>": "total runout",
+}
+SW_GTOL_MATERIAL_TOKENS = {"<MOD-MMC>": "MMC", "<MOD-FMC>": "RFS", "<MOD-LMC>": "LMC"}
+SW_SF_SYMBOLS = {"basic": 0, "machined": 1, "no removal": 2}    # swSFSymType_e
+SW_SF_MAX_ROUGHNESS = 5                     # swSurfaceFinishSymbolText_e
+SW_LEADER_STRAIGHT = 1                      # swLeaderStyle_e
+SW_ARROW_CLOSED = 1                         # swArrowStyle_e
+SW_SECTION_CHANGE_DIRECTION = 4             # swCreateSectionViewAtOptions_e
+SW_DETAIL_STANDARD = 0                      # swDetViewStyle_e
+SW_DETAIL_CIRCLE = 1                        # swDetCircleShowType_e
+SW_VIEW_ENTITY_SILHOUETTE = 4               # swViewEntityType_e: IView.GetVisibleEntities2
+SW_VIEW_ENTITY_EDGE = 1                     # swViewEntityType_e: model edges as a view shows them
+# swSelectType_e: what a pick on a drawing sheet may land on for a leader: an edge, a face,
+# a silhouette (picked by position, a silhouette comes back as its face)
+SW_SEL_PART_GEOMETRY = {1, 2, 46}
 SW_IMPORT_ENTIRE_MODEL = 0
+# swInsertAnnotation_e: dimensions + those marked for drawings (no spec given)
 SW_INSERT_DIMENSIONS = 8 | 32768
 DRAWING_FORMATS = {"pdf", "slddrw"}
 
@@ -262,6 +336,7 @@ DRAWING_FORMATS = {"pdf", "slddrw"}
 # points. Each hit comes back as 9 doubles: body, ray, hit type, x y z, nx ny nz.
 SW_RAY_NORMALS_ENTRY_EXIT = 1 | 4
 RAY_HIT_WIDTH = 9
+SW_RAY_HIT_ENTER = 16  # swRayPtsResults_e flag in a hit's type: the ray enters the body there
 SW_RAY_HIT_EXIT = 32  # swRayPtsResults_e flag in a hit's type: the ray leaves the body there
 
 # Neutral formats open_part imports as a new part (ISldWorks.LoadFile4).

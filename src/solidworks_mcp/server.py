@@ -87,6 +87,11 @@ else:
     _COM_ERROR = ()  # an empty tuple matches no exception
 
 
+# Tools that are slow while healthy get more than the COM worker's 120 s:
+# make_drawing of a real 33-item shop drawing took 53-190 s on SOLIDWORKS 2020.
+_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0}
+
+
 async def _call(fn, *args, **kwargs) -> dict:
     """Run a session method on the COM thread and normalise errors to a result dict.
 
@@ -98,7 +103,10 @@ async def _call(fn, *args, **kwargs) -> dict:
         if _worker is None:
             result = fn(*args, **kwargs)
         else:
-            result = await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs))
+            name = getattr(fn, "__name__", "")
+            result = await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs),
+                                        timeout_s=_CALL_TIMEOUT_S.get(name),
+                                        label=name if name.isidentifier() else "the call")
     except SolidWorksError as exc:
         error, result = exc, {"ok": False, "error": str(exc)}
     except _COM_ERROR as exc:
@@ -445,20 +453,41 @@ async def add_hole_on_face(diameter_mm: float, face: str, x_mm: float, y_mm: flo
 
 
 @mcp.tool()
-async def add_hole_wizard(kind: str, size: str, face: str, x_mm: float, y_mm: float, z_mm: float,
+async def add_hole_wizard(kind: str, size: str, face: str | None, x_mm: float, y_mm: float, z_mm: float,
                           depth_mm: float | None = None, fit: str = "normal", thread: str = "cosmetic",
-                          name: str | None = None) -> dict:
-    """An ISO hole from SolidWorks' Hole Wizard, sized by its standard tables.
+                          name: str | None = None, depth_in: float | str | None = None,
+                          plane: str | None = None, thread_depth_mm: float | None = None,
+                          thread_depth_in: float | str | None = None, csink_diameter_mm: float | None = None,
+                          csink_diameter_in: float | str | None = None,
+                          csink_angle_deg: float | None = None) -> dict:
+    """An ISO or ANSI Inch hole from SolidWorks' Hole Wizard, sized by its standard tables.
 
-    kind: 'clearance' (ISO 273), 'counterbore' (socket head cap screw),
-    'countersink' (socket countersunk screw) or 'tapped'; size e.g. 'M3'.
+    kind: 'clearance', 'counterbore' (socket head cap screw), 'countersink'
+    (socket countersunk / 82 degree flat socket head screw) or 'tapped'.
+    size: ISO metric ('M3') uses the ISO tables; an inch size uses the ANSI
+    Inch tables: tapped '7/8-9', '.875-9UNC', '7/8-9 UNC-3B', '1 1/8-7',
+    '#10-24' (diameter-threads per inch; optional series and thread class),
+    other kinds the screw diameter ('1/4', '.250', '#10'). A decimal must be
+    an exact 1/64 fraction or a numbered size. An unknown size fails.
     Centred at (x, y, z) mm on the face through that point; through all, or
-    depth_mm deep. fit: 'close' / 'normal' / 'loose'. For tapped holes
-    thread='modeled' cuts a real, printable ISO thread instead of SolidWorks'
-    cosmetic one. Returns the standard's sizes in `hole` and mass properties.
+    depth_mm (or depth_in, inches, e.g. '1.96') deep: for a tapped hole the
+    tap drill depth. fit: 'close' / 'normal' / 'loose'. Tapped holes get the
+    standard's tap drill and a cosmetic thread; thread='modeled' (ISO only)
+    cuts a real, printable thread instead. Returns the standard's sizes in
+    `hole` (mm, and inches as *_in for ANSI Inch) and mass properties.
+
+    plane='Plane1' with face=None starts the hole on a reference plane, e.g.
+    one add_plane made tangent to a round part (turned about the axis, then
+    offset by the radius): the point lies on the plane where it touches the
+    part, the hole drills along the plane's normal into the part, and depth
+    counts from the plane. Tapped only:
+    thread_depth_mm / thread_depth_in (cosmetic thread depth, e.g. '1.29')
+    and a near-side countersink, csink_diameter_mm / csink_diameter_in with
+    csink_angle_deg (e.g. '.94' and 90).
     """
     return await _call(_session.add_hole_wizard, kind, size, face, x_mm, y_mm, z_mm,
-                       depth_mm, fit, thread, name)
+                       depth_mm, fit, thread, name, depth_in, plane, thread_depth_mm, thread_depth_in,
+                       csink_diameter_mm, csink_diameter_in, csink_angle_deg)
 
 
 @mcp.tool()
@@ -1050,18 +1079,138 @@ async def screenshot(path: str, view: str = "iso", zoom_mm: list | None = None,
 
 
 @mcp.tool()
-async def make_drawing(path: str | None = None) -> dict:
-    """Make a 2D drawing of the current part: a PDF, or an editable .slddrw.
+async def make_drawing(path: str | None = None, spec: dict | None = None, views: list | None = None,
+                       placements: dict | None = None, sheet: str = "A") -> dict:
+    """Make the shop drawing of the current part: an editable .slddrw (or a .pdf).
 
-    With a knowledge-base case open, leave out `path`: the server saves the
-    case's .slddrw under its DN number. Otherwise `path` is required.
+    sheet: "A" (11 x 8.5 in, default), "B" (17 x 11) or "C" (22 x 17),
+    landscape, with SolidWorks' stock ANSI title block (left empty for the
+    user), third-angle projection, inches, never an isometric view. On B and C
+    the general notes go left of the title block. Save the
+    part first (save_part, no unsaved changes): the drawing refers to its file.
+    With a knowledge-base case open, leave out `path`; otherwise give one.
 
-    Front, top and right views in European (first angle) projection plus an
-    isometric view, on an A4 sheet at the scale SolidWorks picks, with the
-    model's own dimensions, each shown once: a dimensioned sketch to print or
-    send. Save the part first (save_part): the drawing refers to its file.
+    Without spec/placements: front, top and right views with the model's own
+    dimensions (a quick dimensioned sketch).
+
+    views (optional; default front, top, right). The first is the drawing's
+    front view, the most descriptive one:
+      {"kind": "standard", "model_view": "front", "up": "-x"}
+        model_view: the model view it shows (front/back/top/bottom/left/right),
+        up: the model axis that points up on the sheet (e.g. "-x" lays a part
+        turned about model Y along the sheet). Then views projected from it:
+      {"kind": "standard", "direction": "right"}   top / bottom / left / right
+      {"kind": "section", "from": "front", "cut": "vertical", "label": "A",
+       "through_mm": [x, y, z]}   cutting line through that model point
+       (optional "flip": true to look the other way); "cut": "horizontal" too.
+      {"kind": "section", "from": "front", "line_mm": [[x,y,z], [x,y,z]],
+       "up": "+y", "label": "C"}   an angled cut through two model points as
+       the parent shows them (or "angle_deg": 36 with "through_mm": the line's
+       angle on the parent, anticlockwise from its horizontal). It is turned
+       upright: "up" (a model axis or [x,y,z]) points up, default along the cut.
+      {"kind": "detail", "from": "front", "label": "B", "center_mm": [x, y, z],
+       "radius_mm": 4, "scale": "4:1"}
+    "from" may name a section, so a section of a section and a detail of a
+    section work. Any view may say where it goes: "at_mm": [x, y], its centre
+    in paper mm from the sheet's lower-left corner ([x, null] / [null, y] for
+    a section cut vertically / horizontally, which stays aligned); a view on
+    another view or off the area above the title block is refused. Each view gets an id: its direction, "section A", "detail B"
+    (or "id"). The sheet scale is the largest standard one at which the views
+    fit; views not aligned with another (angled sections, details) take the
+    free spot that keeps it largest. A detail keeps its own scale (1:1, 1:2).
+
+    marks (on any view): centre marks and centrelines, drawn from the MODEL's
+    geometry (each point must be a hole or arc centre, on an axis, or on an
+    edge, or the call fails), so dimensions can measure to them:
+      "marks": [{"kind": "center_mark", "at_mm": [..]}   on the circle centred there
+                {"kind": "point", "id": "O", "at_mm": [..]}   e.g. the part centre
+                {"kind": "circle", "id": "BC", "center_mm": [..], "through_mm": [..]}
+                   a centreline circle (bolt circle) through a hole centre
+                {"kind": "line", "id": "CL1", "from_mm": [..], "to_mm": [..]}]
+                   a centreline from a centre through a hole centre or along a
+                   slot or an axis (runs extend_mm past both ends, default 5)
+
+    spec: the drawing spec (Docs/SHOP-DRAWINGS.md 4.1), values as written in
+    inches. Every read item except general notes needs a placement; items
+    flagged unreadable are refused (ask the user first). Notes without a
+    placement stack at the lower left.
+
+    placements: {spec id: where}, all points are MODEL points in mm on an edge
+    that shows in that view (list_edges):
+      dimension: {"view": "front", "measure": "horizontal"|"vertical"|"distance"
+        |"diameter"|"radius"|"angle", "points_mm": [[..], [..]] (one point for
+        a diameter/radius: on the circle; a circle seen edge-on gives its
+        diameter), optional "side": above/below/left/right and "offset_mm"
+        (paper distance from the view, default 10; stagger them)}.
+        In a section (or a detail of one) a point may also lie on the cut
+        face's outline: a fillet's arc gives its radius, a cut line a distance.
+        A points_mm entry may be the id of a mark of that view instead:
+        ["BC"] diameter of a bolt circle, ["CL_SLOT", "CL_H1"] angle between
+        centrelines (its text goes between them), ["O", [x,y,z]] distance from
+        the centre point to an edge, [[x,y,z], "AX"] edge to a hole's axis.
+        The tool sets the spec's precision, fraction or limits and tolerance,
+        and the spec's "basic": true (boxed, no tolerance), "reference": true
+        (in parentheses) and "prefix"/"suffix" text ("10X", "MAX", "TYP").
+        A gdt item's "projected": ".56" adds Ⓟ .56 to its frame.
+      datum / gdt: {"view", "on": "D13"} on a placed dimension (a feature of
+        size) or thread/hole, or {"view", "point_mm": [..]} on a surface's edge.
+      finish, thread, hole, local note: {"view", "point_mm": [..]} (leader).
+      Leader text (all of these): "side": above/below/left/right with
+      "offset_mm" (paper mm beyond the view's outline), or "text_mm": [dx, dy]
+      (the text's top-left corner from the attach point; for a symbol "on" a
+      dimension, from that dimension's text, which it otherwise sits under).
+    The result's "layout" (check_drawing's too, measured on the saved file):
+    every text's box on the sheet and leader length (paper mm), each view's
+    box, and "problems": text_overlap, text_on_view, nearer_other_view,
+    off_border, on_title_block, long_leader (> 40 mm), dimensions_close
+    (< 6 mm). Iterate on those numbers.
+    Each placed item is named after its spec id inside the drawing, so
+    check_drawing can find it. Call check_drawing next.
     """
-    return await _call(_session.make_drawing, path)
+    return await _call(_session.make_drawing, path, spec, views, placements, sheet)
+
+
+@mcp.tool()
+async def check_drawing(path: str, spec: dict) -> dict:
+    """Read a saved .slddrw back from SolidWorks and compare it with the spec.
+
+    One line per spec item: ok, missing, differs (what the drawing shows and
+    what the spec says; a dimension also differs when the model's measured
+    value is not the spec's, even if the shown text matches) or unreadable
+    (flagged when the old drawing was read). Also lists what is on the drawing
+    but not in the spec (the title block is left out). `clean` is true when
+    nothing is missing or different. "layout" measures the saved sheet: text
+    boxes, leader lengths and layout problems (see make_drawing).
+    """
+    return await _call(_session.check_drawing, path, spec)
+
+
+@mcp.tool()
+async def arrange_drawing(path: str, mode: str = "full", move_views: bool = True) -> dict:
+    """Tidy the texts of a saved .slddrw so none overlaps another, a view, the
+    border or the title block, each staying close to what it describes. Saves
+    the drawing and measures it again.
+
+    Every text gets a box and a label of what it belongs to (its view, the
+    dimension it rides on, the point its leader touches). Linear dimensions
+    step out from their view in tiers (smaller span nearest, 10 mm to the
+    first, 6 mm between texts) and keep their side; angles slide out from
+    their vertex until they are off the view (SolidWorks redraws the arc and
+    extension lines); a datum or frame on a dimension moves with it; leader
+    notes, callouts, datums, frames and radii/diameters on a leader stay near
+    the point their leader touches; view labels stay under their view. No
+    text is left on a view, its own included (a detail view's circle counts,
+    not its corners).
+    mode "full" lays every text out afresh but prefers its current spot;
+    "fix" moves only the texts that clash. With move_views (full mode only)
+    views first move apart where their texts need room; projected views stay
+    aligned. Returns problems_before / problems_after (the layout problems of
+    make_drawing), "moved", "views_moved", "unplaced" (texts with no free
+    spot nearby, put at the least bad one), "objects" (each text's new box and
+    what it belongs to) and "seconds". Run it after make_drawing, then
+    check_drawing and look at the PDF.
+    """
+    return await _call(_session.arrange_drawing, path, mode, move_views)
 
 
 @mcp.tool()
