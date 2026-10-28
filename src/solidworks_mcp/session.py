@@ -25,7 +25,7 @@ import pythoncom
 import win32com.client
 import win32gui
 
-from . import __version__, binding, case_paths, drawing_spec, free_sketch
+from . import __version__, binding, case_paths, drawing_layout, drawing_spec, free_sketch
 from .constants import (
     FEATURE_ERRORS,
     DRAWING_FORMATS,
@@ -7141,12 +7141,16 @@ class SolidWorksSession:
         finally:
             self._sw.CloseDoc(doc.GetPathName() or abs_path)
 
-    def _layout_report(self, doc) -> dict:
+    def _layout_report(self, doc, handles: dict | None = None, view_handles: dict | None = None) -> dict:
         """Every text on the drawing (dimensions, notes, callouts, datums,
         frames, finish symbols, view labels) with its box on the sheet and its
         leader length in paper mm, the box each view draws in, and the problems
         drawing_spec.layout_problems finds. Measured from SolidWorks' own
-        display data: each text run's position, height and width."""
+        display data: each text run's position, height and width. `handles`,
+        when given, is filled with {(view, name): (annotation, its display
+        lines' start points in mm, swDimensionType_e or None, the dimension a
+        datum or frame is attached to)} and `view_handles` with {view name: IView}
+        for arrange_drawing."""
         drawing = binding.wrap(doc, self._mod.IDrawingDoc)
         props = list(binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).GetProperties2())
         size = (round(m_to_mm(props[5]), 1), round(m_to_mm(props[6]), 1))
@@ -7162,6 +7166,8 @@ class SolidWorksSession:
                 x0, y0, x1, y1 = (m_to_mm(c) for c in view.GetOutline())
                 m = min(self._OUTLINE_MARGIN_MM, (x1 - x0) / 4, (y1 - y0) / 4)
                 views[name] = tuple(round(c, 2) for c in (x0 + m, y0 + m, x1 - m, y1 - m))
+                if view_handles is not None:
+                    view_handles[name] = view
             for handle in view.GetAnnotations() or ():
                 annotation = binding.wrap(handle, self._mod.IAnnotation)
                 kind = SW_ANNOTATION_TYPES.get(annotation.GetType())
@@ -7193,6 +7199,16 @@ class SolidWorksSession:
                     path = [tuple(round(c, 2) for c in q) for q in xy]
                 else:
                     path = []
+                if handles is not None:
+                    starts = []
+                    for i in range(data.GetLineCount() if kind == "dimension" else 0):
+                        line = list(data.GetLineAtIndex3(i) or ())
+                        if len(line) >= 6:  # [colour, type, style, weight, x1, y1, ...] in m (2020)
+                            starts.append((m_to_mm(line[4]), m_to_mm(line[5])))
+                    dim_type = (binding.wrap(annotation.GetSpecificAnnotation(), self._mod.IDisplayDimension).Type2
+                                if kind == "dimension" else None)
+                    handles[(name, annotation.GetName())] = (annotation, starts, dim_type,
+                                                             self._attached_dimension(annotation) if kind in ("datum", "gtol") else None)
                 items.append({"name": annotation.GetName(), "view": name, "kind": kind,
                               "box": tuple(round(c, 2) for c in box), "leader_mm": leader,
                               **({"leader_end_mm": path[-1], "leader_points_mm": path} if path else {})})
@@ -7204,6 +7220,201 @@ class SolidWorksSession:
             counts[p["problem"]] = counts.get(p["problem"], 0) + 1
         return {"sheet_mm": size, "border_mm": border, "title_block_mm": title_block, "views": views,
                 "items": items, "problems": problems, "problem_counts": counts}
+
+    # --- arranging a sheet ------------------------------------------------------
+
+    _LEADER_KINDS = ("note", "datum", "gtol", "finish")
+
+    def arrange_drawing(self, path: str, mode: str = "full", move_views: bool = True) -> dict:
+        """Lay out a saved .slddrw: every text gets a box and a label of what it
+        is and what it belongs to (its view, the dimension it rides on, the
+        point its leader touches); the texts move so none overlaps another, a
+        view, the border or the title block, each stays close to what it
+        describes, and stacked dimensions step out from their view
+        (drawing_layout). In "full" mode with move_views the views first move
+        apart where their texts need room (projected views stay aligned);
+        "fix" leaves the views and every text that clashes with nothing. Saves the drawing
+        and measures it again."""
+        abs_path = os.path.abspath(path)
+        if not abs_path.lower().endswith(".slddrw") or not os.path.isfile(abs_path):
+            raise SolidWorksError(f"arrange_drawing works on a saved .slddrw (got '{path}').")
+        if mode not in drawing_layout.MODES:
+            raise SolidWorksError(f"mode is {' or '.join(drawing_layout.MODES)} (got {mode!r}).")
+        started = time.perf_counter()
+        sw = self._ensure()
+        already = any(os.path.normcase(d.GetPathName()) == os.path.normcase(abs_path) for d in self._open_documents())
+        result = sw.OpenDoc6(abs_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
+        doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not open the drawing {abs_path}.")
+        views_moved, stuck = {}, []
+        try:
+            handles, view_handles = {}, {}
+            before = self._layout_report(doc, handles, view_handles)
+            # texts may go anywhere inside the border but on the title block
+            b = before["border_mm"]
+            area = (b[0] + 1.5, b[1] + 1.5, b[2] - 1.5, b[3] - 1.5)
+            marks = self._cut_marks(view_handles)
+            round_views = [n for n, v in view_handles.items() if v.Type == self._DETAIL_VIEW]
+            report, items = before, self._layout_items(before, handles)
+            plan = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], mode,
+                                          marks, round_views)
+            if move_views and mode == "full":
+                envelope = drawing_layout.envelopes(report["views"], plan["objects"])
+                views_moved = drawing_layout.spread_views(report["views"], envelope, area, report["title_block_mm"],
+                                                          balance=mode == "full")
+                if views_moved:
+                    stuck = self._shift_views(view_handles, views_moved)
+                    doc.EditRebuild3()
+                    handles = {}
+                    report = self._layout_report(doc, handles)
+                    items = self._layout_items(report, handles)
+                    marks = self._cut_marks(view_handles)
+                    plan = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], mode,
+                                                  marks, round_views)
+            self._apply_layout(items, handles, plan)
+            doc.EditRebuild3()
+            # SolidWorks may set a text otherwise than planned: measure, and fix what clashes
+            handles = {}
+            report = self._layout_report(doc, handles)
+            if report["problems"]:
+                items = self._layout_items(report, handles)
+                check = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], "fix",
+                                               marks, round_views)
+                if check["moves"]:
+                    self._apply_layout(items, handles, check)
+                    doc.EditRebuild3()
+                plan["unplaced"], plan["lines_crossed"] = check["unplaced"], check["lines_crossed"]
+            self._write_via_saveas3(abs_path, doc)
+            after = self._layout_report(doc) if already else None
+        finally:
+            if not already:
+                sw.CloseDoc(doc.GetPathName() or abs_path)
+        if after is None:
+            after = self._saved_layout_report(abs_path)
+        out = {"ok": True, "path": abs_path, "mode": mode, "moved": len(plan["moves"]),
+               "views_moved": {n: [round(c, 1) for c in d] for n, d in views_moved.items()},
+               "problems_before": before["problem_counts"], "problems_after": after["problem_counts"],
+               "problems": after["problems"], "unplaced": plan["unplaced"], "lines_crossed": plan["lines_crossed"],
+               "objects": plan["objects"], "seconds": round(time.perf_counter() - started, 1)}
+        if stuck:
+            out["views_not_moved"] = stuck
+        return out
+
+    _MARK_LETTER_MM = 2.5  # half the box kept round a cutting line's or detail circle's letter
+    _DETAIL_VIEW = 3  # swDrawingViewTypes_e.swDrawingDetailView (IView.Type)
+
+    def _cut_marks(self, view_handles) -> dict:
+        """What the views draw outside themselves that texts must keep off: each
+        cutting line (from arrow to arrow) with its arrows and letters, and each
+        detail circle's letter, in sheet mm (IDrSection.GetArrowInfo /
+        GetTextInfo, IDetailCircle.GetLabelPosition: sheet metres on 2020)."""
+        boxes, lines = [], []
+        r = self._MARK_LETTER_MM
+        letter = lambda x, y: (x - r, y - r, x + r, y + r)
+        for iview in view_handles.values():
+            for handle in iview.GetSectionLines() or ():
+                section = binding.wrap(handle, self._mod.IDrSection)
+                arrows = [m_to_mm(c) for c in section.GetArrowInfo() or ()]
+                ends = [(arrows[i], arrows[i + 1]) for i in range(0, len(arrows) - 2, 3)]
+                lines += [(ends[i], ends[i + 1]) for i in range(0, len(ends) - 1, 2)]  # tail to head
+                if len(ends) >= 4:
+                    lines.append((ends[0], ends[2]))  # the cutting line, tail to tail
+                text = [m_to_mm(c) for c in section.GetTextInfo() or ()]
+                boxes += [letter(text[i], text[i + 1]) for i in range(0, len(text) - 2, 3)]
+            for handle in iview.GetDetailCircles() or ():
+                circle = binding.wrap(handle, self._mod.IDetailCircle)
+                at = circle.GetLabelPosition()
+                if at and len(at) >= 2 and at[0] is not None:
+                    boxes.append(letter(m_to_mm(at[0]), m_to_mm(at[1])))
+        return {"boxes": boxes, "lines": lines}
+
+    def _apply_layout(self, items, handles, plan) -> None:
+        """Move each text by its planned (dx, dy) and redraw a moved leader from
+        the end of the text that faces the point it touches."""
+        by_key = {i["key"]: i for i in items}
+        for key, (dx, dy) in plan["moves"].items():
+            item = by_key[key]
+            annotation = handles[item["handle"]][0]
+            x, y, z = list(annotation.GetPosition())[:3]
+            if not annotation.SetPosition2(x + mm_to_m(dx), y + mm_to_m(dy), z):
+                raise SolidWorksError(f"SolidWorks would not move {item['handle'][1]}.")
+            if item["anchor"] is not None and item["kind"] in ("note", "datum", "gtol"):
+                self._leader_from_box(annotation, item["anchor"], drawing_layout._shift(item["box"], dx, dy))
+
+    def _shift_views(self, view_handles, moves) -> list:
+        """Move views by {name: (dx, dy)} mm. Moving a view can drag the views
+        projected from it, so every view is put at its own target afterwards,
+        along the axes it is off by. Returns the views SolidWorks kept back
+        (an aligned view cannot leave its parent's line)."""
+        targets = {}
+        for name, iview in view_handles.items():
+            x0, y0, x1, y1 = iview.GetOutline()
+            dx, dy = moves.get(name, (0.0, 0.0))
+            targets[name] = ((x0 + x1) / 2 + mm_to_m(dx), (y0 + y1) / 2 + mm_to_m(dy))
+        stuck = []
+        for _ in range(2):
+            stuck = []
+            for name, iview in view_handles.items():
+                x0, y0, x1, y1 = iview.GetOutline()
+                tx, ty = targets[name]
+                free = ("x" if abs((x0 + x1) / 2 - tx) > 5e-5 else "") + ("y" if abs((y0 + y1) / 2 - ty) > 5e-5 else "")
+                if not free:
+                    continue
+                try:
+                    self._move_view(iview, tx, ty, free)
+                except SolidWorksError:
+                    stuck.append(name)
+        return stuck
+
+    _SEL_DIMENSIONS = 14  # swSelectType_e: what GetAttachedEntityTypes gives for a symbol on a dimension
+
+    def _attached_dimension(self, annotation) -> str | None:
+        """The name of the dimension a datum or frame is attached to (its text
+        follows that dimension's), None when it is attached to the part, or ""
+        when SolidWorks names no attachment at all (then drawing_layout takes
+        the nearest dimension; DTN7's datum C on a detail's dimension). Verified
+        on 2020: type 14 and the IDisplayDimension in GetAttachedEntities3."""
+        types = list(annotation.GetAttachedEntityTypes() or ())
+        if not types:
+            return ""
+        entities = list(annotation.GetAttachedEntities3() or ())
+        for kind, entity in zip(types, entities):
+            if kind == self._SEL_DIMENSIONS:
+                dd = binding.wrap(entity, self._mod.IDisplayDimension)
+                return binding.wrap(dd.GetAnnotation(), self._mod.IAnnotation).GetName()
+        return None
+
+    def _layout_items(self, report, handles) -> list:
+        """The layout report's texts as drawing_layout.arrange takes them: each
+        with its view, box, the point its leader touches and, for a dimension,
+        how it may move."""
+        items = []
+        for it in report["items"]:
+            handle = (it["view"], it["name"])
+            if handle not in handles:
+                continue
+            _, starts, dim_type, host = handles[handle]
+            end = it.get("leader_end_mm")
+            prefix = f"{it['view'] or 'sheet'}/"
+            entry = {"key": prefix + it["name"], "handle": handle, "kind": it["kind"],
+                     "view": it["view"], "box": tuple(it["box"]),
+                     "anchor": tuple(end) if end and it["kind"] in self._LEADER_KINDS else None}
+            if it["kind"] in ("datum", "gtol") and host != "":  # SolidWorks says what it is attached to
+                entry["host"] = prefix + host if host else None
+            if it["kind"] == "dimension":
+                entry["dimension"] = drawing_layout.classify_dimension(dim_type, starts)
+            items.append(entry)
+        return items
+
+    def _leader_from_box(self, annotation, anchor_mm, box_mm) -> None:
+        """Draw a moved text's leader from its end and line facing the point it
+        touches (see _leader_side)."""
+        ax, ay = anchor_mm
+        line = (self._LEADER_TOP if ay > box_mm[3] else
+                self._LEADER_BOTTOM if ay < box_mm[1] else self._LEADER_CENTER)
+        side = self._LEADER_RIGHT if ax > (box_mm[0] + box_mm[2]) / 2 else self._LEADER_LEFT
+        annotation.SetLeader3(self._LEADER_STRAIGHT | line, side, True, False, False, False)
 
     def _read_dimension(self, dd, doc_places: int) -> dict:
         dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)

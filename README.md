@@ -35,7 +35,7 @@ it "looks about right".
   holes, counterbores, slots and pockets on any face; rounded polygon corners; ISO and ANSI inch holes from the Hole Wizard; real ISO metric threads;
   fillets, chamfers, shells, patterns, mirrors, ribs, equations and materials. Assemblies
   with mates and interference checks. STEP/STL/3MF export and screenshots.
-  Engraved and embossed text. Work on existing parts: list, delete, suppress and reorder features; read, extrude and cut a person's sketches; import STEP. Colours per part or component. Joints with concentric and angle mates, checked over their range. Printability checks and dimensioned drawings. Planes at any offset or angle. Several bodies per part, combined and split. Variable fillets and full rounds. Free sketches with tangent arcs and splines. 86 tools in total.
+  Engraved and embossed text. Work on existing parts: list, delete, suppress and reorder features; read, extrude and cut a person's sketches; import STEP. Colours per part or component. Joints with concentric and angle mates, checked over their range. Printability checks and dimensioned drawings. Planes at any offset or angle. Several bodies per part, combined and split. Variable fillets and full rounds. Free sketches with tangent arcs and splines. 88 tools in total.
 - **It fails loud.** A call that cannot do what was asked returns
   `{ok: false, error}` with the cause, never silently wrong geometry.
 - **A fixed, typed tool surface.** There is no "run arbitrary code" tool; the
@@ -250,6 +250,7 @@ The server speaks MCP over **stdio**.
 | `screenshot(path, view, zoom_mm, show_planes, from_dir)` | PNG/JPG/TIF from a standard view (`iso`, `front`, `top`, …) or any direction, zoomed to fit or onto a region; planes and axes left out unless asked for |
 | `make_drawing(path, spec, views, placements)` | Shop drawing as editable `.slddrw` or PDF: A-size sheet with the stock ANSI title block, third angle, inches, no isometric. With a drawing spec: every dimension at its own precision, fraction, limits or tolerance, datums, GD&T frames, thread/hole callouts, finish symbols and notes, in the views you choose (including section and detail views). Without one: front, top and right with the model's own dimensions |
 | `check_drawing(path, spec)` | Read a saved drawing back and compare it with the spec: ok / missing / differs / unreadable per item, plus anything not in the spec |
+| `arrange_drawing(path, mode, move_views)` | Tidy a saved drawing's texts: none on another text, a view, the border or the title block, each close to what it describes. Dimensions step out from their view in tiers and keep their side, frames move with their dimension, leader items stay near their point, labels under their view. `full` lays out afresh (views may move apart), `fix` moves only what clashes; returns the problems before and after |
 | `save_part(path)` / `open_part(path)` | Save to / open a native `.sldprt`; `open_part` also imports STEP, IGES and Parasolid files as a part to build on |
 | `close_part(save)` | Close the current part or assembly; without one, SolidWorks' active document if it is saved |
 | `list_documents` / `activate_document(title)` | The open documents (path, type, unsaved changes) / make one current again, also one never saved |

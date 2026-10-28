@@ -450,6 +450,12 @@ missing dimension is a scrapped part.
   `"offset_mm"` or `"text_mm"`, dimensions with `side` / `offset_mm`, and make
   the drawing again until the problems you care about are gone; then look at
   the PDF.
+- **Tidying a sheet in one call**: `arrange_drawing(path)` moves the texts of a
+  saved drawing off each other, the views, the border and the title block,
+  each kept near what it describes. Use `mode="fix"` on a drawing that is
+  mostly right (only clashing texts move), `"full"` (default) on a crowded
+  one. Read `problems_after` and `unplaced`, look at the PDF, then call
+  `check_drawing` again: moving texts does not change what they say.
 - **A big part or many views**: `sheet="B"` (17 x 11 in) or `"C"` (22 x 17 in)
   gives a larger scale than the A sheet (DTN7 with four sections and a
   detail: 1:10 on A, 1:4 on B). The `scale` in the result says what it got.

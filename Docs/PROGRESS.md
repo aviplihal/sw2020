@@ -368,3 +368,27 @@ view's flange ring and in B-B, items in the 2:1 details' outline margins). Findi
   +y) so the diameters step above it with their runout frames under them; B-B cut from A-A and
   turned like the front view; detail E (2:1) of the key slot carries the slot width, datum C,
   the slot's position and profile frames, the lead-in and the corner radius.
+
+### 2026-10-28 (evening) — `arrange_drawing`: tidy a drawing's texts (branch `feat/arrange-drawing`)
+
+Pure planner `drawing_layout.py` plus `SolidWorksSession.arrange_drawing`. Every text gets a box,
+what it is and what it belongs to; dimensions step out in tiers, leader items stay near their point,
+frames ride with their dimension, labels go under their view, views spread where texts need room.
+Test drawings in `Projects\_tmp\drawings\arrange\`.
+- DTN4's crowded test sheet: `fix` 11 problems → 0 (4.4 s); `full` → 1 (two dimensions exactly
+  6.0 mm apart, the limit).
+- DTN7 (hand-laid, B sheet): the first version moved texts up to 116 mm (a dimension sent to the
+  far side of its view for balance, a detail's label above another view). Fixed in the planner:
+  a text's current spot is always a candidate, each mm moved costs 0.15, a change of side 15, a
+  leader over 40 mm counts as a fault, a view's label keeps its spot reserved while the others
+  are placed, and labels too must be nearest their own view. Now `full` keeps the layout (23 texts
+  moved, mostly a few mm; 23 s with views moved, 7.7 s without), leaving one frame overlap at the
+  top of A-A and datum C touching the .753 text; the 10 texts inside their own views (face-on
+  radii and angles, detail-circle corners) are left as they are.
+- 2020: `IAnnotation.GetAttachedEntityTypes` returns None for datum C on detail E's dimension
+  (no attachment named); treated as unknown, so the planner rides it on the nearest dimension.
+  A symbol on a dimension reports type 14 (swSelDIMENSIONS) and its `IDisplayDimension`.
+- The dev bridge's `bridge_reload` does not reload `drawing_layout`; `bridge_probe reload_layout`
+  does.
+- Offline replay: `bridge_probe layout_input <slddrw>` dumps the planner's inputs as JSON
+  (`in_dtn7.json`, `in_messy.json`), so the planner can be tuned without SolidWorks.

@@ -1156,6 +1156,30 @@ async def check_drawing(path: str, spec: dict) -> dict:
 
 
 @mcp.tool()
+async def arrange_drawing(path: str, mode: str = "full", move_views: bool = True) -> dict:
+    """Tidy the texts of a saved .slddrw so none overlaps another, a view, the
+    border or the title block, each staying close to what it describes. Saves
+    the drawing and measures it again.
+
+    Every text gets a box and a label of what it belongs to (its view, the
+    dimension it rides on, the point its leader touches). Linear dimensions
+    step out from their view in tiers (smaller span nearest, 10 mm to the
+    first, 6 mm between texts) and keep their side; a datum or frame on a
+    dimension moves with it; leader notes, callouts, datums and frames stay
+    near the point their leader touches; view labels stay under their view.
+    mode "full" lays every text out afresh but prefers its current spot;
+    "fix" moves only the texts that clash. With move_views (full mode only)
+    views first move apart where their texts need room; projected views stay
+    aligned. Returns problems_before / problems_after (the layout problems of
+    make_drawing), "moved", "views_moved", "unplaced" (texts with no free
+    spot nearby, put at the least bad one), "objects" (each text's new box and
+    what it belongs to) and "seconds". Run it after make_drawing, then
+    check_drawing and look at the PDF.
+    """
+    return await _call(_session.arrange_drawing, path, mode, move_views)
+
+
+@mcp.tool()
 async def close_part(save: bool = False) -> dict:
     """Close the current part or assembly without saving (export/save first if needed).
 

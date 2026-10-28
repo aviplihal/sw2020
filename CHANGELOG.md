@@ -77,6 +77,19 @@ All notable changes to this project are documented here. This project follows
   leader length on the sheet, and the problems found (overlaps, text on a
   view or nearer another view, off the border or on the title block, long
   leaders, dimensions stacked too close).
+- `arrange_drawing(path, mode="full", move_views=True)` tidies a saved
+  drawing: every text gets a box and a label of what it belongs to (its view,
+  the dimension it rides on, the point its leader touches) and moves where it
+  overlaps nothing, stays inside the border and off the title block and stays
+  near what it describes. Linear dimensions step out from their view in tiers
+  (smaller span nearest) and keep their side; datums and frames on a dimension
+  move with it; leader items stay near their point; view labels stay under
+  their view. `full` lays every text out afresh but charges each mm moved and
+  each change of side, so a hand-laid sheet keeps its layout; with
+  `move_views` the views first move apart where their texts need room. `fix`
+  moves only what clashes. The drawing is saved and measured again (DTN4's
+  crowded test sheet: 11 layout problems to 0 in 4.4 s; DTN7, hand-laid:
+  no text moved more than a few tens of mm, 6-23 s).
 
 ### Fixed (shop drawing layout, found on the real DTN7 drawing)
 - Dimensions and leaders in a detail of a turned view (a detail of the front
