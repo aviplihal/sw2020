@@ -101,6 +101,23 @@ def test_full_keeps_a_free_text_near_where_it_is():
     assert math.hypot(*plan["moves"].get("N1", (0, 0))) < 10 and box[0] > VIEW["V"][2]
 
 
+def test_a_text_a_little_tight_stays_in_fix():
+    """Within the gap of a view or another text but touching neither is tight,
+    not wrong: fix leaves it (moving it pushed three texts on in DTN7)."""
+    items = [note("N1", (150, 181, 180, 186), (150, 180)),  # 1 mm over the view
+             note("N2", (150, 187, 180, 192), (150, 180))]  # 1 mm over N1
+    assert dl.arrange(items, VIEW, AREA, TITLE, "fix")["moves"] == {}
+
+
+def test_a_detail_circle_is_given_a_mm_of_slack():
+    views = {"D": (100.0, 100.0, 150.0, 150.0)}  # circle radius about 25 - DETAIL_MARGIN_MM
+    sheet = dl._Sheet(AREA, TITLE, views, round_views=["D"])
+    unit = {"key": "N", "kind": "note", "view": "D", "move": "leader"}
+    top = 125 + 25 - dl.DETAIL_MARGIN_MM
+    assert sheet.faults(unit, (115, top - 0.5, 135, top + 5), [], False) == dl.NEAR_VIEW_FAULT
+    assert sheet.faults(unit, (115, top - 2.0, 135, top + 5), [], False) >= 20
+
+
 def test_overlapping_notes_are_pulled_apart_near_their_points():
     items = [note("N1", (210, 150, 240, 155), (195, 150)), note("N2", (212, 151, 242, 156), (195, 152))]
     plan = dl.arrange(items, VIEW, AREA, TITLE, "fix")
@@ -129,7 +146,7 @@ def test_stacked_dimensions_step_out_from_their_view():
 
 def test_full_keeps_a_dimension_on_its_side():
     """Balancing the sides never sends a hand-laid dimension across its view (DTN7)."""
-    items = [horizontal(f"D{i}", (100, 200 - 10 * i), 190 + 9 * i, (140, 189 + 9 * i, 160, 192 + 9 * i))
+    items = [horizontal(f"D{i}", (100, 170 + 10 * i), 190 + 9.5 * i, (140, 189 + 9.5 * i, 160, 192 + 9.5 * i))
              for i in range(4)]
     plan = dl.arrange(items, VIEW, AREA, TITLE, "full")
     for key, box in placed(items, plan).items():

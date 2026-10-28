@@ -31,6 +31,7 @@ import math
 
 FIRST_TIER_MM = 10.0  # from the view to the first dimension line (ASME Y14.5: 10 mm)
 STACK_GAP_MM = 6.0  # between stacked dimension texts (drawing_spec.DIM_STACK_MIN_MM)
+STACK_MARGIN_MM = 0.1  # kept past it: SolidWorks sets a text a hair off the plan (DTN4: 5.99)
 TEXT_GAP_MM = 2.0  # between any two texts
 VIEW_GAP_MM = 1.5  # between a text and a view's drawn box
 LEADER_MAX_MM = 40.0  # drawing_spec.LEADER_MAX_MM
@@ -38,9 +39,21 @@ LABEL_GAP_MM = 2.0  # from a view's drawn box to its label
 # A detail view's circle runs this far inside the box the layout report gives it
 # (SolidWorks' outline is some 10 mm round the circle, the report takes 5 off)
 DETAIL_MARGIN_MM = 5.0
+# ... which gives its radius to about a mm (DTN7's detail E: 19.6 for 19.4 drawn), so
+# a text is on it only when it reaches further in than this
+DETAIL_SLACK_MM = 1.0
 MAX_TIERS = 8
+LINE_MM = 6.0  # one line of note text with its gap (drawing_spec.LINE_MM)
+# Rings round a leader's point where its text may go, and the spots on each:
+# a crowded corner leaves gaps of a few mm (DTN7's frame beside A-A's stack)
+LEADER_RINGS_MM = (6.0, 8.0, 10.0, 12.5, 15.0, 17.5, 20.0, 23.0, 26.0, 29.5, 33.0, 36.5, 40.0, 45.0, 50.0, 56.0, 62.0)
+LEADER_ANGLES = 48
 DIM_LINE_STEP_MM = 8.0  # between stacked dimension lines whose texts step past each other
 CROSSING_FAULT = 0.25
+# A text inside the VIEW_GAP_MM round a view but off the view: tight, not
+# wrong (DTN7's frame 0.5 mm over detail E's circle; moving it pushed three texts on)
+NEAR_VIEW_FAULT = 0.5
+NEAR_TEXT_FAULT = 0.5  # likewise a text closer than TEXT_GAP_MM to another
 LEADER_IN_VIEW_MM = 4.0  # a leader may cross this much of its own view's box (0.5 fault beyond)
 SLIDE_COST = 12.0  # a text slid past the end of its span costs two tiers further out
 ARROW_STUB_MM = 5.0  # an arrow drawn outside a short span, past its end
@@ -98,6 +111,18 @@ def box_distance(a, b) -> float:
 def nearest_point(b, p) -> tuple:
     """The point of box b nearest to p."""
     return min(max(p[0], b[0]), b[2]), min(max(p[1], b[1]), b[3])
+
+
+def leader_end(text_box, anchor) -> tuple:
+    """Where SolidWorks starts a moved text's leader (session._leader_from_box):
+    at the end of the text facing the point, on its top line when the point is
+    above the text, its bottom line when below, else level with its middle."""
+    ax, ay = anchor
+    x = text_box[2] if ax > (text_box[0] + text_box[2]) / 2 else text_box[0]
+    half = min(LINE_MM / 2, _h(text_box) / 2)
+    y = (text_box[3] - half if ay > text_box[3] else
+         text_box[1] + half if ay < text_box[1] else (text_box[1] + text_box[3]) / 2)
+    return x, y
 
 
 def segment_hits_box(p, q, b, pad=0.0) -> bool:
@@ -206,11 +231,14 @@ class _Sheet:
         self.boxes = [(tuple(b), "fixed", "mark", None) for b in obstacles.get("boxes", ())]  # (box, key, kind, view)
         self.lines = [(tuple(p), tuple(q), "fixed") for p, q in obstacles.get("lines", ())]  # (p, q, key)
         self.load = {}  # (view, side): count
+        self.dim_texts = []  # (box, key, view): each placed dimension's own text
 
     def faults(self, unit, box, lines, allow_own_view: bool, why: list | None = None) -> float:
         """How badly a spot breaks the rules: 0 is free; off the area or on the
-        title block counts 100, on a view 20, nearer another view 10, each text
-        or line it runs into 1, a leader across its own view 0.5, each line
+        title block counts 100, on a view 20 (inside the VIEW_GAP_MM round it
+        but off the view itself NEAR_VIEW_FAULT), nearer another view 10, each
+        text or line it runs into 1 (a text within TEXT_GAP_MM but not touching
+        NEAR_TEXT_FAULT), a leader across its own view 0.5, each line
         crossing a line (an extension line through a stacked dimension's line,
         accepted where there is no room) CROSSING_FAULT. `why` collects the
         reasons."""
@@ -231,12 +259,17 @@ class _Sheet:
         for name, vbox in self.views.items():
             if name == unit["view"] and allow_own_view:
                 continue
-            if self._on_view(name, vbox, box):
+            if self._on_view(name, vbox, box, -DETAIL_SLACK_MM if name in self.round_views else 0.0):
                 fault(20, f"on view {name}")
+            elif self._on_view(name, vbox, box, VIEW_GAP_MM):
+                fault(NEAR_VIEW_FAULT, f"close to view {name}")
         if own is not None:  # a view's label too: it must read as that view's
-            mine = box_distance(box, own)
-            for n, v in self.views.items():
-                if n != unit["view"] and box_distance(box, v) + 0.5 < mine:
+            # the group, and its own text alone: a frame under a dimension's text
+            # is nearer the view than the text (DTN4's Ø4.120)
+            for b in {box, self._text_at(unit, box)}:
+                mine = box_distance(b, own)
+                n = next((n for n, v in self.views.items() if n != unit["view"] and box_distance(b, v) + 0.5 < mine), None)
+                if n is not None:
                     fault(10, f"nearer view {n}")
                     break
         if unit.get("move") == "leader" and any(math.dist(p, q) > LEADER_MAX_MM for p, q in lines):
@@ -245,19 +278,28 @@ class _Sheet:
             for p, q in lines:
                 if _length_inside(p, q, own) > LEADER_IN_VIEW_MM:
                     fault(0.5, "leader across its view")
+        hit = set()
         for other, key, kind, view in self.boxes:
             if key == unit["key"]:
                 continue  # its own reserved spot (a view label's)
-            # stacked dimension texts keep STACK_GAP_MM; one carrying a frame packs tighter
-            gap = STACK_GAP_MM if (kind == unit["kind"] == "dimension" and view == unit["view"]
-                                   and unit.get("move") == "linear" and not unit.get("riders")) else TEXT_GAP_MM
-            if overlap(box, other, gap):
-                fault(1, f"on {key}")
+            if overlap(box, other, TEXT_GAP_MM):
+                hit.add(key)
+                if overlap(box, other):
+                    fault(1, f"on {key}")
+                else:  # within TEXT_GAP_MM of another text without touching it: tight, not wrong
+                    fault(NEAR_TEXT_FAULT, f"close to {key}")
             if key == "fixed":
                 continue  # a cutting line's letter sits on the part, where extension lines start
             for p, q in lines:
                 if segment_hits_box(p, q, other, LINE_GRAZE_MM):
                     fault(1, f"its line through {key}")
+        if unit["kind"] == "dimension" and unit.get("move") == "linear":
+            # stacked dimension texts keep STACK_GAP_MM, measured between the
+            # texts themselves: a frame riding on one does not count
+            text = self._text_at(unit, box)
+            for other, key, view in self.dim_texts:
+                if view == unit["view"] and key not in hit and overlap(text, other, STACK_GAP_MM + STACK_MARGIN_MM):
+                    fault(1, f"stacked close to {key}")
         for p, q, key in self.lines:
             if segment_hits_box(p, q, box, LINE_GRAZE_MM):
                 fault(1, f"line of {key} through it")
@@ -268,21 +310,30 @@ class _Sheet:
                     fault(CROSSING_FAULT, f"crosses a line of {key}")
         return bad
 
-    def _on_view(self, name, vbox, box) -> bool:
-        """Whether a text box lies on a view: a detail view draws a circle, so
-        the corners of its box are free."""
-        if not overlap(box, vbox, VIEW_GAP_MM):
+    def _on_view(self, name, vbox, box, gap) -> bool:
+        """Whether a text box comes within gap of a view: a detail view draws a
+        circle, so the corners of its box are free."""
+        if not overlap(box, vbox, gap):
             return False
         if name not in self.round_views:
             return True
         cx, cy = _centre(vbox)
         near = nearest_point(box, (cx, cy))
-        return math.dist(near, (cx, cy)) < min(_w(vbox), _h(vbox)) / 2 - DETAIL_MARGIN_MM + VIEW_GAP_MM
+        return math.dist(near, (cx, cy)) < min(_w(vbox), _h(vbox)) / 2 - DETAIL_MARGIN_MM + gap
+
+    @staticmethod
+    def _text_at(unit, box):
+        """A unit's own text (without its riders) when its box is at box."""
+        if "text_box" not in unit:
+            return tuple(box)
+        return _shift(unit["text_box"], box[0] - unit["box"][0], box[1] - unit["box"][1])
 
     def add(self, unit, boxes, lines, side=None):
         kind = unit["kind"] + ("+" if unit.get("riders") else "")  # a group is not a bare dimension
         for b in boxes:
             self.boxes.append((b, unit["key"], kind, unit["view"]))
+            if unit["kind"] == "dimension":
+                self.dim_texts.append((self._text_at(unit, b), unit["key"], unit["view"]))
         for p, q in lines:
             self.lines.append((p, q, unit["key"]))
         if side is not None:
@@ -356,9 +407,9 @@ def _leader_candidates(unit, vbox):
     box, (ax, ay) = unit["box"], unit["anchor"]
     w, h = _w(box), _h(box)
     out = []
-    for r in (6.0, 10.0, 15.0, 20.0, 26.0, 33.0, 40.0, 50.0, 62.0):
-        for k in range(24):
-            t = 2 * math.pi * k / 24
+    for r in LEADER_RINGS_MM:
+        for k in range(LEADER_ANGLES):
+            t = 2 * math.pi * k / LEADER_ANGLES
             px, py = ax + r * math.cos(t), ay + r * math.sin(t)
             # the box's corner or edge middle nearest the anchor sits on the ring
             cx = px + (w / 2 if math.cos(t) > 0.38 else -w / 2 if math.cos(t) < -0.38 else 0.0)
@@ -485,8 +536,8 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
         elif unit["move"] == "leader":
             cands = []
             for _, centre, _, _ in _leader_candidates(unit, vbox):
-                b = _at(box, *centre)
-                end = nearest_point(b, unit["anchor"])
+                # moved, its leader is redrawn from its own text's end (riders aside)
+                end = leader_end(_shift(unit["text_box"], centre[0] - c0[0], centre[1] - c0[1]), unit["anchor"])
                 length = math.dist(end, unit["anchor"])
                 cost = length + (40.0 if length > LEADER_MAX_MM else 0.0)
                 cands.append((cost, centre, [(unit["anchor"], end)], None))
@@ -570,6 +621,9 @@ def _current_dimension_lines(unit) -> list:
 # --- spreading the views ----------------------------------------------------------------
 
 ENVELOPE_GAP_MM = 6.0  # between the envelopes of two views (a view with its texts)
+# Views spread to this far short of the area's edges: a text the spread puts on
+# the edge exactly counts as off it and is sent away (DTN7's hole callout, 18 mm)
+EDGE_SLACK_MM = 0.5
 
 
 def envelopes(views, objects) -> dict:
@@ -607,6 +661,7 @@ def spread_views(views, envelope, area, title_block=None, iterations: int = 30, 
     their rows. With balance, the free space along each row and column of
     views is then shared equally between the gaps (when nothing then clashes),
     so a crowded view gets room from an empty part of the sheet. Pure."""
+    area = (area[0] + EDGE_SLACK_MM, area[1] + EDGE_SLACK_MM, area[2] - EDGE_SLACK_MM, area[3] - EDGE_SLACK_MM)
     cols, rows = _aligned(views, 0), _aligned(views, 1)
     shift = {n: [0.0, 0.0] for n in views}
 

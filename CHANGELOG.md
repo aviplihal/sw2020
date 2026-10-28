@@ -88,8 +88,9 @@ All notable changes to this project are documented here. This project follows
   each change of side, so a hand-laid sheet keeps its layout; with
   `move_views` the views first move apart where their texts need room. `fix`
   moves only what clashes. The drawing is saved and measured again (DTN4's
-  crowded test sheet: 11 layout problems to 0 in 4.4 s; DTN7, hand-laid:
-  no text moved more than a few tens of mm, 6-23 s).
+  crowded test sheet: 11 layout problems to 0 in either mode, under 5 s;
+  DTN7, hand-laid: no overlaps left, only texts inside their own view, 6 s
+  in `fix`, 27 s in `full`).
 
 ### Fixed (shop drawing layout, found on the real DTN7 drawing)
 - Dimensions and leaders in a detail of a turned view (a detail of the front

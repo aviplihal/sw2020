@@ -392,3 +392,16 @@ Test drawings in `Projects\_tmp\drawings\arrange\`.
   does.
 - Offline replay: `bridge_probe layout_input <slddrw>` dumps the planner's inputs as JSON
   (`in_dtn7.json`, `in_messy.json`), so the planner can be tuned without SolidWorks.
+- Second round (the last two DTN7 flaws, a frame overlap over A-A and datum C on `.753`):
+  leader spots on finer rings (17 radii, 48 angles; the free gap beside A-A's stack was
+  between two rings); a text within 1.5 mm of a view or 2 mm of another text but touching
+  neither is "tight" (0.5), not wrong (1 or 20); a detail circle, estimated from its outline
+  to about 1 mm (detail E: 19.6 for 19.4 drawn), counts as hit only 1 mm in; stacked
+  dimensions keep 6.1 mm between their own texts (a frame riding on one no longer lets the
+  next dimension close in: DTN4's Ø3.615/Ø3.800 at 4.8 mm), and the nearer-view rule tests a
+  dimension's own text too; a moved text's leader is priced from the end SolidWorks draws it
+  from (`_leader_from_box`), not the nearest point (DTN7's 82 mm wide hole callout: 26 mm
+  planned, 47 drawn); views spread to 0.5 mm short of the area, since a text the spread puts
+  exactly on the edge counted as off it.
+  Result: DTN4 0 problems in both modes (4.3-4.7 s); DTN7 only the 10 texts inside their own
+  view in both modes (fix 5.9 s, 4 texts moved; full 26.6 s, 18 moved).
