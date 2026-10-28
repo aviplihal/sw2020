@@ -7,12 +7,14 @@ rather than getting an opaque stack trace.
 """
 
 import argparse
+import inspect
 import sys
 from importlib import resources
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from .errors import SolidWorksError
+from .kb import log as kb_log
 from .selftest import main as run_selftest
 
 # Shown to the model by every MCP client at connect time, so keep it short; the
@@ -66,6 +68,7 @@ class _NoSolidWorks:
             raise SolidWorksError(
                 f"SolidWorks MCP only works on Windows with SolidWorks installed (this is {sys.platform})."
             )
+        unavailable.__name__ = name  # the tool's name in the knowledge-base log
         return unavailable
 
 
@@ -93,24 +96,51 @@ async def _call(fn, *args, **kwargs) -> dict:
     """Run a session method on the COM thread and normalise errors to a result dict.
 
     It runs guarded: a call that fails leaves the current part as it was.
+    With SolidWorks there, every call is logged to the knowledge base (_log_call).
     """
+    error = None
     try:
         if _worker is None:
-            return fn(*args, **kwargs)
-        name = getattr(fn, "__name__", "")
-        return await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs),
-                                  timeout_s=_CALL_TIMEOUT_S.get(name),
-                                  label=name if name.isidentifier() else "the call")
+            result = fn(*args, **kwargs)
+        else:
+            name = getattr(fn, "__name__", "")
+            result = await _worker.call(lambda: _session.run_guarded(fn, *args, **kwargs),
+                                        timeout_s=_CALL_TIMEOUT_S.get(name),
+                                        label=name if name.isidentifier() else "the call")
     except SolidWorksError as exc:
-        return {"ok": False, "error": str(exc)}
+        error, result = exc, {"ok": False, "error": str(exc)}
     except _COM_ERROR as exc:
         # Extract the human-readable description if SolidWorks supplied one;
         # raw HRESULT tuples are useless as a correction-loop signal.
         info = getattr(exc, "excepinfo", None)
         desc = info[2] if info and len(info) > 2 and info[2] else getattr(exc, "strerror", None)
-        return {"ok": False, "error": f"SolidWorks COM error: {desc or exc}"}
+        error, result = exc, {"ok": False, "error": f"SolidWorks COM error: {desc or exc}"}
     except Exception as exc:  # noqa: BLE001 - never leak a stack trace to the agent
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        error, result = exc, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if _worker is None:  # not Windows: nothing ran, nothing to learn from
+        return result
+    return _log_call(fn, args, kwargs, result, error)
+
+
+def _log_call(fn, args, kwargs, result: dict, error: BaseException | None) -> dict:
+    """Record the call in the knowledge base. A logging failure never breaks the
+    call, but it is reported in the result, not swallowed."""
+    try:
+        try:
+            arguments = dict(inspect.signature(fn).bind(*args, **kwargs).arguments)
+        except (TypeError, ValueError):
+            arguments = {"args": list(args), **kwargs}
+        revision = getattr(_session, "sw_revision", None)
+        event = kb_log.record_call(fn.__name__, arguments, result, error,
+                                   revision if isinstance(revision, str) else None)
+        if event is not None and not event["ok"]:
+            # the tool card's line for this failure, so the agent need not remember to look
+            hint = kb_log.hint_for(fn.__name__, event["signature"])
+            if hint:
+                result = {**result, "kb_hint": hint}
+    except Exception as exc:  # noqa: BLE001 - the tool's own result matters more
+        result = {**result, "kb_warning": f"The knowledge base did not log this call: {type(exc).__name__}: {exc}"}
+    return result
 
 
 @mcp.tool()
@@ -1378,6 +1408,159 @@ async def swept_region(component: str, dimension: str, values: list, heights_mm:
 async def get_assembly_bounding_box() -> dict:
     """Get the bounding box of the whole assembly (min/max/size in mm)."""
     return await _call(_session.get_assembly_bounding_box)
+
+
+# --- knowledge base (Docs/KNOWLEDGE-BASE.md) ------------------------------------
+#
+# Earlier drawing jobs (cases, by DN number) and what was learned from them. These
+# tools are not logged as modelling events. They need the optional extra
+# solidworks-mcp[kb]; without it they fail loud.
+
+_kb_tools = None
+
+
+def _kb():
+    global _kb_tools
+    if _kb_tools is None:
+        try:
+            from .kb.cases import CaseTools
+            from .kb.embed import VoyageEmbedder
+        except ImportError as exc:
+            raise SolidWorksError(f'The knowledge base needs the optional extra: pip install "solidworks-mcp[kb]" '
+                                  f"({exc}).") from None
+        _kb_tools = CaseTools(kb_log.knowledge_base(), VoyageEmbedder(), _tool_reference)
+    return _kb_tools
+
+
+def _tool_reference(name: str) -> str | None:
+    """A modelling tool's 'How to call' line for its card: its signature and the
+    first line of its docstring, so the card cannot drift from the code."""
+    fn = globals().get(name)
+    if name.startswith("_") or name.startswith("kb_") or not inspect.iscoroutinefunction(fn):
+        return None
+    params = ", ".join(p.name if p.default is p.empty else f"{p.name}={p.default!r}"
+                       for p in inspect.signature(fn).parameters.values())
+    first = (inspect.getdoc(fn) or "").split("\n")[0]
+    return f"{name}({params}): {first}"
+
+
+async def _kb_call(method: str, *args):
+    """Run a knowledge-base tool; errors come back as {ok: false, error}, like every tool's.
+    A (result, JPEG) pair goes out as the result's text plus the image."""
+    try:
+        result = getattr(_kb(), method)(*args)
+    except SolidWorksError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - never leak a stack trace to the agent
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if isinstance(result, tuple):
+        data, jpeg = result
+        return [data, Image(data=jpeg, format="jpeg")]
+    return result
+
+
+@mcp.tool()
+async def kb_ingest_drawing(path: str, page: int = 1):
+    """Start a case from an old drawing: a PDF named DN<number>.pdf (e.g. DN17.pdf).
+
+    The file name gives the case its DN number; any other name is refused, as is
+    a DN that already exists or a second case while one is open. A gap in the
+    numbers is a warning. Renders `page` (1-based; a missing page is refused)
+    and returns an OVERVIEW image: enough for the layout, too coarse to read
+    dimensions. Read every value with kb_view_region, then call kb_describe_case.
+    """
+    return await _kb_call("ingest_drawing", path, page)
+
+
+@mcp.tool()
+async def kb_view_region(box: list, dn: str | None = None):
+    """Zoom into the drawing: one region of the page at full resolution, as an image.
+
+    box = [x0, y0, x1, y1] as fractions of the page, 0 to 1 from the top left
+    ([0, 0, 0.5, 0.5] is the top-left quarter). The smaller the box, the closer
+    the zoom; read every dimension, tolerance and note this way, never from the
+    overview. Returns effective_dpi. dn: another case's drawing instead of the open one.
+    """
+    return await _kb_call("view_region", box, dn)
+
+
+@mcp.tool()
+async def kb_describe_case(view_boxes: dict, description: str, part_type: str, drawing_spec: dict,
+                           handwritten_dn: str | None = None, dn_confirmed: bool = False) -> dict:
+    """Record what the open case's drawing shows, and find earlier cases like it.
+
+    view_boxes: {'front': [x0, y0, x1, y1], 'top': [...], 'side': [...]} in page
+    fractions, rough is fine (a margin is added); only the views the drawing has.
+    description: the part in a few plain sentences. part_type: a short label
+    (bracket, shaft, flange, plate, ...). drawing_spec: every item on the drawing
+    in the format of SHOP-DRAWINGS.md §4.1 ({"units": "in", "items": [...]},
+    values as strings exactly as written, unreadable items flagged, never
+    guessed). handwritten_dn: a DN written on the paper, if any; when it differs
+    from the file name the call is refused: ask the user, and only once they
+    confirm the file name, call again with dn_confirmed=True.
+    Returns the unreadable items (ask the user about each, then kb_update_spec)
+    and the most similar earlier cases.
+    """
+    return await _kb_call("describe_case", view_boxes, description, part_type, drawing_spec, handwritten_dn,
+                          dn_confirmed)
+
+
+@mcp.tool()
+async def kb_update_spec(drawing_spec: dict) -> dict:
+    """Replace the open case's drawing spec whole, e.g. with the user's answers to
+    the unreadable items. The earlier version is kept. Always work from the latest."""
+    return await _kb_call("update_spec", drawing_spec)
+
+
+@mcp.tool()
+async def kb_search(text: str | None = None, like_case: str | None = None, filters: dict | None = None,
+                    limit: int = 5) -> dict:
+    """Find earlier cases: like a text ('turned shaft with a keyway'), like another
+    case ('DN12'), or both. One line per case, best first: approved cases above
+    those that needed changes, above unreviewed ones (flagged with a caution).
+    filters: {'status': [...], 'part_type': 'bracket', 'size_mm': [min, max] of the
+    largest side}. kb_get_case gives one case in full."""
+    return await _kb_call("search", text, like_case, filters, limit)
+
+
+@mcp.tool()
+async def kb_get_case(dn: str, include_timeline: bool = False) -> dict:
+    """One case in full: description, spec, review and its files (the scan; once
+    approved, the STEP and drawing PDF). include_timeline=True adds every modelling
+    step in order, with arguments, errors and measurements: how it was built."""
+    return await _kb_call("get_case", dn, include_timeline)
+
+
+@mcp.tool()
+async def kb_abandon_case(reason: str) -> dict:
+    """Close the open case without finishing it (wrong file, job dropped); tell the
+    user first. It is kept as DN17~1 and the DN can be ingested again."""
+    return await _kb_call("abandon_case", reason)
+
+
+@mcp.tool()
+async def kb_tool_card(tool: str) -> dict:
+    """What is known about one modelling tool: when to use it, when not, how to call
+    it, and the failures seen in practice with their cause and fix (with counts,
+    the last case and versions). Read the cards of the tools you plan to use."""
+    return await _kb_call("tool_card", tool)
+
+
+@mcp.tool()
+async def kb_update_tool_card(tool: str, card: dict) -> dict:
+    """Store a tool's tidied card, as finalise asks: card = {"use_when": "...",
+    "dont_use_when": "...", "failures": {signature: "cause -> fix"}, "lessons": [...]}.
+    One line per text; at most 8 bullets and about 150 words, or it is refused.
+    Every failure in must_cover needs a text (give several the same text when they
+    share a cause). Counts and versions are added by the server; do not write them."""
+    return await _kb_call("update_tool_card", tool, card)
+
+
+@mcp.tool()
+async def kb_reembed_pending() -> dict:
+    """Embed the cases marked 'embedding pending' (Voyage unreachable, or the
+    opt-out not yet confirmed with SWMCP_VOYAGE_OPTED_OUT=1)."""
+    return await _kb_call("reembed_pending")
 
 
 def main() -> None:
