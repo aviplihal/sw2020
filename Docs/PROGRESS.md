@@ -138,3 +138,5 @@ remove the workaround.
 ## Log
 
 _(Add dated entries here as the phases are worked through.)_
+
+- 2026-10-28 (branch `feat/kb-markdown`): knowledge base M1 and M2 built and unit-tested on the pure layer (Markdown storage, timeline logging of every call, digest, hotspots, `kb-fixed`, session hook). No SolidWorks involved, so nothing here is a 2020 finding; the integration tests did not run.

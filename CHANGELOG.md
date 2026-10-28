@@ -15,29 +15,46 @@ All notable changes to this project are documented here. This project follows
   required as before.
 
 ### Knowledge base
-- Every tool call is logged to a local knowledge base (SQLite in WAL mode,
-  `%LOCALAPPDATA%\solidworks-mcp\kb`, or `SWMCP_KB_DIR`): its arguments,
-  result or error, the error's signature, and the server and SOLIDWORKS
-  versions. A logging failure never breaks a call; it shows as `kb_warning`.
-- Cases (one per drawing, by DN number) with their lifecycle; one is open at
-  a time, and it survives a server restart.
-- Failures are grouped by signature: the error's code, else its text with
-  names, numbers and paths replaced. Fillet, full round, chamfer and shell
-  failures carry codes.
-- Knowledge-base tools (optional extra `solidworks-mcp[kb]`): `kb_ingest_drawing`,
-  `kb_view_region`, `kb_describe_case`, `kb_update_spec`, `kb_search`,
-  `kb_get_case`, `kb_abandon_case`, `kb_reembed_pending`. Drawings are
-  rendered with pypdfium2; views and descriptions are embedded with Voyage
-  AI, only once `SWMCP_VOYAGE_OPTED_OUT=1` confirms the account's data
-  opt-out (until then a case is kept as *embedding pending*). Search merges
-  keywords (SQLite FTS5) and vectors by reciprocal rank fusion.
-- Tool cards (`kb_tool_card`, `kb_update_tool_card`): one short card per
-  modelling tool, stored as fields. Claude writes the words; the server adds
-  the 'How to call' line from the tool's docstring and each failure's count,
-  last case and versions, and refuses a card over 8 bullets or 150 words, or
-  one that drops a frequent failure. A failure retires once an upgrade fixed
-  it (not seen since, and 3 successes after). An error result carries the
-  card's line for that failure as `kb_hint`.
+- Every tool call, the `kb_*` tools included, is logged as one row of a Markdown
+  timeline (`fixes\DN17\timeline.md` under `%LOCALAPPDATA%\solidworks-mcp\kb`, or
+  `SWMCP_KB_DIR`; `fixes\_unassigned\` with no case open): arguments, outcome,
+  error signature, run time, result tokens (text at 4 characters per token, images
+  by size) and the pause before the call. A logging failure never breaks a call; it
+  shows as `kb_warning`.
+- The knowledge base is plain Markdown and JSON files, no database and no outside
+  service: `INDEX.md` (one line per case, rebuilt on every change), `tools\<tool>.md`,
+  `cases\DN17\case.md` and `spec.json`, and for fix agents `fixes\HOTSPOTS.md`,
+  `fixes\DN17\digest.md` and `timeline.md`. Every write is atomic. The open case is
+  read from the `status:` in the case headers, so it survives a server restart;
+  abandoning renames the case to `DN17~1` and frees the DN. Templates and design:
+  `Docs/KNOWLEDGE-BASE.md`, `Docs/kb-templates/`.
+- Failures are grouped by signature: the error's code, else its text with names,
+  numbers and paths replaced. Fillet, full round, chamfer and shell failures carry codes.
+- Knowledge-base tools (optional extra `solidworks-mcp[kb]`, now only `pypdfium2` and
+  `Pillow`): `kb_ingest_drawing`, `kb_view_region`, `kb_describe_case` (returns
+  `INDEX.md`), `kb_update_spec` (also records the questions and answers), `kb_search`
+  (case-insensitive text search returning index lines), `kb_get_case`,
+  `kb_abandon_case`, `kb_explain_digest`. Voyage AI, vectors, `kb_reembed_pending` and
+  `include_timeline` are gone.
+- Tool cards (`kb_tool_card`, `kb_update_tool_card`) are files: Claude writes the words;
+  the server adds the 'How to call' line and recounts every number from the timelines,
+  and refuses a card over 6 failure lines, 3 lessons or 150 words, or one that drops a
+  frequent failure. A failure retires once an upgrade fixed it, and a failure of a fixed
+  hotspot issue leaves the card until it is seen again after the fix (*again after
+  H-00n*). An error result carries the card's line as `kb_hint`, or a fixed issue's
+  *If it happens again* note.
+- Session digest (`fixes\DN17\digest.md`, written by `kb_abandon_case`, later by finalise):
+  time (tools running, Claude between calls, waiting on you), top tools, loops, failures
+  by signature, and up to 6 hard parts picked by measurement. With the Claude Code
+  transcript it also gives Claude's own tokens, the context size and the exact waiting
+  time (one count per message id). `kb_explain_digest` records Claude's one-line
+  explanation of each hard part and links it to an issue of `fixes\HOTSPOTS.md`: the
+  measured cost of the last 10 jobs, open issues worst first with every job and session
+  they were seen in, fixed issues, and parked ones over 20.
+- `solidworks-mcp kb-fixed H-00n --commit X --by "..." --note "..."` moves an issue to
+  Fixed, marks each digest hard part linked to it and drops its failures from the tool cards.
+- `scripts/kb_session_hook.py` and `.claude/settings.json`: a Claude Code `PreToolUse`
+  hook on `mcp__solidworks__.*` that records the session id and transcript path for the digest.
 
 ## [0.16.0] — 2026-10-10
 
