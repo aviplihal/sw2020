@@ -14,6 +14,17 @@ from solidworks_mcp.errors import SolidWorksError
 from solidworks_mcp.session import SolidWorksSession
 
 
+@pytest.fixture(autouse=True)
+def _isolated_knowledge_base(tmp_path, monkeypatch):
+    """Every tool call is logged to the knowledge base: point it at a temp folder, never at the real one."""
+    from solidworks_mcp.kb import log
+
+    monkeypatch.setenv("SWMCP_KB_DIR", str(tmp_path / "default-kb"))
+    log.use(None)
+    yield
+    log.use(None)
+
+
 @pytest.fixture(scope="session")
 def sw():
     """A connected SolidWorksSession shared across integration tests.
