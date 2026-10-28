@@ -584,7 +584,13 @@ def _layout(views: list, orientations: dict, size_mm, area_mm, margin_mm: float)
     those the one that keeps the sheet's views most compact (ties: details a
     row below everything, an angled section a new column). Largest scale that
     fits."""
-    fixed = {v["id"] for v in views if v.get("at_mm") is not None and None not in v["at_mm"]}
+    # placed by at_mm: a full one, or a partial one (an aligned section) whose
+    # parent is placed too, down a chain (B-B from A-A from the front)
+    fixed = set()
+    for v in views:
+        at = v.get("at_mm")
+        if at is not None and (None not in at or v.get("from") in fixed):
+            fixed.add(v["id"])
     cells = {}  # view id -> (col, row)
     for view in views:
         if view["id"] in fixed:
@@ -661,6 +667,16 @@ def _layout(views: list, orientations: dict, size_mm, area_mm, margin_mm: float)
             raise SolidWorksError("The views do not fit the sheet even at 1:20.")
         cells[view["id"]] = best[1]
 
+    if not cells:  # every view placed by at_mm: the largest scale at which they all fit there
+        problem = None
+        for n, scale in enumerate(SCALES):
+            centres = {}
+            problem = _place_fixed(views, fixed, centres, cells,
+                                   lambda v: extent(v, scale[0] / scale[1], False), area_mm, scale)
+            if problem is None:
+                return {"scale": scale, "centres_mm": {v["id"]: (round(centres[v["id"]][0], 3),
+                                                                 round(centres[v["id"]][1], 3)) for v in views}}
+        raise SolidWorksError(problem)
     got = fit(cells)
     if got is None:
         raise SolidWorksError("The views do not fit the sheet even at 1:20.")
@@ -719,7 +735,7 @@ def _place_fixed(views, fixed, centres, cells, extent, area_mm, scale) -> str | 
         at = view.get("at_mm")
         if at is None:
             continue
-        if view["id"] in fixed:
+        if None not in at:
             centre = tuple(at)
         else:  # an aligned section: the parent fixes one coordinate
             parent = centres[view["from"]]

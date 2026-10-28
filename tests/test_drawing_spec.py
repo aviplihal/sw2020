@@ -682,3 +682,16 @@ def test_the_layout_report_names_each_problem():
     assert ("text_on_view", "G1") in found and ("off_border", "X1") in found and ("on_title_block", "X1") in found
     assert not [p for p in problems if p.get("item") == "D1" or p.get("items") == ["D1", "D2"]
                 and p["problem"] == "text_overlap"]
+
+
+def test_aligned_sections_follow_a_placed_parent_down_a_chain():
+    from solidworks_mcp.constants import SHEETS
+    views = ds.validate_views([
+        {**FRONT_TOP, "at_mm": [105, 185]},
+        {"kind": "section", "from": "front", "cut": "vertical", "label": "A", "through_mm": [0, 0, 0],
+         "at_mm": [215, None]},
+        {"kind": "section", "from": "section A", "cut": "vertical", "label": "B", "through_mm": [0, 47.625, 0],
+         "at_mm": [300, None]}])
+    out = ds.layout(views, ds.view_orientations("top", "+x"), [344.12, 88.9, 344.12], SHEETS["B"]["area_mm"])
+    assert out["centres_mm"] == {"front": (105, 185), "section A": (215, 185), "section B": (300, 185)}
+    assert out["scale"] == (1, 4), "all placed: the largest scale at which they fit where they are"

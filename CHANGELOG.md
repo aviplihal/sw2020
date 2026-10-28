@@ -65,7 +65,9 @@ All notable changes to this project are documented here. This project follows
 - A section or detail label that would land on the title block goes above
   the view, else beside it, wherever no other view is.
 - Views take `"at_mm": [x, y]` (the centre on the sheet, paper mm); a view on
-  another view or the title block is refused. Free views keep a margin round
+  another view or the title block is refused. An aligned section's `[x, null]`
+  follows a placed parent (down a chain: B-B from A-A from the front); with
+  every view placed, the scale is the largest at which they fit there. Free views keep a margin round
   them for their neighbours' text when that costs no scale.
 - Leader items (notes, callouts, datums, frames, finishes) take `"side"` with
   `"offset_mm"`, or `"text_mm": [dx, dy]` from the attach point; a datum or
