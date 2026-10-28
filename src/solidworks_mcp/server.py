@@ -1081,7 +1081,10 @@ async def make_drawing(path: str | None = None, spec: dict | None = None, views:
       {"kind": "detail", "from": "front", "label": "B", "center_mm": [x, y, z],
        "radius_mm": 4, "scale": "4:1"}
     "from" may name a section, so a section of a section and a detail of a
-    section work. Each view gets an id: its direction, "section A", "detail B"
+    section work. Any view may say where it goes: "at_mm": [x, y], its centre
+    in paper mm from the sheet's lower-left corner ([x, null] / [null, y] for
+    a section cut vertically / horizontally, which stays aligned); a view on
+    another view or off the area above the title block is refused. Each view gets an id: its direction, "section A", "detail B"
     (or "id"). The sheet scale is the largest standard one at which the views
     fit; views not aligned with another (angled sections, details) take the
     free spot that keeps it largest. A detail keeps its own scale (1:1, 1:2).
@@ -1122,6 +1125,15 @@ async def make_drawing(path: str | None = None, spec: dict | None = None, views:
       datum / gdt: {"view", "on": "D13"} on a placed dimension (a feature of
         size) or thread/hole, or {"view", "point_mm": [..]} on a surface's edge.
       finish, thread, hole, local note: {"view", "point_mm": [..]} (leader).
+      Leader text (all of these): "side": above/below/left/right with
+      "offset_mm" (paper mm beyond the view's outline), or "text_mm": [dx, dy]
+      (the text's top-left corner from the attach point; for a symbol "on" a
+      dimension, from that dimension's text, which it otherwise sits under).
+    The result's "layout" (check_drawing's too, measured on the saved file):
+    every text's box on the sheet and leader length (paper mm), each view's
+    box, and "problems": text_overlap, text_on_view, nearer_other_view,
+    off_border, on_title_block, long_leader (> 40 mm), dimensions_close
+    (< 6 mm). Iterate on those numbers.
     Each placed item is named after its spec id inside the drawing, so
     check_drawing can find it. Call check_drawing next.
     """
@@ -1137,7 +1149,8 @@ async def check_drawing(path: str, spec: dict) -> dict:
     value is not the spec's, even if the shown text matches) or unreadable
     (flagged when the old drawing was read). Also lists what is on the drawing
     but not in the spec (the title block is left out). `clean` is true when
-    nothing is missing or different.
+    nothing is missing or different. "layout" measures the saved sheet: text
+    boxes, leader lengths and layout problems (see make_drawing).
     """
     return await _call(_session.check_drawing, path, spec)
 

@@ -321,3 +321,22 @@ by check_drawing, the PDFs rendered and looked at.
   circle at its chamfer, [172.0596, 87.884, 0], in detail D of A-A) found no copy of that edge
   in the view; leaders (notes, datums, frames, finishes) now attach to the cut face's outline
   through the point. Note C1, datum B and a parallelism frame there read back ok.
+
+### 2026-10-28 — Layout tools for the real DTN7 drawing (branch `feat/shop-drawings`)
+
+- **Hole symbols**: 2020's `gtol.sym` ("Hole Symbols") has `SPOT` (counterbore), `SINK`
+  (countersink), `DEPTH`, `DIAM`. `<HOLE-CBORE>` and `<HOLE-CSINK>` are not symbols there and
+  print as literal text (rendered in a PDF); now `⌴` → `<HOLE-SPOT>`, `⌵` → `<HOLE-SINK>`.
+- **Text boxes**: `IAnnotation.GetDisplayData()` gives each text run's position (its
+  baseline's left end), height, angle and width (`GetTextInBoxWidthAtIndex`, the real width).
+  `GetLeaderPointsAtIndex(0)` gives the leader as x, y, z triples, the attach point last.
+  In the drawing still being made, some display data was stale (datum A reported 300 mm off,
+  a frame 20 mm too wide); measured on the reopened saved file it is right, so make_drawing's
+  layout report reads the saved file.
+- **Datum or frame on a dimension**: SolidWorks put datum C on DTN7's slot width at the top of
+  the sheet; its position is now set from the dimension's text (the dimension annotation's
+  position is its text's top centre).
+- A view's `at_mm` that collides at the sheet's scale is refused, not shrunk to a smaller scale
+  (it first dropped the sheet to 1:10).
+- Real DTN7 job on a fresh copy of DTN7.SLDPRT, B sheet: 36/36 ok, the layout report lists the
+  overlaps visible on the rendered sheet (e.g. the A-A label on detail D, T2 on G7).

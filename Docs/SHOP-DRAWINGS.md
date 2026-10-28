@@ -200,6 +200,8 @@ A typed list; the first is the drawing's front view, the rest are placed third a
   which placements refer to. The sheet scale is the largest standard one at which the
   views fit (`drawing_spec.layout`). An isometric view is refused.
 - Without `views`: front, top, right.
+- `"at_mm": [x, y]` on a view puts its centre there (paper mm from the sheet's lower left;
+  `[x, null]` / `[null, y]` for a vertical / horizontal section); a collision is refused.
 - `sheet`: `"A"` (default), `"B"` or `"C"`, landscape, each with SolidWorks' stock ANSI format
   (`a/b/c - landscape.slddrt`). The views use the area inside the border above the title
   block; on B and C the general notes go left of the title block.
@@ -214,6 +216,7 @@ it, or on a silhouette line (the side of a cone or cylinder):
 | dimension | `{"view", "measure": horizontal / vertical / distance / diameter / radius / angle, "points_mm": [two points] or [one point on the circle], "side": above / below / left / right, "offset_mm": 10}`. A circle seen edge-on gives its diameter. A point may be a mark id of the view: `["BC"]` (bolt circle diameter), `["CL_SLOT", "CL_H1"]` (angle between centrelines), `["O", [x,y,z]]` (centre to an edge), `[[x,y,z], "AX"]` (an edge to a hole axis) |
 | datum, gdt | `{"view", "on": "D13"}` on a placed dimension (a feature of size; the symbol sits on its dimension line) or thread/hole, or `{"view", "point_mm"}` on a surface's edge |
 | finish, thread, hole, local note | `{"view", "point_mm"}`: a leader to that edge |
+| text of any leader item | optional `"side"` (above/below/left/right) with `"offset_mm"` beyond the view's outline, or `"text_mm": [dx, dy]` from the attach point (from the dimension's text for a symbol `"on"` one) |
 | general note | none: they stack at the lower left |
 
 Following the usual pattern in `CLAUDE.md`: session method → server wrapper with a precise

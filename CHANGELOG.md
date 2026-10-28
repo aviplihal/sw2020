@@ -64,6 +64,26 @@ All notable changes to this project are documented here. This project follows
   where the part's edge hides behind it.
 - A section or detail label that would land on the title block goes above
   the view, else beside it, wherever no other view is.
+- Views take `"at_mm": [x, y]` (the centre on the sheet, paper mm); a view on
+  another view or the title block is refused. Free views keep a margin round
+  them for their neighbours' text when that costs no scale.
+- Leader items (notes, callouts, datums, frames, finishes) take `"side"` with
+  `"offset_mm"`, or `"text_mm": [dx, dy]` from the attach point; a datum or
+  frame on a dimension follows the dimension's text (it went to the top of
+  the sheet).
+- make_drawing and check_drawing report the layout: each text's box and
+  leader length on the sheet, and the problems found (overlaps, text on a
+  view or nearer another view, off the border or on the title block, long
+  leaders, dimensions stacked too close).
+
+### Fixed (documents)
+- `activate_document("DTN7")` failed ("No open document") with the part's
+  drawing open too, which has the part's title: a shared title now means the
+  part or assembly, and a file path works as well.
+
+### Fixed (hole symbols)
+- Countersink and counterbore symbols printed as `<HOLE-CSINK>` /
+  `<HOLE-CBORE>` on 2020: its symbols are `<HOLE-SINK>` and `<HOLE-SPOT>`.
 - A dimension in a detail view of a section could not select its edges
   (SOLIDWORKS 2020 refuses the part's edge there); the view's own copy of the
   edge is selected instead.

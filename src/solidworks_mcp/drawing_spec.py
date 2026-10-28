@@ -55,7 +55,10 @@ EXACT_DEG = 1e-3  # the same for an angle (0.001 deg: 4 millionths of an inch ov
 
 # Symbols as written in a spec, and SolidWorks' note tokens for them.
 _SYMBOLS = (("Ø", "<MOD-DIAM>"), ("⌀", "<MOD-DIAM>"), ("°", "<MOD-DEG>"), ("±", "<MOD-PM>"),
-            ("⌴", "<HOLE-CBORE>"), ("⌵", "<HOLE-CSINK>"), ("↧", "<HOLE-DEPTH>"))
+            ("⌴", "<HOLE-SPOT>"), ("⌵", "<HOLE-SINK>"), ("↧", "<HOLE-DEPTH>"))
+# SolidWorks 2020's symbol library (gtol.sym, "Hole Symbols") names the
+# counterbore SPOT and the countersink SINK: <HOLE-CBORE> and <HOLE-CSINK> are
+# no symbols there and print as literal text (verified in a PDF).
 
 
 # --- values ---------------------------------------------------------------------
@@ -558,6 +561,20 @@ VIEW_LABEL_MM = 14.0  # from a section's or detail's outline to below its label 
 
 
 def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
+    """Sheet scale and view centres (see _layout). Free views keep a margin
+    round them for their neighbours' text when that costs no scale."""
+    roomy = None
+    try:
+        roomy = _layout(views, orientations, size_mm, area_mm, FREE_VIEW_MARGIN_MM)
+    except SolidWorksError:
+        pass
+    tight = _layout(views, orientations, size_mm, area_mm, 0.0)
+    if roomy is not None and roomy["scale"][0] / roomy["scale"][1] >= tight["scale"][0] / tight["scale"][1]:
+        return roomy
+    return tight
+
+
+def _layout(views: list, orientations: dict, size_mm, area_mm, margin_mm: float) -> dict:
     """Sheet scale and view centres for checked `views` in `area_mm`
     ([x0, y0, x1, y1] on the sheet, mm). Third-angle grid around the front view:
     top above, bottom below, left and right beside; sections cut vertically go
@@ -567,15 +584,21 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
     those the one that keeps the sheet's views most compact (ties: details a
     row below everything, an angled section a new column). Largest scale that
     fits."""
+    fixed = {v["id"] for v in views if v.get("at_mm") is not None and None not in v["at_mm"]}
     cells = {}  # view id -> (col, row)
     for view in views:
+        if view["id"] in fixed:
+            continue
         if view["kind"] == "standard":
             cells[view["id"]] = {"front": (0, 0), "top": (0, -1), "bottom": (0, 1),
                                  "left": (-1, 0), "right": (1, 0)}[view["direction"]]
     extra_col = max([c for c, _ in cells.values()] + [0]) + 1
     axes = plan_axes(views, orientations)
     for view in views:
-        if view["kind"] == "section" and view["cut"] != "angled":
+        if view["kind"] == "section" and view["cut"] != "angled" and view["id"] not in fixed:
+            if view["from"] not in cells:
+                raise SolidWorksError(f"{view['id']} is aligned with {view['from']!r}, which has its own at_mm: give "
+                                      f"{view['id']} an at_mm too ([x, null] or [null, y]).")
             col, row = cells[view["from"]]
             if view["cut"] == "vertical":
                 cells[view["id"]] = (max(extra_col, max(c for c, _ in cells.values()) + 1), row)
@@ -586,18 +609,23 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
                                           "cut vertically, or leave out the top/bottom view.")
                 cells[view["id"]] = (col, free[0])
 
-    def extent(view, scale):
+    def extent(view, scale, margin=True):
         if view["kind"] == "detail":
             side = 2 * view["radius_mm"] * view["scale"][0] / view["scale"][1]
-            return side, side
-        w, h = view_extent(size_mm, axes[view["id"]])
-        return w * scale, h * scale
+            w = h = side
+        else:
+            w, h = (c * scale for c in view_extent(size_mm, axes[view["id"]]))
+        if margin and _is_free(view):  # room around a free view for its neighbours' dimensions and leaders
+            return w + 2 * margin_mm, h + 2 * margin_mm
+        return w, h
 
     x0, y0, x1, y1 = area_mm
 
-    def fit(placed):
+    def fit(placed, start=0):
         """(index in SCALES, cols, rows, width, height) of the largest scale at which `placed` fits."""
         for n, (num, den) in enumerate(SCALES):
+            if n < start:
+                continue
             cols, rows = {}, {}
             for view in views:
                 if view["id"] not in placed:
@@ -613,7 +641,7 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
         return None
 
     for view in views:
-        if view["id"] in cells:
+        if view["id"] in cells or view["id"] in fixed:
             continue
         taken = set(cells.values())
         used_cols = sorted({c for c, _ in taken}) or [0]
@@ -637,7 +665,27 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
     if got is None:
         raise SolidWorksError("The views do not fit the sheet even at 1:20.")
     n, cols, rows, width, height = got
+    centres = _grid_centres(views, cells, cols, rows, width, height, area_mm)
+    # a view placed by at_mm must fit at the scale the other views get: refused, not shrunk
+    problem = _place_fixed(views, fixed, centres, cells, lambda v: extent(v, SCALES[n][0] / SCALES[n][1], False),
+                           area_mm, SCALES[n])
+    if problem is not None:
+        raise SolidWorksError(problem)
     num, den = SCALES[n]
+    return {"scale": (num, den), "centres_mm": {v["id"]: (round(centres[v["id"]][0], 3), round(centres[v["id"]][1], 3))
+                                                for v in views}}
+
+
+FREE_VIEW_MARGIN_MM = 12.0  # paper kept round a free view (angled section, detail) for its neighbours' text
+
+
+def _is_free(view) -> bool:
+    return view["kind"] == "detail" or (view["kind"] == "section" and view["cut"] == "angled")
+
+
+def _grid_centres(views, cells, cols, rows, width, height, area_mm) -> dict:
+    """The centre of each grid view (paper mm), the grid centred in the area."""
+    x0, y0, x1, y1 = area_mm
     left = x0 + (x1 - x0 - width) / 2 + EDGE_MM
     col_x, x = {}, left
     for col in sorted(cols):
@@ -649,12 +697,46 @@ def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
         row_y[row] = y - rows[row] / 2
         y -= rows[row] + VIEW_GAP_MM
     last = max(rows)
-    if all(v["kind"] == "detail" for v in views if cells[v["id"]][1] == last) and len(rows) > 1:
+    if all(v["kind"] == "detail" for v in views if v["id"] in cells and cells[v["id"]][1] == last) and len(rows) > 1:
         # a row of details only sits at the bottom of the area: the dimensions under the views need
         # the room; its labels ('DETAIL D', 'SCALE 1 : 1') go under it, above the title block
         row_y[last] = min(y0 + EDGE_MM + DETAIL_LABEL_MM + rows[last] / 2, row_y[last])
-    return {"scale": (num, den), "centres_mm": {v["id"]: (round(col_x[cells[v["id"]][0]], 3),
-                                                          round(row_y[cells[v["id"]][1]], 3)) for v in views}}
+    return {v["id"]: (col_x[cells[v["id"]][0]], row_y[cells[v["id"]][1]]) for v in views if v["id"] in cells}
+
+
+def _place_fixed(views, fixed, centres, cells, extent, area_mm, scale) -> str | None:
+    """Put the views with at_mm where they say (and a half-given at_mm of an
+    aligned section on its free axis), into `centres`. Returns why a view cannot
+    go there at the sheet's scale (off the area, which ends at the title block,
+    or on another view), or None."""
+    boxes = {}
+    for view in views:
+        if view["id"] in centres and view["id"] not in fixed and view.get("at_mm") is None:
+            w, h = extent(view)
+            c = centres[view["id"]]
+            boxes[view["id"]] = (c[0] - w / 2, c[1] - h / 2, c[0] + w / 2, c[1] + h / 2)
+    for view in views:
+        at = view.get("at_mm")
+        if at is None:
+            continue
+        if view["id"] in fixed:
+            centre = tuple(at)
+        else:  # an aligned section: the parent fixes one coordinate
+            parent = centres[view["from"]]
+            centre = (at[0], parent[1]) if at[1] is None else (parent[0], at[1])
+        centres[view["id"]] = centre
+        w, h = extent(view)
+        box = (centre[0] - w / 2, centre[1] - h / 2, centre[0] + w / 2, centre[1] + h / 2)
+        where = f"{view['id']} at ({centre[0]:g}, {centre[1]:g}) mm, {w:.0f} x {h:.0f} mm at {scale[0]}:{scale[1]},"
+        if not box_is_free(box, area_mm, []):
+            return (f"{where} runs off the drawing area {tuple(area_mm)} (it ends at the border and above the "
+                    f"title block). Move it, or leave out at_mm.")
+        for other, b in boxes.items():
+            if not box_is_free(box, area_mm, [b], gap=0.0):
+                return (f"{where} lands on {other} (centred at ({(b[0] + b[2]) / 2:.0f}, {(b[1] + b[3]) / 2:.0f}) mm, "
+                        f"{b[2] - b[0]:.0f} x {b[3] - b[1]:.0f} mm). Move it, or leave out at_mm.")
+        boxes[view["id"]] = box
+    return None
 
 
 def plan_axes(views, orientations) -> dict:
@@ -816,7 +898,7 @@ def validate_views(views) -> list:
             raise SolidWorksError(f"{where} is not an object.")
         kind = view.get("kind")
         if kind == "standard" and n == 0:
-            allowed = {"kind", "direction", "model_view", "up", "id", "marks"}
+            allowed = {"kind", "direction", "model_view", "up", "id", "marks", "at_mm"}
             if view.get("direction", "front") != "front":
                 raise SolidWorksError("The first view is the drawing's front view (direction \"front\"), the most "
                                       "descriptive one. Choose what it shows with model_view and up.")
@@ -831,7 +913,7 @@ def validate_views(views) -> list:
             entry = {"kind": kind, "direction": "front", "model_view": model_view, "up": up,
                      "id": view.get("id") or "front"}
         elif kind == "standard":
-            allowed = {"kind", "direction", "id", "marks"}
+            allowed = {"kind", "direction", "id", "marks", "at_mm"}
             direction = view.get("direction")
             if direction not in THIRD_ANGLE_SIDE:
                 raise SolidWorksError(f"{where}: a projected view's direction is top, bottom, left or right "
@@ -842,7 +924,7 @@ def validate_views(views) -> list:
             entry = {"kind": kind, "direction": direction, "id": view.get("id") or direction}
         elif kind == "section":
             allowed = {"kind", "from", "cut", "through_mm", "angle_deg", "line_mm", "up", "label", "id", "flip",
-                       "marks"}
+                       "marks", "at_mm"}
             label = view.get("label")
             if not isinstance(label, str) or not re.fullmatch(r"[A-Z]{1,2}", label):
                 raise SolidWorksError(f"{where}: label is the section's letter, such as \"A\".")
@@ -850,7 +932,7 @@ def validate_views(views) -> list:
                      "flip": bool(view.get("flip", False)), "id": view.get("id") or f"section {label}"}
             entry.update(_section_cut(view, where))
         elif kind == "detail":
-            allowed = {"kind", "from", "center_mm", "radius_mm", "scale", "label", "id", "marks"}
+            allowed = {"kind", "from", "center_mm", "radius_mm", "scale", "label", "id", "marks", "at_mm"}
             label = view.get("label")
             if not isinstance(label, str) or not re.fullmatch(r"[A-Z]{1,2}", label):
                 raise SolidWorksError(f"{where}: label is the detail's letter, such as \"B\".")
@@ -873,7 +955,35 @@ def validate_views(views) -> list:
             raise SolidWorksError(f"{where}: the view id {entry['id']!r} is used twice.")
         ids.add(entry["id"])
         entry["marks"] = _validate_marks(view.get("marks"), where, mark_ids)
+        entry["at_mm"] = _view_at(view, entry, where)
         out.append(entry)
+    return out
+
+
+def _view_at(view, entry, where):
+    """A view's "at_mm": [x, y], its centre in paper mm from the sheet's lower
+    left corner, or None (the layout places it). A section cut vertically or
+    horizontally stays aligned with its parent: give null for the coordinate
+    the alignment fixes ([x, null] for a vertical cut, [null, y] for a horizontal one)."""
+    at = view.get("at_mm")
+    if at is None:
+        return None
+    if not isinstance(at, list) or len(at) != 2:
+        raise SolidWorksError(f"{where}: at_mm is the view's centre on the sheet, [x, y] in paper mm.")
+    aligned = {"vertical": 1, "horizontal": 0}.get(entry.get("cut")) if entry["kind"] == "section" else None
+    out = []
+    for i, c in enumerate(at):
+        if c is None and i == aligned:
+            out.append(None)
+            continue
+        if not isinstance(c, (int, float)) or isinstance(c, bool) or not math.isfinite(c):
+            hint = (f" A {entry['cut']} section stays aligned with its parent: give null for "
+                    f"{'y' if aligned else 'x'}." if aligned is not None else "")
+            raise SolidWorksError(f"{where}: at_mm is [x, y] in paper mm (got {at!r}).{hint}")
+        out.append(float(c))
+    if aligned is not None and out[aligned] is not None:
+        raise SolidWorksError(f"{where}: a {entry['cut']} section stays aligned with its parent; at_mm gives only "
+                              f"its {'x' if aligned else 'y'}: {'[x, null]' if aligned else '[null, y]'}.")
     return out
 
 
@@ -1026,7 +1136,7 @@ def validate_placements(placements, checked_spec: dict, view_ids, marks: dict | 
                          points_mm=[p if isinstance(p, str) else _point(p, f"{where}: points_mm[{i}]")
                                     for i, p in enumerate(points)])
         elif kind in ("datum", "gdt"):
-            allowed = {"view", "on", "point_mm"}
+            allowed = {"view", "on", "point_mm", *TEXT_KEYS}
             if ("on" in place) == ("point_mm" in place):
                 raise SolidWorksError(f"{where}: give either on (a placed dimension's spec id, for a feature of "
                                       "size) or point_mm (a model point on the feature's edge).")
@@ -1040,8 +1150,10 @@ def validate_placements(placements, checked_spec: dict, view_ids, marks: dict | 
             else:
                 entry["point_mm"] = _point(place["point_mm"], f"{where}: point_mm")
         elif kind in ("finish", "thread", "hole") or (kind == "note" and view is not None):
-            allowed = {"view", "point_mm"}
+            allowed = {"view", "point_mm", *TEXT_KEYS}
             entry["point_mm"] = _point(place.get("point_mm"), f"{where}: point_mm")
+        if kind in ("finish", "thread", "hole", "datum", "gdt") or (kind == "note" and view is not None):
+            entry.update(_text_place(place, where))
         extra = sorted(set(place) - allowed)
         if extra:
             raise SolidWorksError(f"{where}: unknown field(s) {', '.join(extra)} for a {kind}.")
@@ -1051,6 +1163,107 @@ def validate_placements(placements, checked_spec: dict, view_ids, marks: dict | 
     if missing:
         raise SolidWorksError(f"Every read spec item is placed on the drawing; no placement for "
                               f"{', '.join(missing)}. (Notes without one go in the notes block.)")
+    return out
+
+
+TEXT_KEYS = ("side", "offset_mm", "text_mm")
+
+
+def _text_place(place, where) -> dict:
+    """Where a leader item's text goes: "side" (above/below/left/right of its
+    view, beyond its outline) with "offset_mm" (paper mm from the outline,
+    default 10), or "text_mm": [dx, dy], the text's top-left corner in paper mm
+    from the point its leader attaches to (from the dimension's text, for a
+    datum or frame "on" a dimension). Neither: the tool picks a free line."""
+    text = place.get("text_mm")
+    if text is not None:
+        if "side" in place or "offset_mm" in place:
+            raise SolidWorksError(f"{where}: give text_mm, or side with offset_mm, not both.")
+        if (not isinstance(text, list) or len(text) != 2
+                or not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in text)):
+            raise SolidWorksError(f"{where}: text_mm is [dx, dy] in paper mm from the attach point.")
+        return {"text_mm": [float(c) for c in text]}
+    out = {}
+    if place.get("side") is not None:
+        if place["side"] not in ("above", "below", "left", "right"):
+            raise SolidWorksError(f"{where}: side is above, below, left or right of the view.")
+        out["side"] = place["side"]
+    if place.get("offset_mm") is not None:
+        offset = place["offset_mm"]
+        if not isinstance(offset, (int, float)) or isinstance(offset, bool) or offset < 0:
+            raise SolidWorksError(f"{where}: offset_mm is the paper distance from the view's outline.")
+        if "side" not in out:
+            raise SolidWorksError(f"{where}: offset_mm goes with a side.")
+        out["offset_mm"] = float(offset)
+    if "on" in place and out:
+        raise SolidWorksError(f"{where}: a symbol on a dimension follows its text; move it with text_mm.")
+    return out
+
+
+# --- the layout report ------------------------------------------------------------------
+
+LEADER_MAX_MM = 40.0  # a longer leader on paper is reported
+DIM_STACK_MIN_MM = 6.0  # dimension texts of one view closer than this are reported
+
+
+def text_box(runs) -> tuple | None:
+    """The box (x0, y0, x1, y1) round text runs [(x, y, width, height, angle)]:
+    each run's reference point is its baseline's left end, turned by angle. Pure."""
+    corners = []
+    for x, y, w, h, a in runs:
+        c, s_ = math.cos(a), math.sin(a)
+        corners += [(x + u * c - v * s_, y + u * s_ + v * c) for u, v in ((0, 0), (w, 0), (w, h), (0, h))]
+    if not corners:
+        return None
+    xs, ys = [p[0] for p in corners], [p[1] for p in corners]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _overlap(a, b, gap=0.0) -> bool:
+    return a[0] < b[2] + gap and b[0] < a[2] + gap and a[1] < b[3] + gap and b[1] < a[3] + gap
+
+
+def _box_distance(a, b) -> float:
+    dx = max(0.0, b[0] - a[2], a[0] - b[2])
+    dy = max(0.0, b[1] - a[3], a[1] - b[3])
+    return math.hypot(dx, dy)
+
+
+def layout_problems(items, views, border, title_block, leader_max=LEADER_MAX_MM,
+                    stack_min=DIM_STACK_MIN_MM) -> list:
+    """What is wrong with the layout, measured: items are the placed texts
+    [{"name", "view", "kind", "box", "leader_mm"}] (paper mm), views {name: the
+    box the view draws in}. Problems: text on text, text on a view, text nearer
+    another view than its own, text off the border or on the title block, a
+    long leader, and dimension texts of one view stacked too close. Pure."""
+    out = []
+    boxed = [i for i in items if i.get("box")]
+    for n, a in enumerate(boxed):
+        for b in boxed[n + 1:]:
+            if _overlap(a["box"], b["box"]):
+                out.append({"problem": "text_overlap", "items": [a["name"], b["name"]]})
+            elif (a["kind"] == b["kind"] == "dimension" and a["view"] == b["view"]
+                  and _box_distance(a["box"], b["box"]) < stack_min):
+                out.append({"problem": "dimensions_close", "items": [a["name"], b["name"]],
+                            "gap_mm": round(_box_distance(a["box"], b["box"]), 1)})
+    for a in boxed:
+        box = a["box"]
+        for name, vbox in views.items():
+            if _overlap(box, vbox):
+                out.append({"problem": "text_on_view", "item": a["name"], "on": name, "own": name == a["view"]})
+        own = views.get(a["view"])
+        if own is not None and a["kind"] != "label":
+            mine = _box_distance(box, own)
+            nearest = min(((_box_distance(box, v), k) for k, v in views.items() if k != a["view"]), default=None)
+            if nearest is not None and nearest[0] + 0.5 < mine:
+                out.append({"problem": "nearer_other_view", "item": a["name"], "nearer": nearest[1],
+                            "own_mm": round(mine, 1), "other_mm": round(nearest[0], 1)})
+        if box[0] < border[0] or box[1] < border[1] or box[2] > border[2] or box[3] > border[3]:
+            out.append({"problem": "off_border", "item": a["name"]})
+        if title_block is not None and _overlap(box, title_block):
+            out.append({"problem": "on_title_block", "item": a["name"]})
+        if (a.get("leader_mm") or 0) > leader_max:
+            out.append({"problem": "long_leader", "item": a["name"], "leader_mm": round(a["leader_mm"], 1)})
     return out
 
 

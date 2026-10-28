@@ -397,13 +397,24 @@ class SolidWorksSession:
 
     def activate_document(self, title: str) -> dict:
         """Make an open document current again by its title (list_documents),
-        also a new one that was never saved."""
+        also a new one that was never saved, or by its file path. A drawing
+        has its part's title ('DTN7' for DTN7.SLDDRW too): a title both share
+        means the part (or assembly)."""
         documents = self._open_documents()
-        key = re.sub(r"\.(sldprt|sldasm|slddrw)$", "", str(title).strip(), flags=re.IGNORECASE).lower()
-        matches = [d for d in documents if d.GetTitle() == title] or \
+        text = str(title).strip()
+        by_path = [d for d in documents if d.GetPathName()
+                   and os.path.normcase(d.GetPathName()) == os.path.normcase(os.path.abspath(text))]
+        key = re.sub(r"\.(sldprt|sldasm|slddrw)$", "", text, flags=re.IGNORECASE).lower()
+        matches = by_path or [d for d in documents if d.GetTitle() == title] or \
             [d for d in documents if re.sub(r"\.(sldprt|sldasm|slddrw)$", "", d.GetTitle(), flags=re.IGNORECASE).lower() == key]
+        if len(matches) > 1:
+            models = [d for d in matches if d.GetType() != SW_DOC_DRAWING]
+            matches = models if len(models) == 1 else matches
         if len(matches) != 1:
             listed = ", ".join(d.GetTitle() for d in documents) or "none"
+            if matches:
+                raise SolidWorksError(f"{len(matches)} open documents are titled '{title}': give its file path "
+                                      f"({', '.join(d.GetPathName() or d.GetTitle() for d in matches)}).")
             raise SolidWorksError(f"No open document '{title}' (open: {listed}).")
         self._model = matches[0]
         self._require_model()  # SolidWorks' active document too
@@ -5979,6 +5990,11 @@ class SolidWorksSession:
                 # by path once saved: a drawing has its part's title, so the title is ambiguous
                 self._sw.CloseDoc(doc.GetPathName() or doc.GetTitle())
             self._sw.ActivateDoc3(part.GetTitle(), False, SW_DONT_REBUILD_ACTIVE_DOC, 0)
+        if fmt == "slddrw":
+            # measured on the saved file: in the drawing still being made some texts'
+            # display data was stale (a datum 300 mm off, a frame 20 mm too wide)
+            placed["layout"] = self._saved_layout_report(abs_path)
+            self._sw.ActivateDoc3(part.GetTitle(), False, SW_DONT_REBUILD_ACTIVE_DOC, 0)
         result = {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path),
                   "views": {vid: info["name"] for vid, info in made.items()},
                   "sheet": key, "scale": f"{lay['scale'][0]}:{lay['scale'][1]}", **placed,
@@ -6821,12 +6837,25 @@ class SolidWorksSession:
         raise SolidWorksError(f"{sid}: SolidWorks measured {', '.join(f'{g:g}' for g in got) or 'nothing'} deg "
                               f"between those lines, never the spec's {nominal:g}: check the model or the points.")
 
-    def _annotation_spot(self, target, point_mm, width_mm: float = 12.0, lines: int = 1) -> tuple:
-        """Where a leader's text goes: off the view on the point's side, beyond
-        the dimensions there, on the first line where it overlaps nothing."""
+    def _annotation_spot(self, target, point_mm, width_mm: float = 12.0, lines: int = 1, place=None) -> tuple:
+        """Where a leader's text goes (its top-left corner, m): as the placement
+        says (text_mm from the attach point; side and offset_mm beyond the
+        view's outline), else off the view on the point's side, beyond the
+        dimensions there, on the first line where it overlaps nothing."""
         x, y = self._sheet_point(target, point_mm)
         ox0, oy0, ox1, oy1 = self._outline_mm(target)
-        side = "above" if y >= (oy0 + oy1) / 2 else "below"
+        place = place or {}
+        if place.get("text_mm"):
+            dx, dy = place["text_mm"]
+            return mm_to_m(x + dx), mm_to_m(y + dy)
+        if place.get("side") in ("left", "right"):
+            off = place.get("offset_mm", 10.0)
+            tx = ox1 + off if place["side"] == "right" else ox0 - off - width_mm
+            return mm_to_m(tx), mm_to_m(y + drawing_spec.LINE_MM * lines / 2)
+        if place.get("side") in ("above", "below") and "offset_mm" in place:
+            off, tall = place["offset_mm"], drawing_spec.LINE_MM * lines
+            return mm_to_m(x + 4.0), mm_to_m(oy1 + off + tall if place["side"] == "above" else oy0 - off)
+        side = place.get("side") or ("above" if y >= (oy0 + oy1) / 2 else "below")
         x0, y0, x1, y1 = self._sheet["area_mm"]
         for _ in range(2):  # off the drawing area on this side: the other side
             sx, sy = self._slots.place(target["name"], side, x + 4.0, oy1 if side == "above" else oy0, width_mm, lines)
@@ -6864,14 +6893,18 @@ class SolidWorksSession:
             x += mm_to_m(14.0 * n)
             if not ext.SelectByID2(dim.FullName, "DIMENSION", x, y, 0.0, False, 0, None, 0):
                 raise SolidWorksError(f"{sid}: could not select dimension {place['on']} to attach to.")
-            spot = None
+            # SolidWorks put a symbol on a dimension where it liked (datum C on DTN7's
+            # slot width went to the top of the sheet): under the dimension's text,
+            # or text_mm from it (the text's top-centre is the annotation's position)
+            dx, dy = place.get("text_mm") or (-4.0, -4.0)
+            spot = (x + mm_to_m(dx), y + mm_to_m(dy))
         elif "on" in place:  # a thread or hole callout: on the edge its leader points at
             point = host_points[place["on"]]
             self._select_in(target, self._edge_at(part_edges, point, sid, target), False, sid, point_mm=point)
-            spot = self._annotation_spot(target, point, self._frame_width(item))
+            spot = self._annotation_spot(target, point, self._frame_width(item), 1, place)
         else:
             self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid, point_mm=place["point_mm"])
-            spot = self._annotation_spot(target, place["point_mm"], self._frame_width(item))
+            spot = self._annotation_spot(target, place["point_mm"], self._frame_width(item), 1, place)
         if item["kind"] == "datum":
             made = binding.wrap(doc.InsertDatumTag2(), self._mod.IDatumTag)
             if made is None:
@@ -6902,7 +6935,7 @@ class SolidWorksSession:
     def _place_finish(self, doc, target, item, place, part_edges):
         sid = item["id"]
         self._select_in(target, self._edge_at(part_edges, place["point_mm"], sid, target), False, sid, point_mm=place["point_mm"])
-        x, y = self._annotation_spot(target, place["point_mm"], 12.0, 2)
+        x, y = self._annotation_spot(target, place["point_mm"], 12.0, 2, place)
         ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
         made = binding.wrap(ext.InsertSurfaceFinishSymbol3(SW_SF_SYMBOLS[item["symbol"]], SW_LEADER_STRAIGHT, x, y,
                                                            0.0, 0, SW_ARROW_CLOSED, "", "", "", "", item["value"],
@@ -6918,7 +6951,7 @@ class SolidWorksSession:
         if note is None:
             raise SolidWorksError(f"SolidWorks could not place the note '{text}'.")
         binding.wrap(note.GetAnnotation(), self._mod.IAnnotation).SetPosition2(
-            *self._annotation_spot(target, place["point_mm"], *self._text_size(text)), 0.0)
+            *self._annotation_spot(target, place["point_mm"], *self._text_size(text), place), 0.0)
         return note
 
     # --- the check --------------------------------------------------------------
@@ -6940,11 +6973,12 @@ class SolidWorksSession:
             raise SolidWorksError(f"SolidWorks could not open the drawing {abs_path}.")
         try:
             read = self._read_drawing(doc)
+            layout = self._layout_report(doc)
         finally:
             if not already:
                 # by path: a drawing has its part's title ('DTN6'), so the title is ambiguous
                 sw.CloseDoc(doc.GetPathName() or title)
-        return {**drawing_spec.compare(spec, read), "path": abs_path}
+        return {**drawing_spec.compare(spec, read), "layout": layout, "path": abs_path}
 
     def _read_drawing(self, doc) -> dict:
         """Every dimension, note, datum, frame and finish symbol on the drawing,
@@ -6981,6 +7015,74 @@ class SolidWorksSession:
                                              "value": symbol.GetText(SW_SF_MAX_ROUGHNESS)})
             view = binding.wrap(view.GetNextView(), self._mod.IView)
         return read
+
+    def _saved_layout_report(self, abs_path: str) -> dict:
+        """_layout_report of a saved drawing, opened and closed again."""
+        result = self._sw.OpenDoc6(abs_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
+        doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not open the saved drawing {abs_path} to measure its layout.")
+        try:
+            return self._layout_report(doc)
+        finally:
+            self._sw.CloseDoc(doc.GetPathName() or abs_path)
+
+    def _layout_report(self, doc) -> dict:
+        """Every text on the drawing (dimensions, notes, callouts, datums,
+        frames, finish symbols, view labels) with its box on the sheet and its
+        leader length in paper mm, the box each view draws in, and the problems
+        drawing_spec.layout_problems finds. Measured from SolidWorks' own
+        display data: each text run's position, height and width."""
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        props = list(binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).GetProperties2())
+        size = (round(m_to_mm(props[5]), 1), round(m_to_mm(props[6]), 1))
+        sheet = next((v for v in SHEETS.values() if all(abs(a - b) < 1 for a, b in zip(v["size_mm"], size))), None)
+        border = (12.7, 12.7, size[0] - 12.7, size[1] - 12.7)
+        title_block = sheet["title_block_mm"] if sheet else None
+        items, views = [], {}
+        view = binding.wrap(drawing.GetFirstView(), self._mod.IView)
+        first = True
+        while view is not None:
+            name = None if first else view.GetName2()
+            if not first:
+                x0, y0, x1, y1 = (m_to_mm(c) for c in view.GetOutline())
+                m = min(self._OUTLINE_MARGIN_MM, (x1 - x0) / 4, (y1 - y0) / 4)
+                views[name] = tuple(round(c, 2) for c in (x0 + m, y0 + m, x1 - m, y1 - m))
+            for handle in view.GetAnnotations() or ():
+                annotation = binding.wrap(handle, self._mod.IAnnotation)
+                kind = SW_ANNOTATION_TYPES.get(annotation.GetType())
+                if kind is None or annotation.OwnerType == SW_ANNOTATION_OWNER_TEMPLATE:
+                    continue
+                data = binding.wrap(annotation.GetDisplayData(), self._mod.IDisplayData)
+                runs = []
+                for i in range(data.GetTextCount() if data is not None else 0):
+                    x, y = list(data.GetTextPositionAtIndex(i))[:2]
+                    runs.append((m_to_mm(x), m_to_mm(y), m_to_mm(data.GetTextInBoxWidthAtIndex(i)),
+                                 m_to_mm(data.GetTextHeightAtIndex(i)), data.GetTextAngleAtIndex(i)))
+                box = drawing_spec.text_box(runs)
+                if box is None:
+                    continue
+                if kind == "note" and not (binding.wrap(annotation.GetSpecificAnnotation(),
+                                                        self._mod.INote).GetText() or "").strip():
+                    kind = "label"  # a section's or detail's own label
+                leader = None
+                if kind in ("note", "datum", "gtol", "finish"):
+                    try:
+                        points = list(annotation.GetLeaderPointsAtIndex(0) or ())
+                    except pythoncom.com_error:
+                        points = []
+                    xy = [(m_to_mm(points[i]), m_to_mm(points[i + 1])) for i in range(0, len(points) - 2, 3)]
+                    leader = round(sum(math.dist(a, b) for a, b in zip(xy, xy[1:])), 1) if len(xy) > 1 else None
+                items.append({"name": annotation.GetName(), "view": name, "kind": kind,
+                              "box": tuple(round(c, 2) for c in box), "leader_mm": leader})
+            first = False
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        problems = drawing_spec.layout_problems(items, views, border, title_block)
+        counts = {}
+        for p in problems:
+            counts[p["problem"]] = counts.get(p["problem"], 0) + 1
+        return {"sheet_mm": size, "border_mm": border, "title_block_mm": title_block, "views": views,
+                "items": items, "problems": problems, "problem_counts": counts}
 
     def _read_dimension(self, dd, doc_places: int) -> dict:
         dim = binding.wrap(dd.GetDimension2(0), self._mod.IDimension)

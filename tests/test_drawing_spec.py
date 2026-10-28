@@ -202,7 +202,9 @@ def test_wrong_precision_differs():
 
 def test_note_symbols_round_trip():
     text = "Ø.266 THRU, ⌴ Ø.438 ↧ .25"
-    assert ds.to_sw_text(text) == "<MOD-DIAM>.266 THRU, <HOLE-CBORE> <MOD-DIAM>.438 <HOLE-DEPTH> .25"
+    # 2020's symbol library: counterbore SPOT, countersink SINK (<HOLE-CBORE> printed as text)
+    assert ds.to_sw_text(text) == "<MOD-DIAM>.266 THRU, <HOLE-SPOT> <MOD-DIAM>.438 <HOLE-DEPTH> .25"
+    assert ds.to_sw_text("⌵Ø.94") == "<HOLE-SINK><MOD-DIAM>.94"
     assert ds.from_sw_text(ds.to_sw_text(text)) == text
     assert ds.norm_text("1/32 x 45<MOD-DEG>  CHAM") == ds.norm_text("1/32 X 45° CHAM")
 
@@ -580,7 +582,7 @@ def test_a_b_sheet_takes_dtn7_at_a_quarter():
     out = ds.layout(dtn7_views(), o, size, SHEETS["B"]["area_mm"])
     assert out["scale"] == (1, 4)
     (dx, dy), (ax, ay), (cx, cy) = (out["centres_mm"][k] for k in ("detail D", "section A", "section C"))
-    assert dx == ax and dy < ay, "the detail goes under its section, where there is room, not in a new row"
+    assert dy == cy < ay, "the detail goes in C-C's row, where there is room, not in a new row"
     for key in ("A", "B", "C"):  # every sheet's area lies inside its border (12.7 mm in) and above the title block
         x0, y0, x1, y1 = SHEETS[key]["area_mm"]
         w, h = SHEETS[key]["size_mm"]
@@ -593,3 +595,90 @@ def test_a_label_goes_where_the_area_is_free():
     assert not ds.box_is_free((280, 256, 306, 265), area, taken), "past the top of the area"
     assert not ds.box_is_free((324, 163, 350, 172), area, taken), "on the detail view"
     assert not ds.box_is_free((237, 163, 263, 172), area, taken), "on the front view"
+
+
+# --- view placement, leader text, the layout report ---------------------------------------
+
+def test_hole_symbols_are_the_ones_2020_draws():
+    assert ds.from_sw_text("<HOLE-SINK><MOD-DIAM>.94 <HOLE-SPOT> <HOLE-DEPTH>1.29") == "⌵Ø.94 ⌴ ↧1.29"
+    assert "⌵" not in ds.from_sw_text("<HOLE-CSINK>"), "the token 2020 prints as text must not read back as ⌵"
+
+
+def test_a_view_can_be_put_where_the_agent_says():
+    from solidworks_mcp.constants import SHEETS
+    area, o, size = SHEETS["B"]["area_mm"], ds.view_orientations("top", "+x"), [344.12, 88.9, 344.12]
+    spec = [FRONT_TOP,
+            {"kind": "section", "from": "front", "cut": "vertical", "label": "A", "through_mm": [0, 0, 0]},
+            {"kind": "section", "from": "section A", "cut": "vertical", "label": "B", "through_mm": [0, 47.625, 0]},
+            {"kind": "section", "from": "front", "line_mm": [[132.284, 47.625, -96.11], [-132.284, 47.625, 96.11]],
+             "up": "+y", "label": "C", "at_mm": [320, 100]},
+            {"kind": "detail", "from": "section A", "label": "D", "center_mm": [168, 85, 0], "radius_mm": 8,
+             "scale": "1:1", "at_mm": [150, 100]}]
+    out = ds.layout(ds.validate_views(spec), o, size, area)
+    assert out["centres_mm"]["section C"] == (320, 100) and out["centres_mm"]["detail D"] == (150, 100)
+    assert out["scale"] == (1, 4)
+    spec[3]["at_mm"] = [140, 199]  # on the front view
+    with pytest.raises(SolidWorksError, match="lands on front"):
+        ds.layout(ds.validate_views(spec), o, size, area)
+    spec[3]["at_mm"] = [320, 60]  # on the title block
+    with pytest.raises(SolidWorksError, match="runs off the drawing area"):
+        ds.layout(ds.validate_views(spec), o, size, area)
+
+
+def test_an_aligned_section_takes_only_its_free_coordinate():
+    base = {"kind": "section", "from": "front", "cut": "vertical", "label": "A", "through_mm": [0, 0, 0]}
+    assert ds.validate_views([FRONT_TOP, {**base, "at_mm": [250, None]}])[1]["at_mm"] == [250.0, None]
+    with pytest.raises(SolidWorksError, match=r"\[x, null\]"):
+        ds.validate_views([FRONT_TOP, {**base, "at_mm": [250, 150]}])
+    with pytest.raises(SolidWorksError, match="at_mm is"):
+        ds.validate_views([FRONT_TOP, {**base, "at_mm": "here"}])
+
+
+@pytest.mark.parametrize("place, out", [
+    ({"side": "left", "offset_mm": 12}, {"side": "left", "offset_mm": 12.0}),
+    ({"side": "below"}, {"side": "below"}),
+    ({"text_mm": [25, -10]}, {"text_mm": [25.0, -10.0]}),
+    ({}, {}),
+])
+def test_leader_text_goes_where_the_placement_says(place, out):
+    assert ds._text_place(place, "placement T1") == out
+
+
+@pytest.mark.parametrize("place, message", [
+    ({"side": "up"}, "side is above"),
+    ({"offset_mm": 10}, "goes with a side"),
+    ({"text_mm": [1, 2], "side": "left"}, "not both"),
+    ({"text_mm": [1]}, "text_mm is"),
+    ({"on": "D6", "side": "above"}, "follows its text"),
+])
+def test_bad_leader_text_places_are_refused(place, message):
+    with pytest.raises(SolidWorksError, match=message):
+        ds._text_place(place, "placement X")
+
+
+def test_a_text_box_comes_from_its_runs():
+    # two lines of a note: each run's position is its baseline's left end
+    assert ds.text_box([(10, 20, 30, 3, 0.0), (10, 16, 12, 3, 0.0)]) == (10, 16, 40, 23)
+    x0, y0, x1, y1 = ds.text_box([(10, 20, 8, 3, math.pi / 2)])  # a vertical dimension's text
+    assert (x0, y0, x1, y1) == pytest.approx((7, 20, 10, 28))
+    assert ds.text_box([]) is None
+
+
+def test_the_layout_report_names_each_problem():
+    views = {"front": (50, 100, 150, 200), "section A": (200, 100, 240, 200)}
+    items = [
+        {"name": "D1", "view": "front", "kind": "dimension", "box": (60, 205, 80, 208)},
+        {"name": "D2", "view": "front", "kind": "dimension", "box": (60, 210, 80, 213)},   # 2 mm over D1
+        {"name": "N1", "view": "front", "kind": "note", "box": (70, 206, 90, 209)},        # on D1
+        {"name": "T1", "view": "front", "kind": "note", "box": (180, 150, 199, 160), "leader_mm": 55.0},
+        {"name": "G1", "view": "section A", "kind": "gtol", "box": (230, 150, 250, 155)},  # on its view
+        {"name": "X1", "view": "front", "kind": "note", "box": (400, 30, 430, 35)},        # off, on the title block
+    ]
+    problems = ds.layout_problems(items, views, (12.7, 12.7, 419.1, 266.7), (180.2, 12.7, 419.1, 62.7))
+    found = {(p["problem"], p.get("item") or tuple(p["items"])) for p in problems}
+    assert ("dimensions_close", ("D1", "D2")) in found
+    assert ("text_overlap", ("D1", "N1")) in found
+    assert ("nearer_other_view", "T1") in found and ("long_leader", "T1") in found
+    assert ("text_on_view", "G1") in found and ("off_border", "X1") in found and ("on_title_block", "X1") in found
+    assert not [p for p in problems if p.get("item") == "D1" or p.get("items") == ["D1", "D2"]
+                and p["problem"] == "text_overlap"]

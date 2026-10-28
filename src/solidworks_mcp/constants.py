@@ -272,11 +272,14 @@ SW_DWG_TEMPLATE_CUSTOM = 12
 # starts 180 / 307 mm from the left edge, leaving room for notes beside it.
 SHEETS = {
     "A": {"paper": 0, "format": "a - landscape.slddrt", "size_mm": (279.4, 215.9),
-          "area_mm": (16.0, 64.0, 262.0, 199.0), "notes_box_mm": None},
+          "area_mm": (16.0, 64.0, 262.0, 199.0), "notes_box_mm": None,
+          "title_block_mm": (27.8, 12.7, 266.7, 62.7)},
     "B": {"paper": 2, "format": "b - landscape.slddrt", "size_mm": (431.8, 279.4),
-          "area_mm": (16.0, 64.0, 415.0, 263.0), "notes_box_mm": (16.0, 16.0, 175.0, 60.0)},
+          "area_mm": (16.0, 64.0, 415.0, 263.0), "notes_box_mm": (16.0, 16.0, 175.0, 60.0),
+          "title_block_mm": (180.2, 12.7, 419.1, 62.7)},
     "C": {"paper": 3, "format": "c - landscape.slddrt", "size_mm": (558.8, 431.8),
-          "area_mm": (16.0, 64.0, 542.0, 415.0), "notes_box_mm": (16.0, 16.0, 302.0, 60.0)},
+          "area_mm": (16.0, 64.0, 542.0, 415.0), "notes_box_mm": (16.0, 16.0, 302.0, 60.0),
+          "title_block_mm": (307.2, 12.7, 546.2, 62.7)},
 }
 SHEET_VIEW_AREA_MM = SHEETS["A"]["area_mm"]  # the default sheet's
 SW_PREF_SHEET_FORMAT_FOLDERS = 7            # swUserPreferenceStringValue_e.swFileLocationsSheetFormat
