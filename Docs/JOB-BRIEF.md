@@ -65,8 +65,8 @@ misreading is easy to spot. Put their answers into the spec and store it with
 `kb_update_spec`. Always work from the latest stored spec.
 
 ### 3. Learn from earlier jobs
-`kb_describe_case` returns similar earlier cases. For promising ones, call `kb_get_case`
-(with `include_timeline` to see the steps that worked). Read the tool cards
+`kb_describe_case` returns the case index (one line per earlier case). For lines that look
+like this part, call `kb_get_case`; its *How it was modelled* lists the steps that worked. Read the tool cards
 (`kb_tool_card`) for the tools you plan to use. **Approved cases are trustworthy; cases that
 needed changes show what to avoid.** Earlier cases are guidance, not a template: this
 drawing's numbers win.
@@ -98,9 +98,15 @@ reports as `missing` or `differs`, and make the drawing again until it is clean.
 drawing is the one the user reviews and the shop machines from; nothing regenerates it later.
 
 ### 6. Finalise
-Call `kb_finalise_case`. It checks that `DN17.SLDPRT` and `DN17.SLDDRW` are saved in the
-output folder, records their measurements and closes the case. It does **not** export
-anything yet. It hands you the tool cards for the tools you used, with this job's events:
+Call `kb_finalise_case` with `lessons`: up to 5 short lines a later job should know.
+
+It checks that `DN17.SLDPRT` and `DN17.SLDDRW` are saved in the output folder, records their
+measurements and closes the case. It does **not** export anything yet. It returns the job's
+**hard parts** (`D1`, `D2`, …), picked by the server from the measurements: the longest pauses,
+loops and repeated failures. Call `kb_explain_digest` with one honest line for each: what you
+were doing then and why it took long ("not sure" is allowed). Add at most 2 things the numbers
+couldn't show, and a fix idea where you have one. This goes to the people improving the tools,
+not to later jobs. It hands you the tool cards for the tools you used, with this job's events:
 rewrite each card's wording **short and clean** (counts are added by the server; it refuses
 cards over the cap) and store it with `kb_update_tool_card`.
 

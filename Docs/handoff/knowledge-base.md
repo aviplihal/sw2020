@@ -35,6 +35,21 @@ You are continuing the knowledge-base work on the SolidWorks MCP server (repo gi
 
 **Verified only on macOS:** 121 tests in `tests/test_kb_*.py`, `test_case_paths.py`, `test_units.py`, `test_packaging.py` and `test_server_portability.py`, run with `--noconftest`. **Nothing has run on Windows or against SolidWorks yet**, including the logging hook inside a real tool call, `sw_revision`, and the optional-path change to `save_part` / `make_drawing`. Nothing has been sent to the real Voyage API either (the tests use a fake embedder; the code targets the `voyageai` 0.5 SDK with models `voyage-multimodal-3.5` and `voyage-4`).
 
+## Design change: v2, plain Markdown (2026-10-28)
+The design moved from SQLite + FTS5 + Voyage vectors to **plain Markdown files**, split into
+CAD-facing files and a `fixes\` folder for fix agents. It also gained a per-job **digest** with
+the session linked, a shared **HOTSPOTS.md**, and a `kb-fixed` command. Read `Docs/KNOWLEDGE-BASE.md`
+§2, §7, §10 and §12.3, and the examples in `Docs/kb-templates/`: they are the file formats.
+Before step 3 below, do the two new steps from §14:
+- **M1:** switch storage to Markdown (`store.py`, `search.py`, `cards.py`, `log.py` with duration,
+  tokens and pause per call, and `kb_*` calls logged too); remove `embed.py`, Voyage,
+  `kb_reembed_pending` and `include_timeline`; one round-trip test per file type.
+- **M2:** `kb/digest.py`: digest numbers from a timeline and a Claude Code transcript, hard-part
+  picking, `kb_explain_digest`, the HOTSPOTS update and `solidworks-mcp kb-fixed`; the
+  `PreToolUse` session hook (§10.2). Pure and tested.
+
+Where the text below mentions SQLite, `kb.sqlite`, FTS5, Voyage or `VOYAGE_*` variables, v2 replaces it.
+
 ## Do next, in order
 1. **Setup and baseline**
    - `py -3.11 -m venv .venv` (or newer Python), then `.\.venv\Scripts\python.exe -m pip install -e .[dev]`.

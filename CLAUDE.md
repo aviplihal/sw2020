@@ -14,6 +14,13 @@ converted back and verified on 2020.
 - Everything below "What this is" describes the upstream code as it stands. Statements like "tested on 2026" are
   upstream facts, not this fork's target.
 
+## Job names: DN is real, DTN is test
+
+Real jobs are named **`DN<n>`** (`DN17.pdf` → `DN17.SLDPRT`); the knowledge base only accepts these.
+**`DTN<n>`** (DTN6, DTN7 in `C:\Users\Sandbox\Projects\DTN*`) means *drawing test number*: test runs made
+while the tools were being built. They are full of development errors, so never treat their failures
+as lessons about the finished tools or import them as cases. See [Docs/KNOWLEDGE-BASE.md](Docs/KNOWLEDGE-BASE.md) §13.
+
 ## Language: English only
 
 Everything in this repository is written in **English**: Markdown docs, code comments, docstrings, tool descriptions,
