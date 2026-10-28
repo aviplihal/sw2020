@@ -32,7 +32,9 @@ Changelog = "https://github.com/hjbaard/SolidWorks-MCP/blob/main/CHANGELOG.md"
 Issues = "https://github.com/hjbaard/SolidWorks-MCP/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# the knowledge base: render scans, embed them, search vectors (Docs/KNOWLEDGE-BASE.md)
+kb = ["voyageai>=0.3", "pypdfium2>=4", "numpy>=1.26", "Pillow>=10"]
+dev = ["pytest>=8", "solidworks-mcp[kb]"]
 
 [project.scripts]
 solidworks-mcp = "solidworks_mcp.server:main"
