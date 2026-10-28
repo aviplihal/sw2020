@@ -78,6 +78,25 @@ All notable changes to this project are documented here. This project follows
   view or nearer another view, off the border or on the title block, long
   leaders, dimensions stacked too close).
 
+### Fixed (shop drawing layout, found on the real DTN7 drawing)
+- Dimensions and leaders in a detail of a turned view (a detail of the front
+  view turned 90 degrees, of an upright section) landed up to 250 mm away: a
+  detail's geometry goes stale while the drawing's window is kept still. A
+  drawing with detail views now redraws while it is made (DTN7: 15 s), and a
+  detail maps model points from where its circle was put.
+- Leaders ran to the far end of their edge (95 mm on a circle seen edge-on):
+  in sections they now attach to the cut face's own short edge, and every
+  leader is straight, from the end and line of the text that face its feature.
+- `side` now places a diameter of a circle seen edge-on beside or above the
+  view, and a bolt circle's diameter in that corner.
+- An angle between centrelines took the far text spot first (off the sheet).
+- View labels go just under their view (one line for a section at the sheet's
+  scale), else above or beside it, off other views and labels.
+- The layout uses the part's own extent along each view's axes: a round part
+  seen at a slant was sized from its bounding box, 40 % too wide.
+- The layout report pads frames and datum boxes to their borders and gives
+  each leader's points.
+
 ### Fixed (documents)
 - `activate_document("DTN7")` failed ("No open document") with the part's
   drawing open too, which has the part's title: a shared title now means the

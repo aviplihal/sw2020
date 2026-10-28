@@ -340,3 +340,31 @@ by check_drawing, the PDFs rendered and looked at.
   (it first dropped the sheet to 1:10).
 - Real DTN7 job on a fresh copy of DTN7.SLDPRT, B sheet: 36/36 ok, the layout report lists the
   overlaps visible on the rendered sheet (e.g. the A-A label on detail D, T2 on G7).
+
+### 2026-10-28 (later) — The real DTN7 drawing laid out (B sheet, 1:4)
+
+Done on the real job (`DTN7\make_dtn7_drawing.py B --final`, run by `run_dtn7_drawing.sh`):
+36/36 ok, the layout report clean except texts inside their own view (the angles in the front
+view's flange ring and in B-B, items in the 2:1 details' outline margins). Findings on 2020:
+- **Detail views go stale while the window is still**: their `GetOutline` and
+  `ModelToViewTransform` keep pre-move values (detail D of an upright A-A: 20 mm wide, origin
+  250 mm off), and SolidWorks itself puts a dimension's text from the stale transform (D6 in a
+  detail of the turned front view: 144 mm off). Activating the view does not refresh it. A
+  drawing with details now redraws while made: the 36-item job took 15 s.
+- **Leaders**: a note or frame attached to an edge leads to an end of that edge (a circle seen
+  edge-on: the far end of the line across the view). `IAnnotation.SetLeaderAttachmentPointAtIndex`
+  moves the end live, but the rebuild puts it back and shifts the text by as much. In a section
+  the cut face's own edges (`GetVisibleEntities2`) are short segments: attached to the shortest
+  one through the point, the leader ends there. `SetLeader3(swSTRAIGHT | swAttachLeaderTop /
+  Bottom, swLS_LEFT / RIGHT, ...)` takes; from the top or bottom line the leader starts at an end
+  of that line. `swAttachLeaderNearest` did not change the line.
+- **Outlines** while a drawing is made run about 10 mm past the drawn view (A-A 5.6, C-C 15);
+  saved, about 5. A detail's label landed 38 mm above it on one run and 55 mm below on the next;
+  a section at the sheet's scale has a one-line label.
+- `bridge_probe pdf_of` closed the drawing by title, which is its part's title: it closed the
+  part's window instead, and the part was unloaded with the drawing (the bridge's handle then
+  "disconnected from its clients"). Fixed in `sw_bridge\probes.py` (closes by path).
+- Layout choices (see the job file): A-A through the slot stood upright (`angle_deg` 90, `up`
+  +y) so the diameters step above it with their runout frames under them; B-B cut from A-A and
+  turned like the front view; detail E (2:1) of the key slot carries the slot width, datum C,
+  the slot's position and profile frames, the lead-in and the corner radius.

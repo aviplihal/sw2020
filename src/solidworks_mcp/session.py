@@ -5948,11 +5948,13 @@ class SolidWorksSession:
         self._notes_at = self._notes_corner(notes_height)
         if self._notes_at[1] >= y0 and notes:  # the notes stack in the area: the views go above them
             y0 += notes_height + 4
-        lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0, x1, y1])
+        lay = drawing_spec.layout(plan, orient, box["size_mm"], [x0, y0, x1, y1], self._part_span())
         started = time.perf_counter()
         self._timings = {"items": {}}
         doc, drawing = self._new_shop_drawing()
-        stilled = self._still_drawing(doc)
+        # a detail view's geometry goes stale while the window is still, and SolidWorks
+        # then puts a dimension's text up to 250 mm off (2020): redraw with details
+        stilled = [] if any(v["kind"] == "detail" for v in plan) else self._still_drawing(doc)
         closed = False
         try:
             made = self._place_views(doc, drawing, part_path, plan, orient, lay, box)
@@ -6033,6 +6035,23 @@ class SolidWorksSession:
                 "items": round(sum(v for _, v in items), 1), "save": round(timings.get("save", 0.0), 1),
                 "slowest_items": {k: round(v, 2) for k, v in items[:8]}}
 
+    def _part_span(self):
+        """A function giving the part's size along a model direction (mm), from
+        its bodies' extreme points: a round part seen at a slant is as wide as
+        it is round, where its bounding box says nearly half as much again."""
+        bodies = self._part_bodies()
+        cache = {}
+
+        def span(direction):
+            key = tuple(round(c, 9) for c in direction)
+            if key not in cache:
+                hi = max(sum(c * d for c, d in zip(self._extreme_point(b, direction), direction)) for b in bodies)
+                back = tuple(-c for c in direction)
+                lo = min(sum(c * d for c, d in zip(self._extreme_point(b, back), direction)) for b in bodies)
+                cache[key] = m_to_mm(hi - lo)
+            return cache[key]
+        return span
+
     def _notes_corner(self, notes_height: float) -> tuple:
         """Where the general notes start (their bottom left, mm): in the free box
         left of the title block when they fit there (B, C), else on the area's
@@ -6107,6 +6126,12 @@ class SolidWorksSession:
             # axes are not its parent's; an angled one is turned upright)
             made[view["id"]] = {"name": iview.GetName2(), "view": iview, "orientation": self._view_axes(iview),
                                 "kind": view["kind"], "doc": doc}
+            if view["kind"] == "detail":
+                # where the detail shows the model: its circle's centre at the spot it was
+                # put, at its own scale (its transform and outline go stale, below)
+                made[view["id"]]["detail_map"] = {
+                    "centre_sheet_mm": tuple(lay["centres_mm"][view["id"]]), "centre_model_mm": view["center_mm"],
+                    "scale": view["scale"][0] / view["scale"][1], "radius_mm": view["radius_mm"]}
         props[2:4] = [float(num), float(den)]
         sheet.SetProperties2(*props)
         doc.EditRebuild3()
@@ -6114,10 +6139,10 @@ class SolidWorksSession:
             self._move_view(made[view["id"]]["view"], *(mm_to_m(c) for c in lay["centres_mm"][view["id"]]),
                             {"vertical": "x", "horizontal": "y"}.get(view.get("cut"), "xy"))
             made[view["id"]]["orientation"] = self._view_axes(made[view["id"]]["view"])
-        outlines = [self._outline_mm(info) for info in made.values()]
+        outlines, labels = [self._outline_mm(info) for info in made.values()], []
         for view in plan:
             if view["kind"] != "standard":
-                self._keep_label_on_area(made[view["id"]], outlines)
+                self._keep_label_on_area(made[view["id"]], outlines, labels)
         for view in plan:
             made[view["id"]]["marks"] = self._draw_marks(doc, drawing, made[view["id"]], view["marks"])
         return made
@@ -6127,33 +6152,46 @@ class SolidWorksSession:
     _LABEL_HEIGHT_MM = 9.0
     _LABEL_HALF_WIDTH_MM = 13.0
     _OUTLINE_MARGIN_MM = 5.0
+    _LIVE_OUTLINE_MARGIN_MM = 10.0
 
-    def _keep_label_on_area(self, made_view, outlines) -> None:
-        """Move a view's label when SolidWorks put it below the drawing area (over
+    def _keep_label_on_area(self, made_view, outlines, labels) -> None:
+        """Move a view's label when SolidWorks put it off the drawing area (over
         the title block: a tall section, or a detail on the bottom row, hangs its
-        label some 10 mm under its outline): above the view, else right of it,
-        else left of it, wherever it stays on the area and off the other views."""
+        label some 10 mm under its outline) or onto another view (a detail's label
+        landed 55 mm under it, inside the detail below): just under the view,
+        else above it, right of it, left of it, wherever it stays on the area and
+        off the other views and their labels (`labels`, which grows). Every
+        label goes there: SolidWorks' own place for a detail's label was 38 mm
+        above it on one run and 55 mm below it on the next."""
         x0, y0, x1, y1 = self._outline_mm(made_view)
-        h, w = self._LABEL_HEIGHT_MM, self._LABEL_HALF_WIDTH_MM
+        # while the drawing is made an outline runs some 10 mm past the drawn view
+        # (5 mm once saved): DTN7's A-A then seemed to touch the detail under it
+        h, w, m = self._LABEL_HEIGHT_MM, self._LABEL_HALF_WIDTH_MM, self._LIVE_OUTLINE_MARGIN_MM
+        if made_view["kind"] != "detail":
+            h /= 2  # a section at the sheet's scale shows no scale line: 'SECTION A-A' alone
+        area = self._sheet["area_mm"]
+        # the other views as they are drawn: SolidWorks' outline runs 5-7 mm wider
+        others = [(o[0] + m, o[1] + m, o[2] - m, o[3] - m) for o in outlines if o != [x0, y0, x1, y1]]
+        box = lambda p: (p[0] - w, p[1] - h, p[0] + w, p[1])
+        free = lambda p: drawing_spec.box_is_free(box(p), area, others + labels, gap=0.5)
         for handle in made_view["view"].GetAnnotations() or ():
             annotation = binding.wrap(handle, self._mod.IAnnotation)
             if SW_ANNOTATION_TYPES.get(annotation.GetType()) != "note":
                 continue
             if (binding.wrap(annotation.GetSpecificAnnotation(), self._mod.INote).GetText() or "").strip():
                 continue  # a placed note, not the label (which reads back blank)
-            top = m_to_mm(list(annotation.GetPosition())[1])
-            if top - h >= self._sheet["area_mm"][1]:
-                continue
-            # the label's position is the middle of its top line
-            # above may reach into the outline's own margin: SolidWorks' outline runs
-            # 5-7 mm wider than the drawn view (measured on 2020)
-            above = min(y1 + 2.0 + h, self._sheet["area_mm"][3])
-            spots = ([((x0 + x1) / 2, above)] if above - h >= y1 - self._OUTLINE_MARGIN_MM else []) + [
-                (x1 + 3.0 + w, (y0 + y1) / 2 + h / 2), (x0 - 3.0 - w, (y0 + y1) / 2 + h / 2)]
-            spot = next((p for p in spots if drawing_spec.box_is_free(
-                (p[0] - w, p[1] - h, p[0] + w, p[1]), self._sheet["area_mm"],
-                [o for o in outlines if o != [x0, y0, x1, y1]])), spots[1])
+            # the label's position is the middle of its top line; under the view
+            # and above it may reach into the outline's own margin
+            # just under the outline as it is while the drawing is made: the drawn
+            # view ends 5 to 15 mm inside it (A-A 5.6, B-B 4: no closer)
+            below, above = y0 + 2.0, min(y1 + 2.0 + h, area[3])
+            beside = [(x1 + 3.0 + w, (y0 + y1) / 2 + h / 2), (x0 - 3.0 - w, (y0 + y1) / 2 + h / 2)]
+            top = [((x0 + x1) / 2, above)] if above - h >= y1 - m else []
+            # a detail's dimensions go above it (the slot width on DTN7's detail E): beside first
+            spots = [((x0 + x1) / 2, below)] + (beside + top if made_view["kind"] == "detail" else top + beside)
+            spot = next((p for p in spots if free(p)), spots[0])
             annotation.SetPosition2(mm_to_m(spot[0]), mm_to_m(spot[1]), 0.0)
+            labels.append(box(spot))
 
     def _view_axes(self, iview) -> dict:
         """The model directions a view shows along the sheet's right and up, and
@@ -6185,7 +6223,16 @@ class SolidWorksSession:
 
     def _sheet_point(self, made_view, point_mm) -> tuple:
         """A model point on the sheet (mm) in this view: the view's own origin
-        and scale, with the rotation from its orientation (see the notes above)."""
+        and scale, with the rotation from its orientation (see the notes above).
+        A detail view's own transform is stale while the drawing is kept still
+        (on 2020: 250 mm off for a detail of a turned view, until the drawing is
+        redrawn), so a detail maps from where its circle's centre was put."""
+        mapping = made_view.get("detail_map")
+        if mapping is not None:
+            (cx, cy), centre, k = mapping["centre_sheet_mm"], mapping["centre_model_mm"], mapping["scale"]
+            o = made_view["orientation"]
+            d = [p - c for p, c in zip(point_mm, centre)]
+            return cx + k * drawing_spec._dot(d, o["right"]), cy + k * drawing_spec._dot(d, o["up"])
         iview = made_view["view"]
         data = binding.wrap(iview.ModelToViewTransform, self._mod.IMathTransform).ArrayData
         tx, ty, scale = m_to_mm(data[9]), m_to_mm(data[10]), data[12]
@@ -6205,7 +6252,18 @@ class SolidWorksSession:
         return (data[12] * (x * data[0] + y * data[3]) + data[9],
                 data[12] * (x * data[1] + y * data[4]) + data[10])
 
+    # SolidWorks' outline of a detail runs this far past its circle (measured: 9.6
+    # and 10.4 mm for circles of 20 and 24 mm radius on paper)
+    _DETAIL_OUTLINE_MARGIN_MM = 10.0
+
     def _outline_mm(self, made_view) -> list:
+        """The view's outline on the sheet (mm). A detail's from its circle: its
+        own goes stale while the drawing is kept still (see _sheet_point)."""
+        mapping = made_view.get("detail_map")
+        if mapping is not None:
+            (cx, cy), half = mapping["centre_sheet_mm"], mapping["radius_mm"] * mapping["scale"]
+            half += self._DETAIL_OUTLINE_MARGIN_MM
+            return [cx - half, cy - half, cx + half, cy + half]
         return [m_to_mm(c) for c in made_view["view"].GetOutline()]
 
     def _section_view(self, doc, drawing, parent, view, cx, cy):
@@ -6613,6 +6671,14 @@ class SolidWorksSession:
             if not edge.Select2(append, None):
                 raise SolidWorksError(f"{label}: SolidWorks could not select that silhouette in {target['name']}.")
             return
+        if not lines_only and point_mm is not None and target.get("kind") in ("section", "detail"):
+            # a leader ends at an end of its edge, which SolidWorks picks again on
+            # every rebuild (setting the end does not hold): a circle seen edge-on
+            # runs across the whole section, the cut face's own edge through the
+            # point is short (DTN7's chamfer note ran 95 mm to the far side)
+            cut = self._cut_face_edge_at(target, point_mm, shortest=True)
+            if cut is not None and target["view"].SelectEntity(cut, append):
+                return
         if target["view"].SelectEntity(edge, append):
             return
         # a detail view refuses the part's edge on 2020 but takes its own copy of it
@@ -6653,16 +6719,30 @@ class SolidWorksSession:
                 return other
         return None
 
-    def _cut_face_edge_at(self, target, point_mm):
+    def _cut_face_edge_at(self, target, point_mm, shortest: bool = False):
         """An edge of a section's cut face (the hatched outline) through a model
-        point, or None. They are no edges of the part; the view lists them with
-        its own edges (GetVisibleEntities2), in model space on the cutting plane
-        (verified on 2020: lines and arcs, also in a detail of a section)."""
+        point, or None (with `shortest`: the shortest such edge). They are no
+        edges of the part; the view lists them with its own edges
+        (GetVisibleEntities2), in model space on the cutting plane (verified on
+        2020: lines and arcs, also in a detail of a section)."""
+        found = []
         for handle in target["view"].GetVisibleEntities2(None, SW_VIEW_ENTITY_EDGE) or ():
             edge = binding.wrap(handle, self._mod.IEdge)
             if self._off_edge_mm(edge, point_mm) <= self._EDGE_ON_TOLERANCE_MM:
-                return edge
-        return None
+                if not shortest:
+                    return edge
+                found.append(edge)
+        if not found:
+            return None
+        return min(found, key=self._edge_length_mm)
+
+    def _edge_length_mm(self, edge) -> float:
+        """An edge's length (mm), as list_edges measures it; inf if it has no curve."""
+        curve = binding.wrap(edge.GetCurve(), self._mod.ICurve)
+        params = edge.GetCurveParams2()  # start xyz, end xyz (m), start and end parameter
+        if curve is None or not params:
+            return math.inf
+        return m_to_mm(curve.GetLength3(params[6], params[7]))
 
     def _off_edge_mm(self, edge, point_mm) -> float:
         near = edge.GetClosestPointOn(*(mm_to_m(c) for c in point_mm))
@@ -6707,7 +6787,8 @@ class SolidWorksSession:
             cx, cy = self._sheet_point(target, edges[0].mark["center_mm"])
             tx, ty = self._sheet_point(target, edges[0].mark["through_mm"])
             r = math.hypot(tx - cx, ty - cy)
-            spot = (cx + (r + off) * 0.7071, cy + (r + off) * 0.7071)
+            sx, sy = (-1 if side == "left" else 1), (-1 if side == "below" else 1)  # the corner it goes out to
+            spot = (cx + sx * (r + off) * 0.7071, cy + sy * (r + off) * 0.7071)
             add = doc.AddDiameterDimension2 if measure == "diameter" else doc.AddRadialDimension2
             handle = add(mm_to_m(spot[0]), mm_to_m(spot[1]), 0.0)
         elif measure in ("diameter", "radius"):
@@ -6723,11 +6804,15 @@ class SolidWorksSession:
                 spot = (cx + off, cy + off)
                 handle = add(mm_to_m(cx + off), mm_to_m(cy + off), 0.0)
             elif along < 0.001 and measure == "diameter":  # seen edge-on, as a line
-                if abs(drawing_spec._dot(axis, target["orientation"]["right"])) > 0.999:
-                    handle = doc.AddVerticalDimension2(mm_to_m(mx), mm_to_m(above), 0.0)
-                else:
-                    spot = (beside, my)
-                    handle = doc.AddHorizontalDimension2(mm_to_m(beside), mm_to_m(my), 0.0)
+                # the text goes where `side` says: beyond the view's end, along the
+                # line (a shaft's diameters, the default), or across it, beside the view
+                cx, cy = self._sheet_point(target, centre)
+                if abs(drawing_spec._dot(axis, target["orientation"]["right"])) > 0.999:  # a vertical line
+                    spot = (beside, cy) if side in ("left", "right") else (mx, above)
+                    handle = doc.AddVerticalDimension2(*(mm_to_m(c) for c in spot), 0.0)
+                else:  # a horizontal line
+                    spot = (cx, above) if side in ("above", "below") else (beside, my)
+                    handle = doc.AddHorizontalDimension2(*(mm_to_m(c) for c in spot), 0.0)
             else:
                 raise SolidWorksError(f"{sid}: the circle is seen at a slant in {target['name']}; dimension its "
                                       "diameter in a view that shows it face-on or edge-on.")
@@ -6814,7 +6899,8 @@ class SolidWorksSession:
         got = []
         spots = drawing_spec.angle_text_spots(*lines, nominal, off + 8.0, centre)
         if all(isinstance(e, _Mark) for e in edges):  # centrelines out from a centre: text between them
-            spots.sort(key=lambda q: -drawing_spec.ray_side(q, *lines))
+            # between the rays first, then the nearer spot before the one twice as far out
+            spots.sort(key=lambda q: (drawing_spec.ray_side(q, *lines) <= 0, math.dist(q, lines[0][0])))
         for spot in spots:
             doc.ClearSelection2(True)
             for n, edge in enumerate(edges):
@@ -6928,8 +7014,10 @@ class SolidWorksSession:
                 raise SolidWorksError(f"SolidWorks did not take the values of frame {sid}.")
             if item.get("projected") and not made.SetPTZHeight2(1, 1, True, item["projected"].strip()):
                 raise SolidWorksError(f"SolidWorks did not take the projected tolerance zone of frame {sid}.")
-        if spot is not None:
-            binding.wrap(made.GetAnnotation(), self._mod.IAnnotation).SetPosition2(*spot, 0.0)
+        binding.wrap(made.GetAnnotation(), self._mod.IAnnotation).SetPosition2(*spot, 0.0)
+        if "on" not in place or place["on"] not in hosts:
+            self._leader_side(made, target, host_points[place["on"]] if "on" in place else place["point_mm"],
+                              spot, self._frame_width(item))
         return made
 
     def _place_finish(self, doc, target, item, place, part_edges):
@@ -6950,9 +7038,33 @@ class SolidWorksSession:
         note = binding.wrap(doc.InsertNote(drawing_spec.to_sw_text(text)), self._mod.INote)
         if note is None:
             raise SolidWorksError(f"SolidWorks could not place the note '{text}'.")
-        binding.wrap(note.GetAnnotation(), self._mod.IAnnotation).SetPosition2(
-            *self._annotation_spot(target, place["point_mm"], *self._text_size(text), place), 0.0)
+        width, lines = self._text_size(text)
+        spot = self._annotation_spot(target, place["point_mm"], width, lines, place)
+        binding.wrap(note.GetAnnotation(), self._mod.IAnnotation).SetPosition2(*spot, 0.0)
+        self._leader_side(note, target, place["point_mm"], spot, width, lines, text)
         return note
+
+    _LEADER_LEFT, _LEADER_RIGHT = 1, 2  # swLeaderSide_e
+    # swLeaderStyle_e: swSTRAIGHT, with swAttachLeaderTop / Center / Bottom
+    _LEADER_STRAIGHT, _LEADER_TOP, _LEADER_CENTER, _LEADER_BOTTOM = 1, 256, 512, 1024
+
+    def _leader_side(self, made, target, point_mm, spot, width_mm: float, lines: int = 1,
+                     text: str | None = None) -> None:
+        """A straight leader from the end and line of the text that face its
+        attach point. SolidWorks' own drew from the last line with a 6 mm
+        shoulder (DTN7's bore callout, the bore above it: 61 mm of leader;
+        swAttachLeaderNearest did not change the line). From the top or the
+        bottom line the leader starts at an end of that line."""
+        x, y = self._sheet_point(target, point_mm)
+        top = m_to_mm(spot[1])
+        line = (self._LEADER_TOP if y > top else
+                self._LEADER_BOTTOM if y < top - drawing_spec.LINE_MM * lines else self._LEADER_CENTER)
+        rows = (text or "").splitlines()
+        if rows and line != self._LEADER_CENTER:
+            width_mm = self._text_size(rows[0] if line == self._LEADER_TOP else rows[-1])[0]
+        side = self._LEADER_RIGHT if x > m_to_mm(spot[0]) + width_mm / 2 else self._LEADER_LEFT
+        annotation = binding.wrap(made.GetAnnotation(), self._mod.IAnnotation)
+        annotation.SetLeader3(self._LEADER_STRAIGHT | line, side, True, False, False, False)
 
     # --- the check --------------------------------------------------------------
 
@@ -7016,6 +7128,8 @@ class SolidWorksSession:
             view = binding.wrap(view.GetNextView(), self._mod.IView)
         return read
 
+    _FRAME_PAD_MM = 1.5  # a frame's or datum box's border past its text (measured on DTN7's sheet)
+
     def _saved_layout_report(self, abs_path: str) -> dict:
         """_layout_report of a saved drawing, opened and closed again."""
         result = self._sw.OpenDoc6(abs_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
@@ -7062,6 +7176,9 @@ class SolidWorksSession:
                 box = drawing_spec.text_box(runs)
                 if box is None:
                     continue
+                if kind in ("gtol", "datum"):  # the frame's border runs past its text
+                    pad = self._FRAME_PAD_MM
+                    box = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
                 if kind == "note" and not (binding.wrap(annotation.GetSpecificAnnotation(),
                                                         self._mod.INote).GetText() or "").strip():
                     kind = "label"  # a section's or detail's own label
@@ -7073,8 +7190,12 @@ class SolidWorksSession:
                         points = []
                     xy = [(m_to_mm(points[i]), m_to_mm(points[i + 1])) for i in range(0, len(points) - 2, 3)]
                     leader = round(sum(math.dist(a, b) for a, b in zip(xy, xy[1:])), 1) if len(xy) > 1 else None
+                    path = [tuple(round(c, 2) for c in q) for q in xy]
+                else:
+                    path = []
                 items.append({"name": annotation.GetName(), "view": name, "kind": kind,
-                              "box": tuple(round(c, 2) for c in box), "leader_mm": leader})
+                              "box": tuple(round(c, 2) for c in box), "leader_mm": leader,
+                              **({"leader_end_mm": path[-1], "leader_points_mm": path} if path else {})})
             first = False
             view = binding.wrap(view.GetNextView(), self._mod.IView)
         problems = drawing_spec.layout_problems(items, views, border, title_block)

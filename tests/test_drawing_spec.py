@@ -695,3 +695,17 @@ def test_aligned_sections_follow_a_placed_parent_down_a_chain():
     out = ds.layout(views, ds.view_orientations("top", "+x"), [344.12, 88.9, 344.12], SHEETS["B"]["area_mm"])
     assert out["centres_mm"] == {"front": (105, 185), "section A": (215, 185), "section B": (300, 185)}
     assert out["scale"] == (1, 4), "all placed: the largest scale at which they fit where they are"
+
+
+def test_a_round_part_seen_at_a_slant_is_as_wide_as_it_is_round():
+    """C-C of DTN7 (Ø13.548 x 3.5) looks across a slant: its bounding box says 120 mm
+    at 1:4, the part itself 86, which is what lets the B sheet keep 1:4."""
+    from solidworks_mcp.constants import SHEETS
+    views = ds.validate_views([FRONT_TOP, {"kind": "section", "from": "front", "line_mm": [
+        [132.284, 47.625, -96.11], [-132.284, 47.625, 96.11]], "up": "+y", "label": "C", "at_mm": [357, 228]}])
+    o, size = ds.view_orientations("top", "+x"), [344.12, 88.9, 344.12]
+    round_span = lambda d: 344.12 if abs(d[1]) < 1e-9 else 88.9 if abs(abs(d[1]) - 1) < 1e-9 else 400.0
+    views[0]["at_mm"] = [90, 195]
+    # the box: 120 mm wide, off the area at 1:4 where it is pinned, so 1:5
+    assert ds.layout(views, o, size, SHEETS["B"]["area_mm"])["scale"] == (1, 5)
+    assert ds.layout(views, o, size, SHEETS["B"]["area_mm"], round_span)["scale"] == (1, 4)

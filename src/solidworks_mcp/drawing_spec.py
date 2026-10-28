@@ -560,21 +560,24 @@ DETAIL_LABEL_MM = 14.0  # a detail view's two-line label under it (SolidWorks' o
 VIEW_LABEL_MM = 14.0  # from a section's or detail's outline to below its label ('SECTION A-A', 'SCALE 1 : 4')
 
 
-def layout(views: list, orientations: dict, size_mm, area_mm) -> dict:
+def layout(views: list, orientations: dict, size_mm, area_mm, span=None) -> dict:
     """Sheet scale and view centres (see _layout). Free views keep a margin
-    round them for their neighbours' text when that costs no scale."""
+    round them for their neighbours' text when that costs no scale. `span`,
+    if given, measures the part along a model direction (mm at 1:1): a view's
+    size from it, else from the bounding box (too big for a round part seen
+    at a slant)."""
     roomy = None
     try:
-        roomy = _layout(views, orientations, size_mm, area_mm, FREE_VIEW_MARGIN_MM)
+        roomy = _layout(views, orientations, size_mm, area_mm, FREE_VIEW_MARGIN_MM, span)
     except SolidWorksError:
         pass
-    tight = _layout(views, orientations, size_mm, area_mm, 0.0)
+    tight = _layout(views, orientations, size_mm, area_mm, 0.0, span)
     if roomy is not None and roomy["scale"][0] / roomy["scale"][1] >= tight["scale"][0] / tight["scale"][1]:
         return roomy
     return tight
 
 
-def _layout(views: list, orientations: dict, size_mm, area_mm, margin_mm: float) -> dict:
+def _layout(views: list, orientations: dict, size_mm, area_mm, margin_mm: float, span=None) -> dict:
     """Sheet scale and view centres for checked `views` in `area_mm`
     ([x0, y0, x1, y1] on the sheet, mm). Third-angle grid around the front view:
     top above, bottom below, left and right beside; sections cut vertically go
@@ -620,7 +623,9 @@ def _layout(views: list, orientations: dict, size_mm, area_mm, margin_mm: float)
             side = 2 * view["radius_mm"] * view["scale"][0] / view["scale"][1]
             w = h = side
         else:
-            w, h = (c * scale for c in view_extent(size_mm, axes[view["id"]]))
+            a = axes[view["id"]]
+            w, h = ((span(a["right"]), span(a["up"])) if span else view_extent(size_mm, a))
+            w, h = w * scale, h * scale
         if margin and _is_free(view):  # room around a free view for its neighbours' dimensions and leaders
             return w + 2 * margin_mm, h + 2 * margin_mm
         return w, h
