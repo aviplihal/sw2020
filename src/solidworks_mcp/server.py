@@ -9,6 +9,7 @@ rather than getting an opaque stack trace.
 import argparse
 import inspect
 import sys
+from datetime import datetime
 from importlib import resources
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -94,6 +95,7 @@ async def _call(fn, *args, **kwargs) -> dict:
     With SolidWorks there, every call is logged to the knowledge base (_log_call).
     """
     error = None
+    started = datetime.now()
     try:
         if _worker is None:
             result = fn(*args, **kwargs)
@@ -111,23 +113,28 @@ async def _call(fn, *args, **kwargs) -> dict:
         error, result = exc, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     if _worker is None:  # not Windows: nothing ran, nothing to learn from
         return result
-    return _log_call(fn, args, kwargs, result, error)
+    return _log_call(fn, args, kwargs, result, error, started, datetime.now())
 
 
-def _log_call(fn, args, kwargs, result: dict, error: BaseException | None) -> dict:
+def _log_call(fn, args, kwargs, result: dict, error: BaseException | None, started=None, ended=None) -> dict:
     """Record the call in the knowledge base. A logging failure never breaks the
     call, but it is reported in the result, not swallowed."""
     try:
-        try:
-            arguments = dict(inspect.signature(fn).bind(*args, **kwargs).arguments)
-        except (TypeError, ValueError):
-            arguments = {"args": list(args), **kwargs}
+        arguments = dict(inspect.signature(fn).bind(*args, **kwargs).arguments)
+    except (TypeError, ValueError):
+        arguments = {"args": list(args), **kwargs}
+    return _record(fn.__name__, arguments, result, error, started, ended)
+
+
+def _record(tool: str, arguments: dict, result: dict, error: BaseException | None, started=None, ended=None,
+            images=(), job_hint: str | None = None) -> dict:
+    try:
         revision = getattr(_session, "sw_revision", None)
-        event = kb_log.record_call(fn.__name__, arguments, result, error,
-                                   revision if isinstance(revision, str) else None)
-        if event is not None and not event["ok"]:
+        event = kb_log.record_call(tool, arguments, result, error, revision if isinstance(revision, str) else None,
+                                   started=started, ended=ended, images=images, job_hint=job_hint)
+        if not event["ok"] and not tool.startswith("kb_"):
             # the tool card's line for this failure, so the agent need not remember to look
-            hint = kb_log.hint_for(fn.__name__, event["signature"])
+            hint = kb_log.hint_for(tool, event["signature"])
             if hint:
                 result = {**result, "kb_hint": hint}
     except Exception as exc:  # noqa: BLE001 - the tool's own result matters more
@@ -1263,9 +1270,9 @@ async def get_assembly_bounding_box() -> dict:
 
 # --- knowledge base (Docs/KNOWLEDGE-BASE.md) ------------------------------------
 #
-# Earlier drawing jobs (cases, by DN number) and what was learned from them. These
-# tools are not logged as modelling events. They need the optional extra
-# solidworks-mcp[kb]; without it they fail loud.
+# Earlier drawing jobs (cases, by DN number) and what was learned from them, stored as
+# plain Markdown files. These tools are logged like every other call. They need the
+# optional extra solidworks-mcp[kb] for the drawing images; without it they fail loud.
 
 _kb_tools = None
 
@@ -1275,11 +1282,10 @@ def _kb():
     if _kb_tools is None:
         try:
             from .kb.cases import CaseTools
-            from .kb.embed import VoyageEmbedder
         except ImportError as exc:
             raise SolidWorksError(f'The knowledge base needs the optional extra: pip install "solidworks-mcp[kb]" '
                                   f"({exc}).") from None
-        _kb_tools = CaseTools(kb_log.knowledge_base(), VoyageEmbedder(), _tool_reference)
+        _kb_tools = CaseTools(kb_log.knowledge_base(), _tool_reference)
     return _kb_tools
 
 
@@ -1295,19 +1301,35 @@ def _tool_reference(name: str) -> str | None:
     return f"{name}({params}): {first}"
 
 
+def _open_job() -> str | None:
+    """The case open right now (for a call that closes it); never raises."""
+    try:
+        case = kb_log.knowledge_base().open_case()
+    except Exception:  # noqa: BLE001 - logging must not break the call
+        return None
+    return case["dn"] if case else None
+
+
 async def _kb_call(method: str, *args):
     """Run a knowledge-base tool; errors come back as {ok: false, error}, like every tool's.
-    A (result, JPEG) pair goes out as the result's text plus the image."""
+    A (result, JPEG) pair goes out as the result's text plus the image. The call is logged."""
+    started, job_hint, error, jpeg = datetime.now(), _open_job(), None, None
     try:
         result = getattr(_kb(), method)(*args)
+        if isinstance(result, tuple):
+            result, jpeg = result
     except SolidWorksError as exc:
-        return {"ok": False, "error": str(exc)}
+        error, result = exc, {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001 - never leak a stack trace to the agent
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    if isinstance(result, tuple):
-        data, jpeg = result
-        return [data, Image(data=jpeg, format="jpeg")]
-    return result
+        error, result = exc, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    try:
+        names = list(inspect.signature(getattr(type(_kb_tools), method)).parameters)[1:]
+        arguments = dict(zip(names, args))
+    except Exception:  # noqa: BLE001 - the arguments are only for the log
+        arguments = {"args": list(args)}
+    result = _record(f"kb_{method}", arguments, result, error, started, datetime.now(),
+                     images=(jpeg,) if jpeg else (), job_hint=job_hint)
+    return [result, Image(data=jpeg, format="jpeg")] if jpeg else result
 
 
 @mcp.tool()
@@ -1338,7 +1360,7 @@ async def kb_view_region(box: list, dn: str | None = None):
 @mcp.tool()
 async def kb_describe_case(view_boxes: dict, description: str, part_type: str, drawing_spec: dict,
                            handwritten_dn: str | None = None, dn_confirmed: bool = False) -> dict:
-    """Record what the open case's drawing shows, and find earlier cases like it.
+    """Record what the open case's drawing shows, and return the index of all cases.
 
     view_boxes: {'front': [x0, y0, x1, y1], 'top': [...], 'side': [...]} in page
     fractions, rough is fine (a margin is added); only the views the drawing has.
@@ -1350,43 +1372,59 @@ async def kb_describe_case(view_boxes: dict, description: str, part_type: str, d
     from the file name the call is refused: ask the user, and only once they
     confirm the file name, call again with dn_confirmed=True.
     Returns the unreadable items (ask the user about each, then kb_update_spec)
-    and the most similar earlier cases.
+    and INDEX.md: one line per earlier case. Pick the ones that look like this
+    part and read them with kb_get_case.
     """
     return await _kb_call("describe_case", view_boxes, description, part_type, drawing_spec, handwritten_dn,
                           dn_confirmed)
 
 
 @mcp.tool()
-async def kb_update_spec(drawing_spec: dict) -> dict:
+async def kb_update_spec(drawing_spec: dict, answers: dict | None = None) -> dict:
     """Replace the open case's drawing spec whole, e.g. with the user's answers to
-    the unreadable items. The earlier version is kept. Always work from the latest."""
-    return await _kb_call("update_spec", drawing_spec)
+    the unreadable items. Always work from the latest. answers: {"the question you
+    asked": "the user's answer"}, listed in the case's Questions asked."""
+    return await _kb_call("update_spec", drawing_spec, answers)
 
 
 @mcp.tool()
-async def kb_search(text: str | None = None, like_case: str | None = None, filters: dict | None = None,
-                    limit: int = 5) -> dict:
-    """Find earlier cases: like a text ('turned shaft with a keyway'), like another
-    case ('DN12'), or both. One line per case, best first: approved cases above
-    those that needed changes, above unreviewed ones (flagged with a caution).
-    filters: {'status': [...], 'part_type': 'bracket', 'size_mm': [min, max] of the
-    largest side}. kb_get_case gives one case in full."""
-    return await _kb_call("search", text, like_case, filters, limit)
+async def kb_search(text: str | None = None, part_type: str | None = None, status: str | None = None,
+                    limit: int = 10) -> dict:
+    """Find earlier cases by plain text: every word of `text` must appear in the
+    case (description, spec callouts, notes, lessons, review notes), e.g. '1/2-13 UNC'.
+    part_type: 'bracket'. status: 'approved', 'changes_needed' or 'unreviewed'.
+    Returns the index lines of the matches, approved ones first. kb_get_case gives one case in full."""
+    return await _kb_call("search", text, part_type, status, limit)
 
 
 @mcp.tool()
-async def kb_get_case(dn: str, include_timeline: bool = False) -> dict:
-    """One case in full: description, spec, review and its files (the scan; once
-    approved, the STEP and drawing PDF). include_timeline=True adds every modelling
-    step in order, with arguments, errors and measurements: how it was built."""
-    return await _kb_call("get_case", dn, include_timeline)
+async def kb_get_case(dn: str) -> dict:
+    """One case in full (its case.md): description, drawing, questions asked, how it was
+    modelled, result, review, lessons; and its files (the scan, the spec; once approved,
+    the STEP and drawing PDF)."""
+    return await _kb_call("get_case", dn)
 
 
 @mcp.tool()
 async def kb_abandon_case(reason: str) -> dict:
     """Close the open case without finishing it (wrong file, job dropped); tell the
-    user first. It is kept as DN17~1 and the DN can be ingested again."""
+    user first. It is kept as DN17~1 and the DN can be ingested again. Writes the
+    case's digest and returns its hard parts: explain them with kb_explain_digest."""
     return await _kb_call("abandon_case", reason)
+
+
+@mcp.tool()
+async def kb_explain_digest(explanations: dict, not_measured: list | None = None, fix_ideas: dict | None = None,
+                            dn: str | None = None) -> dict:
+    """Explain the hard parts of a closed case's digest, while the job is in your context.
+
+    explanations: {"D1": "what you were doing and why it took long", ...}: one line per
+    hard part, 40 words at most, every part needs one ("not sure" is allowed). not_measured:
+    up to 2 things the numbers cannot show (say, a recipe missing from the guide). fix_ideas:
+    {"D1": "what to change in the tools"}, 60 words at most. Write "same as H-005" when a part
+    is a problem HOTSPOTS.md already lists. dn: default is the latest digest waiting for this.
+    """
+    return await _kb_call("explain_digest", explanations, not_measured, fix_ideas, dn)
 
 
 @mcp.tool()
@@ -1401,27 +1439,42 @@ async def kb_tool_card(tool: str) -> dict:
 async def kb_update_tool_card(tool: str, card: dict) -> dict:
     """Store a tool's tidied card, as finalise asks: card = {"use_when": "...",
     "dont_use_when": "...", "failures": {signature: "cause -> fix"}, "lessons": [...]}.
-    One line per text; at most 8 bullets and about 150 words, or it is refused.
-    Every failure in must_cover needs a text (give several the same text when they
-    share a cause). Counts and versions are added by the server; do not write them."""
+    One line per text; at most 6 failure lines, 3 lessons and 150 words, or it is refused.
+    Every failure in must_cover needs a text. Counts and versions are added by the
+    server; do not write them."""
     return await _kb_call("update_tool_card", tool, card)
 
 
-@mcp.tool()
-async def kb_reembed_pending() -> dict:
-    """Embed the cases marked 'embedding pending' (Voyage unreachable, or the
-    opt-out not yet confirmed with SWMCP_VOYAGE_OPTED_OUT=1)."""
-    return await _kb_call("reembed_pending")
+def _kb_fixed(args) -> int:
+    """solidworks-mcp kb-fixed H-00n --commit X --by "..." --note "...": mark an issue fixed."""
+    from .kb import hotspots
+
+    try:
+        done = hotspots.kb_fixed(kb_log.knowledge_base(), args.issue, args.commit, args.by, args.note, _tool_reference)
+    except SolidWorksError as exc:
+        print(f"kb-fixed: {exc}", file=sys.stderr)
+        return 1
+    print(f"{done['issue']} fixed {done['fixed']}. Digests marked: {', '.join(done['digests_marked']) or 'none'}. "
+          f"Tool cards rebuilt: {', '.join(done['cards_rebuilt']) or 'none'}.")
+    return 0
 
 
 def main() -> None:
-    """Entry point: run the MCP server over stdio, or the selftest with --selftest."""
+    """Entry point: run the MCP server over stdio, the selftest with --selftest, or `kb-fixed`."""
     parser = argparse.ArgumentParser(prog="solidworks-mcp", description="MCP server for a running SolidWorks.")
     parser.add_argument("--selftest", action="store_true",
                         help="check this machine's SolidWorks with a few small parts, print a report and exit")
-    selftest = parser.parse_args().selftest
+    fixed = parser.add_subparsers(dest="command").add_parser(
+        "kb-fixed", help="mark a HOTSPOTS.md issue fixed and keep the digests and tool cards in step")
+    fixed.add_argument("issue", help="the issue, e.g. H-002")
+    fixed.add_argument("--commit", required=True, help="the commit that fixed it")
+    fixed.add_argument("--by", required=True, help="what fixed it, in a few words")
+    fixed.add_argument("--note", required=True, help="what a CAD agent should do if it happens again anyway")
+    args = parser.parse_args()
     try:
-        if not selftest:
+        if args.command == "kb-fixed":
+            sys.exit(_kb_fixed(args))
+        elif not args.selftest:
             mcp.run()
         elif _worker is None:
             sys.exit(run_selftest(_session))
