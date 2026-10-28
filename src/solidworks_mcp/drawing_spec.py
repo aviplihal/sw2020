@@ -1251,12 +1251,15 @@ def _box_distance(a, b) -> float:
 
 
 def layout_problems(items, views, border, title_block, leader_max=LEADER_MAX_MM,
-                    stack_min=DIM_STACK_MIN_MM) -> list:
+                    stack_min=DIM_STACK_MIN_MM, round_views=()) -> list:
     """What is wrong with the layout, measured: items are the placed texts
     [{"name", "view", "kind", "box", "leader_mm"}] (paper mm), views {name: the
-    box the view draws in}. Problems: text on text, text on a view, text nearer
-    another view than its own, text off the border or on the title block, a
-    long leader, and dimension texts of one view stacked too close. Pure."""
+    box the view draws in}; round_views: the detail views, which draw a circle
+    in their box (a text in its corners is not on it). Problems: text on text,
+    text on a view, text nearer another view than its own, text off the border
+    or on the title block, a long leader, and dimension texts of one view
+    stacked too close. Pure."""
+    from .drawing_layout import DETAIL_SLACK_MM, on_detail_circle
     out = []
     boxed = [i for i in items if i.get("box")]
     for n, a in enumerate(boxed):
@@ -1270,7 +1273,7 @@ def layout_problems(items, views, border, title_block, leader_max=LEADER_MAX_MM,
     for a in boxed:
         box = a["box"]
         for name, vbox in views.items():
-            if _overlap(box, vbox):
+            if (on_detail_circle(box, vbox, -DETAIL_SLACK_MM) if name in round_views else _overlap(box, vbox)):
                 out.append({"problem": "text_on_view", "item": a["name"], "on": name, "own": name == a["view"]})
         own = views.get(a["view"])
         if own is not None and a["kind"] != "label":

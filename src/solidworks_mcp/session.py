@@ -7148,9 +7148,10 @@ class SolidWorksSession:
         drawing_spec.layout_problems finds. Measured from SolidWorks' own
         display data: each text run's position, height and width. `handles`,
         when given, is filled with {(view, name): (annotation, its display
-        lines' start points in mm, swDimensionType_e or None, the dimension a
-        datum or frame is attached to)} and `view_handles` with {view name: IView}
-        for arrange_drawing."""
+        lines (x1, y1, x2, y2) in mm, swDimensionType_e or None, the dimension a
+        datum or frame is attached to, its display arcs (start, end and centre
+        x, y) in mm)} and `view_handles` with {view name: IView} for
+        arrange_drawing."""
         drawing = binding.wrap(doc, self._mod.IDrawingDoc)
         props = list(binding.wrap(drawing.GetCurrentSheet(), self._mod.ISheet).GetProperties2())
         size = (round(m_to_mm(props[5]), 1), round(m_to_mm(props[6]), 1))
@@ -7200,21 +7201,27 @@ class SolidWorksSession:
                 else:
                     path = []
                 if handles is not None:
-                    starts = []
+                    lines, arcs = [], []
                     for i in range(data.GetLineCount() if kind == "dimension" else 0):
                         line = list(data.GetLineAtIndex3(i) or ())
-                        if len(line) >= 6:  # [colour, type, style, weight, x1, y1, ...] in m (2020)
-                            starts.append((m_to_mm(line[4]), m_to_mm(line[5])))
+                        if len(line) >= 9:  # [colour, type, style, weight, x1, y1, z1, x2, y2, ...] in m (2020)
+                            lines.append(tuple(m_to_mm(line[k]) for k in (4, 5, 7, 8)))
+                    for i in range(data.GetArcCount() if kind == "dimension" else 0):
+                        arc = list(data.GetArcAtIndex2(i) or ())
+                        if len(arc) >= 13:  # [..., start xyz, end xyz, centre xyz, ...] in m (2020)
+                            arcs.append(tuple(m_to_mm(arc[k]) for k in (4, 5, 7, 8, 10, 11)))
                     dim_type = (binding.wrap(annotation.GetSpecificAnnotation(), self._mod.IDisplayDimension).Type2
                                 if kind == "dimension" else None)
-                    handles[(name, annotation.GetName())] = (annotation, starts, dim_type,
-                                                             self._attached_dimension(annotation) if kind in ("datum", "gtol") else None)
+                    handles[(name, annotation.GetName())] = (annotation, lines, dim_type,
+                                                             self._attached_dimension(annotation) if kind in ("datum", "gtol") else None,
+                                                             arcs)
                 items.append({"name": annotation.GetName(), "view": name, "kind": kind,
                               "box": tuple(round(c, 2) for c in box), "leader_mm": leader,
                               **({"leader_end_mm": path[-1], "leader_points_mm": path} if path else {})})
             first = False
             view = binding.wrap(view.GetNextView(), self._mod.IView)
-        problems = drawing_spec.layout_problems(items, views, border, title_block)
+        problems = drawing_spec.layout_problems(items, views, border, title_block,
+                                                round_views=self._detail_view_names(drawing))
         counts = {}
         for p in problems:
             counts[p["problem"]] = counts.get(p["problem"], 0) + 1
@@ -7300,6 +7307,16 @@ class SolidWorksSession:
         if stuck:
             out["views_not_moved"] = stuck
         return out
+
+    def _detail_view_names(self, drawing) -> list:
+        """The names of a drawing's detail views (they draw a circle)."""
+        names = []
+        view = binding.wrap(drawing.GetFirstView(), self._mod.IView)
+        while view is not None:
+            if view.Type == self._DETAIL_VIEW:
+                names.append(view.GetName2())
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        return names
 
     _MARK_LETTER_MM = 2.5  # half the box kept round a cutting line's or detail circle's letter
     _DETAIL_VIEW = 3  # swDrawingViewTypes_e.swDrawingDetailView (IView.Type)
@@ -7394,7 +7411,7 @@ class SolidWorksSession:
             handle = (it["view"], it["name"])
             if handle not in handles:
                 continue
-            _, starts, dim_type, host = handles[handle]
+            _, lines, dim_type, host, arcs = handles[handle]
             end = it.get("leader_end_mm")
             prefix = f"{it['view'] or 'sheet'}/"
             entry = {"key": prefix + it["name"], "handle": handle, "kind": it["kind"],
@@ -7403,7 +7420,7 @@ class SolidWorksSession:
             if it["kind"] in ("datum", "gtol") and host != "":  # SolidWorks says what it is attached to
                 entry["host"] = prefix + host if host else None
             if it["kind"] == "dimension":
-                entry["dimension"] = drawing_layout.classify_dimension(dim_type, starts)
+                entry["dimension"] = drawing_layout.classify_dimension(dim_type, lines, arcs)
             items.append(entry)
         return items
 

@@ -1164,9 +1164,13 @@ async def arrange_drawing(path: str, mode: str = "full", move_views: bool = True
     Every text gets a box and a label of what it belongs to (its view, the
     dimension it rides on, the point its leader touches). Linear dimensions
     step out from their view in tiers (smaller span nearest, 10 mm to the
-    first, 6 mm between texts) and keep their side; a datum or frame on a
-    dimension moves with it; leader notes, callouts, datums and frames stay
-    near the point their leader touches; view labels stay under their view.
+    first, 6 mm between texts) and keep their side; angles slide out from
+    their vertex until they are off the view (SolidWorks redraws the arc and
+    extension lines); a datum or frame on a dimension moves with it; leader
+    notes, callouts, datums, frames and radii/diameters on a leader stay near
+    the point their leader touches; view labels stay under their view. No
+    text is left on a view, its own included (a detail view's circle counts,
+    not its corners).
     mode "full" lays every text out afresh but prefers its current spot;
     "fix" moves only the texts that clash. With move_views (full mode only)
     views first move apart where their texts need room; projected views stay

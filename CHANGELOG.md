@@ -91,6 +91,15 @@ All notable changes to this project are documented here. This project follows
   crowded test sheet: 11 layout problems to 0 in either mode, under 5 s;
   DTN7, hand-laid: no overlaps left, only texts inside their own view, 6 s
   in `fix`, 27 s in `full`).
+- arrange_drawing leaves no text on a view, its own included: an angle
+  slides out from its vertex along its own direction (SolidWorks redraws its
+  arc and runs the extension lines out to it), a radius or diameter drawn
+  with a leader moves like a leader note, and any other dimension may go up
+  to 60 mm to leave a view. In `fix` every text keeps its spot until it has
+  been placed, so a text leaving its view cannot take a neighbour's.
+  The layout check treats a detail view as the circle it draws: texts in
+  its corners are not on it. DTN7: 7 texts on views to 0 in both modes
+  (fix 7.9 s, full 29 s).
 
 ### Fixed (shop drawing layout, found on the real DTN7 drawing)
 - Dimensions and leaders in a detail of a turned view (a detail of the front

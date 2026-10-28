@@ -11,8 +11,11 @@ Each object is classified by how it may move:
   tiers beside its view (first tier FIRST_TIER_MM out, then one text height
   plus STACK_GAP_MM per tier, the smaller span nearest the view), on the side
   that keeps it short and the sides of the view balanced;
-- an angle or a radius/diameter of a circle seen face-on moves a little round
-  where it is (its text must stay between its lines or near its arrow);
+- an angle slides out along its own direction from its vertex, off the view
+  (SolidWorks draws its arc through the text and runs the extension lines
+  out to it), a few degrees either way while it stays inside the angle;
+- a radius or diameter drawn with a leader is a leader item; any other
+  dimension that is not linear moves a little round where it is;
 - a leader item (note, hole or thread callout, datum, frame with a leader,
   finish symbol) goes anywhere off the views near the point its leader
   touches, keeping the leader short;
@@ -65,6 +68,7 @@ SIDE_CHANGE_COST = 15.0  # a dimension moved to the other side of its view ("ful
 # A line counts as running through a text only this far inside its box: chained
 # dimensions share an extension line that grazes the neighbour's text.
 LINE_GRAZE_MM = -0.6
+CUT_LINE_CLEAR_MM = 1.0  # DTN7's 18 degrees sat against A-A's cutting line
 
 MODES = ("full", "fix")
 
@@ -154,6 +158,15 @@ def _length_inside(p, q, b) -> float:
     return length * inside / n
 
 
+def on_detail_circle(box, vbox, gap=0.0) -> bool:
+    """Whether a text box comes within gap of the circle a detail view draws
+    in its box vbox (radius DETAIL_MARGIN_MM inside the box's half width)."""
+    if not overlap(box, vbox, max(gap, 0.0)):
+        return False
+    cx, cy = _centre(vbox)
+    return math.dist(nearest_point(box, (cx, cy)), (cx, cy)) < min(_w(vbox), _h(vbox)) / 2 - DETAIL_MARGIN_MM + gap
+
+
 def segments_cross(a, b, c, d) -> bool:
     """Whether segments a-b and c-d cross (touching ends do not count)."""
     def orient(p, q, r):
@@ -165,15 +178,29 @@ def segments_cross(a, b, c, d) -> bool:
 
 # --- classifying ----------------------------------------------------------------------
 
-def classify_dimension(dim_type: int | None, lines) -> dict:
+def classify_dimension(dim_type: int | None, lines, arcs=()) -> dict:
     """How a dimension moves, from SolidWorks' dimension type (swDimensionType_e:
-    2 linear, 3 angular, 5 radial, 6 diameter) and the start points of its
-    display lines [(x, y)] (paper mm). A linear dimension's last two lines are
-    the halves of its dimension line, starting at its ends, and the two before
-    them its extension lines, starting at the part (measured on 2020; a basic
-    dimension's box adds four lines in front). Returns {"move": "linear",
-    "axis": "x"|"y" (the direction it slides), "span": (lo, hi) along the
-    dimension line, "witness": [(x, y), (x, y)]} or {"move": "near"}."""
+    2 linear, 3 angular, 5 radial, 6 diameter), its display lines [(x1, y1, x2,
+    y2)] (or only their start points [(x, y)]) and its display arcs [(start x,
+    y, end x, y, centre x, y)], in paper mm. Measured on 2020: a linear
+    dimension's last two lines are the halves of its dimension line, starting
+    at its ends, and the two before them its extension lines, starting at the
+    part; a basic dimension's box adds four lines in front. An angle's arcs
+    (split round its text) are centred on its vertex. A radius or diameter
+    drawn with a leader ends in a level shoulder to its text, the leader
+    before it starting on the arc. Returns {"move": "linear", "axis": "x"|"y"
+    (the direction it slides), "span": (lo, hi) along the dimension line,
+    "witness": [(x, y), (x, y)]}, {"move": "angle", "vertex": (x, y),
+    "sides": (a0, a1) its sides' directions in radians, counter-clockwise
+    from a0 to a1, "lines_from": the radius its extension lines start at, or
+    None}, {"move": "leader", "anchor": (x, y)} or {"move": "near"}."""
+    if dim_type == 3 and arcs:
+        return _classify_angle(lines, arcs)
+    if dim_type in (5, 6) and lines and len(lines) >= 2 and len(lines[-1]) >= 4:
+        shoulder, leader = lines[-1], lines[-2]
+        if abs(shoulder[1] - shoulder[3]) < 0.05 and abs(leader[1] - leader[3]) > 0.05:
+            return {"move": "leader", "anchor": (leader[0], leader[1])}
+    lines = [tuple(l[:2]) for l in lines or ()]
     if dim_type == 2 and lines and len(lines) >= 4:
         (ax, ay), (bx, by) = lines[-2], lines[-1]
         w1, w2 = lines[-4], lines[-3]
@@ -184,6 +211,29 @@ def classify_dimension(dim_type: int | None, lines) -> dict:
             return {"move": "linear", "axis": "x", "span": (min(ay, by), max(ay, by)), "line_at": ax,
                     "witness": [tuple(w1), tuple(w2)]}
     return {"move": "near"}
+
+
+def _classify_angle(lines, arcs) -> dict:
+    """An angle's vertex, its sides (the ends of its arcs furthest apart round
+    the vertex) and where its extension lines start."""
+    vx, vy = arcs[0][4], arcs[0][5]
+    ends = [(a[0], a[1]) for a in arcs] + [(a[2], a[3]) for a in arcs]
+    angles = sorted(math.atan2(y - vy, x - vx) % (2 * math.pi) for x, y in ends)
+    # the sides bound the arc: the widest empty gap between ends lies outside the angle
+    gaps = [((angles[(i + 1) % len(angles)] - a) % (2 * math.pi), i) for i, a in enumerate(angles)]
+    _, i = max(gaps)
+    a0, a1 = angles[(i + 1) % len(angles)], angles[i]
+    # extension lines run out along a side, from near the part
+    starts = []
+    for l in lines or ():
+        if len(l) < 4:
+            continue
+        r0, r1 = math.dist(l[:2], (vx, vy)), math.dist(l[2:4], (vx, vy))
+        t = math.atan2(l[3] - l[1], l[2] - l[0]) % (2 * math.pi)
+        for side in (a0, a1):
+            if min(abs(t - side), 2 * math.pi - abs(t - side)) < math.radians(2) and r1 > r0:
+                starts.append(r0)
+    return {"move": "angle", "vertex": (vx, vy), "sides": (a0, a1), "lines_from": min(starts) if starts else None}
 
 
 def shared_leader_hosts(items, reach_mm: float = 1.5) -> dict:
@@ -232,8 +282,10 @@ class _Sheet:
         self.lines = [(tuple(p), tuple(q), "fixed") for p, q in obstacles.get("lines", ())]  # (p, q, key)
         self.load = {}  # (view, side): count
         self.dim_texts = []  # (box, key, view): each placed dimension's own text
+        self.reserved = []  # (box, key, kind, view): spots kept for texts not placed yet
 
-    def faults(self, unit, box, lines, allow_own_view: bool, why: list | None = None) -> float:
+    def faults(self, unit, box, lines, allow_own_view: bool, why: list | None = None,
+               reserved: bool = True) -> float:
         """How badly a spot breaks the rules: 0 is free; off the area or on the
         title block counts 100, on a view 20 (inside the VIEW_GAP_MM round it
         but off the view itself NEAR_VIEW_FAULT), nearer another view 10, each
@@ -279,9 +331,7 @@ class _Sheet:
                 if _length_inside(p, q, own) > LEADER_IN_VIEW_MM:
                     fault(0.5, "leader across its view")
         hit = set()
-        for other, key, kind, view in self.boxes:
-            if key == unit["key"]:
-                continue  # its own reserved spot (a view label's)
+        for other, key, kind, view in self.boxes + (self.reserved if reserved else []):
             if overlap(box, other, TEXT_GAP_MM):
                 hit.add(key)
                 if overlap(box, other):
@@ -303,6 +353,8 @@ class _Sheet:
         for p, q, key in self.lines:
             if segment_hits_box(p, q, box, LINE_GRAZE_MM):
                 fault(1, f"line of {key} through it")
+            elif key == "fixed" and segment_hits_box(p, q, box, CUT_LINE_CLEAR_MM):
+                fault(NEAR_TEXT_FAULT, "close to a cutting line")  # tight, like a text close to a text
             if key == "fixed":
                 continue  # extension lines and leaders cross cutting lines as a matter of course
             for c, d in lines:
@@ -313,13 +365,9 @@ class _Sheet:
     def _on_view(self, name, vbox, box, gap) -> bool:
         """Whether a text box comes within gap of a view: a detail view draws a
         circle, so the corners of its box are free."""
-        if not overlap(box, vbox, gap):
-            return False
-        if name not in self.round_views:
-            return True
-        cx, cy = _centre(vbox)
-        near = nearest_point(box, (cx, cy))
-        return math.dist(near, (cx, cy)) < min(_w(vbox), _h(vbox)) / 2 - DETAIL_MARGIN_MM + gap
+        if name in self.round_views:
+            return on_detail_circle(box, vbox, gap)
+        return overlap(box, vbox, gap)
 
     @staticmethod
     def _text_at(unit, box):
@@ -388,8 +436,37 @@ def _linear_candidates(unit, vbox):
     return out
 
 
-def _near_candidates(unit, radius_mm: float = 18.0, step_mm: float = 3.0):
-    """Spots round where an angle or a face-on radius is now, nearest first."""
+def _angle_candidates(unit, step_mm: float = 1.5, reach_mm: float = 90.0):
+    """(cost, text centre, lines, None) for an angle: its text slid out from
+    the vertex along its direction now, or turned up to ANGLE_TURN_DEG either
+    way while it stays inside the angle; lines are its sides from where they
+    start (or the arc now) out to the arc, and the arc in a few chords."""
+    (vx, vy), (a0, a1) = unit["vertex"], unit["sides"]
+    cx, cy = _centre(unit["text_box"])
+    r_now = math.hypot(cx - vx, cy - vy)
+    t_now = math.atan2(cy - vy, cx - vx)
+    span = (a1 - a0) % (2 * math.pi)
+    start = unit.get("lines_from") or r_now
+    out = []
+    for turn in (0, -5, 5, -10, 10):
+        t = t_now + math.radians(turn)
+        # the text must stay well between the sides (an angle with its arrows
+        # outside draws its arc past them: DTN7's 18 degrees spans 39)
+        if turn and not (0.2 * span < (t - a0) % (2 * math.pi) < 0.8 * span):
+            continue
+        for k in range(int(reach_mm / step_mm) + 1):
+            r = r_now + k * step_mm
+            arc = [(vx + r * math.cos(a0 + span * j / 8), vy + r * math.sin(a0 + span * j / 8)) for j in range(9)]
+            lines = [((vx + min(start, r) * math.cos(a), vy + min(start, r) * math.sin(a)),
+                      (vx + (r + 1.5) * math.cos(a), vy + (r + 1.5) * math.sin(a))) for a in (a0, a0 + span)]
+            lines += list(zip(arc, arc[1:]))
+            out.append((0.3 * (r - r_now) + abs(turn) / 5.0, (vx + r * math.cos(t), vy + r * math.sin(t)), lines, None))
+    return out
+
+
+def _near_candidates(unit, radius_mm: float = 60.0, step_mm: float = 3.0):
+    """Spots round where a dimension that is neither linear, an angle nor on a
+    leader is now, nearest first: far enough to leave the middle of a view."""
     cx, cy = _centre(unit["box"])
     out = []
     n = int(radius_mm // step_mm)
@@ -501,24 +578,24 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
         units.append(unit)
 
     def order(u):
-        rank = {"linear": 0, "near": 1, "leader": 2, "label": 3}[u["move"]]
+        rank = {"linear": 0, "angle": 1, "near": 1, "leader": 2, "label": 3}[u["move"]]
         span = (u["span"][1] - u["span"][0]) if u["move"] == "linear" else 0.0
         return rank, u["view"] or "", span, u["key"]
 
-    # a view label's spot is kept for it while the other texts are placed (it
-    # goes last): a leader item would otherwise take the spot under its view
-    # and push the label off (DTN7)
+    # a text's spot is kept for it until it is placed: a view label's always
+    # (it goes last: a leader item would otherwise take the spot under its
+    # view), in "fix" every text's (an angle moved off its view took the spot
+    # of the hole callout beside it, which went 99 mm; DTN7)
     for unit in units:
-        if unit["move"] == "label":
-            sheet.boxes.append((tuple(unit["box"]), unit["key"], "label", unit["view"]))
+        if unit["move"] == "label" or mode == "fix":
+            sheet.reserved.append((tuple(unit["box"]), unit["key"], unit["kind"], unit["view"]))
     moves, unplaced, crossed, sides = {}, [], [], {}
     for unit in sorted(units, key=order):
-        if unit["move"] == "label":
-            sheet.boxes = [b for b in sheet.boxes if b[1] != unit["key"]]
+        sheet.reserved = [b for b in sheet.reserved if b[1] != unit["key"]]  # its own spot is free to it
         vbox = views.get(unit["view"])
         box = unit["box"]
         c0 = _centre(box)
-        allow_own = unit["move"] == "near" and overlap(box, vbox or (0, 0, 0, 0))
+        allow_own = False  # no text stays on a view, its own included
         if unit["move"] == "label":
             half = _w(box) / 2 + TEXT_GAP_MM
             mid = (vbox[0] + vbox[2]) / 2
@@ -541,6 +618,10 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
                 length = math.dist(end, unit["anchor"])
                 cost = length + (40.0 if length > LEADER_MAX_MM else 0.0)
                 cands.append((cost, centre, [(unit["anchor"], end)], None))
+        elif unit["move"] == "angle":
+            tc = _centre(unit["text_box"])  # the text slides; its riders keep their offset
+            off = (c0[0] - tc[0], c0[1] - tc[1])
+            cands = [(c, (p[0] + off[0], p[1] + off[1]), l, s) for c, p, l, s in _angle_candidates(unit)]
         else:
             cands = _near_candidates(unit)
         if mode == "fix":
@@ -567,10 +648,12 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
         cands.sort(key=lambda c: (c[0], math.dist(c[1], c0)))
         best = None  # (faults, rank, box, lines, side): the first free spot, else the least bad
         if mode == "fix":  # it stays unless it runs into something (a line crossing is no reason)
+            # judged without the spots kept for texts still to come: they keep
+            # others out, they do not push a text that is fine off its own spot
             cost, centre, lines, side = cands[0]
-            bad = sheet.faults(unit, _at(box, *centre), lines, allow_own)
+            bad = sheet.faults(unit, _at(box, *centre), lines, allow_own, reserved=False)
             if bad < 1:
-                cands = cands[:1]
+                best, cands = (bad, 0, _at(box, *centre), lines, side), []
         for rank, (cost, centre, lines, side) in enumerate(cands):
             b = _at(box, *centre)
             bad = sheet.faults(unit, b, lines, allow_own)

@@ -208,3 +208,63 @@ def test_views_with_room_do_not_move_without_balance():
 def test_envelopes_hold_a_views_texts():
     objects = [{"belongs_to": {"view": "V"}, "box": [90, 120, 99, 125]}]
     assert dl.envelopes(VIEW, objects) == {"V": (90, 100.0, 200.0, 180.0)}
+
+
+# --- angles, radii and detail circles (DTN7's texts on their views) ----------------
+
+
+def test_an_angle_is_classified_by_its_arcs():
+    # DTN7's 10X 36 degrees: arcs split round the text, centred on the vertex
+    arcs = [(123.17, 219.1, 117.23, 225.65, 90.0, 195.0), (110.18, 230.69, 102.67, 233.99, 90.0, 195.0)]
+    lines = [(120.44, 217.11, 125.74, 220.97), (101.63, 230.78, 103.65, 237.01)]
+    a = dl.classify_dimension(3, lines, arcs)
+    assert a["move"] == "angle" and a["vertex"] == (90.0, 195.0)
+    assert [round(math.degrees(t)) for t in a["sides"]] == [36, 72]
+    assert a["lines_from"] == pytest.approx(37.6, abs=0.1)
+
+
+def test_a_radius_with_a_leader_is_a_leader_item():
+    # DTN7's R.04: a leader from the arc, then a level shoulder to the text
+    lines = [(221.83, 160.25, 221.11, 173.22), (221.11, 173.22, 227.46, 173.22)]
+    assert dl.classify_dimension(5, lines) == {"move": "leader", "anchor": (221.83, 160.25)}
+
+
+def test_an_angle_moves_out_along_its_direction_off_the_view():
+    views = {"V": (50.0, 50.0, 150.0, 150.0)}  # a round part, centre (100, 100)
+    text = (110.0, 125.0, 118.0, 128.0)  # inside, up and right of the centre
+    item = {"key": "A1", "kind": "dimension", "view": "V", "box": text, "anchor": None,
+            "dimension": {"move": "angle", "vertex": (100.0, 100.0),
+                          "sides": (math.radians(50), math.radians(80)), "lines_from": None}}
+    plan = dl.arrange([item], views, AREA, TITLE, "fix")
+    box = placed([item], plan)["A1"]
+    assert not dl.overlap(box, views["V"])
+    t0 = math.atan2(dl._centre(text)[1] - 100, dl._centre(text)[0] - 100)
+    t1 = math.atan2(dl._centre(box)[1] - 100, dl._centre(box)[0] - 100)
+    assert abs(math.degrees(t1 - t0)) < 10.5  # it stayed inside its angle
+
+
+def test_no_text_stays_on_its_own_view():
+    item = {"key": "D", "kind": "dimension", "view": "V", "box": (140, 140, 150, 144), "anchor": None,
+            "dimension": {"move": "near"}}
+    box = placed([item], dl.arrange([item], VIEW, AREA, TITLE, "fix"))["D"]
+    assert not dl.overlap(box, VIEW["V"])
+
+
+def test_fix_keeps_a_fine_texts_spot_from_a_text_moving_off_its_view():
+    """The angle leaving its view must not take the callout's spot (DTN7: 99 mm)."""
+    views = {"V": (50.0, 50.0, 150.0, 150.0)}
+    callout = note("H", (118, 153, 128, 157), (123, 148), view="V")  # in the angle's path, between its sides
+    angle = {"key": "A1", "kind": "dimension", "view": "V", "box": (110, 140, 118, 143), "anchor": None,
+             "dimension": {"move": "angle", "vertex": (100.0, 100.0),
+                           "sides": (math.radians(55), math.radians(85)), "lines_from": None}}
+    plan = dl.arrange([callout, angle], views, AREA, TITLE, "fix")
+    assert "H" not in plan["moves"] and "A1" in plan["moves"]
+
+
+def test_the_check_knows_a_detail_view_is_a_circle():
+    from solidworks_mcp import drawing_spec as ds
+    views = {"Detail": (100.0, 100.0, 150.0, 150.0)}
+    corner = {"name": "G", "view": "Detail", "kind": "gtol", "box": (100.5, 145.0, 110.0, 149.5), "leader_mm": None}
+    middle = dict(corner, name="M", box=(120.0, 120.0, 130.0, 124.0))
+    found = ds.layout_problems([corner, middle], views, (0, 0, 400, 300), None, round_views=["Detail"])
+    assert [p["item"] for p in found if p["problem"] == "text_on_view"] == ["M"]

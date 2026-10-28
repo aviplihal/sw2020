@@ -405,3 +405,21 @@ Test drawings in `Projects\_tmp\drawings\arrange\`.
   exactly on the edge counted as off it.
   Result: DTN4 0 problems in both modes (4.3-4.7 s); DTN7 only the 10 texts inside their own
   view in both modes (fix 5.9 s, 4 texts moved; full 26.6 s, 18 moved).
+- Third round: nothing on a view. DTN7 had six angles inside round views (front view, B-B), a
+  radius in detail D and three items in detail views' corners (only the check's square box).
+  2020 findings (probe `dim_geometry` in `sw_bridge\probes.py`): `IDisplayData.GetArcAtIndex2`
+  gives [4 header values, start xyz, end xyz, centre xyz, ...] in metres; an angle's arcs,
+  split round its text, are centred on its vertex. Moving an angle's text straight out from the
+  vertex (`SetPosition2`) makes SolidWorks redraw the arc through it and lengthen the extension
+  lines (10X 36 degrees, 15 mm out: arc radius 40 to 56). A radius or diameter drawn with a
+  leader has the leader as its second-to-last display line (start on the arc) and a level
+  shoulder last (a basic one's box adds four lines in front). An angle with its arrows outside
+  draws its arc past its sides (18 degrees spans 39), so the text turns at most into the middle
+  60 % of the span. The bridge passes probes positional arguments only.
+  Planner: angles slide out along their direction (or turned up to 10 degrees inside the
+  angle), radial/diameter dimensions on a leader are leader items, no text may stay on its own
+  view, a cutting line within 1 mm of a text is tight (0.5), and in `fix` every text's spot is
+  reserved until it is placed (the 18 degrees leaving the front view took the hole callout's
+  spot, which went 99 mm); a reservation does not count against a text that stays.
+  Result: DTN7 0 problems in both modes (fix 7.9 s, 15 moved; full 29.0 s, 27 moved); DTN4 0 in
+  both (4.3-4.7 s).
