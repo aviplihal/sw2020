@@ -423,3 +423,29 @@ Test drawings in `Projects\_tmp\drawings\arrange\`.
   spot, which went 99 mm); a reservation does not count against a text that stays.
   Result: DTN7 0 problems in both modes (fix 7.9 s, 15 moved; full 29.0 s, 27 moved); DTN4 0 in
   both (4.3-4.7 s).
+
+### 2026-11-02 — arrange_drawing against DTN2, DTN3, DTN5 (branch `feat/arrange-drawing`)
+
+The subagent that made DTN2/3/5 found arrange_drawing letting through: a frame or datum on its own
+dimension's text, a text across a dimension line, and dimensions swapped to the wrong side. Test
+copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planner:
+- Moving a dimension's text with `SetPosition2` moves only the text. A free datum stays where it
+  was; a frame attached to the dimension (swSelDIMENSIONS, type 14) follows it a mm or two. The
+  dimension line stays where it was unless the text has room between the arrows; a text past a
+  span's end goes on a shoulder of about 12 mm and the line is extended to it. So a plan and the
+  result differ by some mm: the sheet is measured and repaired up to 3 times.
+- After such a move the dimension's last two display lines are the shoulder pieces, not the halves
+  of its line, and `classify_dimension` read a span of 6 mm for 25 (that is why the repair pass
+  failed). The span, axis and extension points are the part's and do not change: they are taken
+  once before the layout is applied (after any view moves) and only the line's position is read
+  again (`refresh_linear`).
+- A datum sits on its dimension's line, its stem running along it: not a clash (`_stem_on_line`).
+  A datum's stem is the display lines that leave its own box.
+- `IDisplayData` lines of a dimension include the arrows outside a short span; the planner now
+  uses the lines as drawn (`lines_now`) for what a candidate crosses.
+- Spots that are only tight are priced (TIGHT_COST 24 per fault point) against moving, and a line
+  across another dimension's line is 0.9, above a tier further out (needed to keep a stack
+  stepping out).
+- Results: DTN2 full 0 problems (4.6 s), fix 1 (frame over datum A, 19 s); DTN3 0/0 (4-6 s); DTN4
+  0/0; DTN5 0/0; DTN7 0/0 (8 s / 11 s). Not done: the old DTN2 attempt v3 (frames and
+  diameters piled on one side) stays unplaced, and 'fix' on DTN2's tight sheet.

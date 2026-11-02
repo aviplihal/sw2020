@@ -7230,12 +7230,16 @@ class SolidWorksSession:
                     path = [tuple(round(c, 2) for c in q) for q in xy]
                 else:
                     path = []
+                lines = []
+                for i in range(data.GetLineCount() if kind in ("dimension", "datum") else 0):
+                    line = list(data.GetLineAtIndex3(i) or ())
+                    if len(line) >= 9:  # [colour, type, style, weight, x1, y1, z1, x2, y2, ...] in m (2020)
+                        lines.append(tuple(m_to_mm(line[k]) for k in (4, 5, 7, 8)))
+                if kind == "datum":  # its stem: the lines that leave its own box
+                    lines = [l for l in lines if not all(box[0] - 0.5 <= x <= box[2] + 0.5 and box[1] - 0.5 <= y <= box[3] + 0.5
+                                                         for x, y in (l[:2], l[2:]))]
                 if handles is not None:
-                    lines, arcs = [], []
-                    for i in range(data.GetLineCount() if kind == "dimension" else 0):
-                        line = list(data.GetLineAtIndex3(i) or ())
-                        if len(line) >= 9:  # [colour, type, style, weight, x1, y1, z1, x2, y2, ...] in m (2020)
-                            lines.append(tuple(m_to_mm(line[k]) for k in (4, 5, 7, 8)))
+                    arcs = []
                     for i in range(data.GetArcCount() if kind == "dimension" else 0):
                         arc = list(data.GetArcAtIndex2(i) or ())
                         if len(arc) >= 13:  # [..., start xyz, end xyz, centre xyz, ...] in m (2020)
@@ -7245,8 +7249,11 @@ class SolidWorksSession:
                     handles[(name, annotation.GetName())] = (annotation, lines, dim_type,
                                                              self._attached_dimension(annotation) if kind in ("datum", "gtol") else None,
                                                              arcs)
+                on = self._attached_dimension(annotation) if kind == "datum" else None
                 items.append({"name": annotation.GetName(), "view": name, "kind": kind,
                               "box": tuple(round(c, 2) for c in box), "leader_mm": leader,
+                              **({"on_dimension": on} if on else {}),
+                              **({"lines_mm": [[round(c, 2) for c in l] for l in lines]} if lines else {}),
                               **({"leader_end_mm": path[-1], "leader_points_mm": path} if path else {})})
             first = False
             view = binding.wrap(view.GetNextView(), self._mod.IView)
@@ -7261,6 +7268,7 @@ class SolidWorksSession:
     # --- arranging a sheet ------------------------------------------------------
 
     _LEADER_KINDS = ("note", "datum", "gtol", "finish")
+    _REPAIR_PASSES = 3  # measure-and-fix rounds after the layout is applied
 
     def arrange_drawing(self, path: str, mode: str = "full", move_views: bool = True) -> dict:
         """Lay out a saved .slddrw: every text gets a box and a label of what it
@@ -7309,19 +7317,37 @@ class SolidWorksSession:
                     marks = self._cut_marks(view_handles)
                     plan = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], mode,
                                                   marks, round_views)
+            # what each linear dimension measures, as it is now (the views are where they stay)
+            first_dim = {i["key"]: i["dimension"] for i in items if i.get("dimension", {}).get("move") == "linear"}
             self._apply_layout(items, handles, plan)
             doc.EditRebuild3()
-            # SolidWorks may set a text otherwise than planned: measure, and fix what clashes
-            handles = {}
-            report = self._layout_report(doc, handles)
-            if report["problems"]:
-                items = self._layout_items(report, handles)
-                check = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], "fix",
-                                               marks, round_views)
-                if check["moves"]:
+            # SolidWorks sets a text a few mm off the plan (a dimension line that stays
+            # where it was, a datum that follows): measure, fix what clashes, and
+            # again, as long as that moves something
+            # "fix" that leaves problems lays the texts out again as "full" does (the
+            # views stay): a tight view can need its neighbours' texts to move too
+            stages = (("fix", self._REPAIR_PASSES), ("full", 2 if mode == "fix" else 0))
+            clean = False
+            for stage, passes in stages:
+                for _ in range(passes):
+                    handles = {}
+                    report = self._layout_report(doc, handles)
+                    clean = not report["problems"]
+                    if clean:
+                        break
+                    items = self._layout_items(report, handles)
+                    for i in items:  # a moved dimension's lines no longer say what it measures
+                        if i["key"] in first_dim:
+                            i["dimension"] = drawing_layout.refresh_linear(first_dim[i["key"]], handles[i["handle"]][1])
+                    check = drawing_layout.arrange(items, report["views"], area, report["title_block_mm"], stage,
+                                                   marks, round_views)
+                    plan["unplaced"], plan["lines_crossed"] = check["unplaced"], check["lines_crossed"]
+                    if not check["moves"]:
+                        break
                     self._apply_layout(items, handles, check)
                     doc.EditRebuild3()
-                plan["unplaced"], plan["lines_crossed"] = check["unplaced"], check["lines_crossed"]
+                if clean:
+                    break
             self._write_via_saveas3(abs_path, doc)
             after = self._layout_report(doc) if already else None
         finally:

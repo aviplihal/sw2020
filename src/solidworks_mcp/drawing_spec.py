@@ -1250,6 +1250,19 @@ def _box_distance(a, b) -> float:
     return math.hypot(dx, dy)
 
 
+def _stem_on_line(stem, lines, tol: float = 2.0) -> bool:
+    """Whether a datum's stem (segments [x1, y1, x2, y2]) runs along one of a
+    dimension's lines, parallel within tol mm and overlapping it."""
+    for s in stem or ():
+        for l in lines or ():
+            for k in (0, 1):  # a vertical pair (constant x), a horizontal pair (constant y)
+                if (abs(s[k] - s[k + 2]) < 0.05 and abs(l[k] - l[k + 2]) < 0.05 and abs(s[k] - l[k]) <= tol
+                        and min(max(s[1 - k], s[3 - k]), max(l[1 - k], l[3 - k]))
+                        > max(min(s[1 - k], s[3 - k]), min(l[1 - k], l[3 - k]))):
+                    return True
+    return False
+
+
 def layout_problems(items, views, border, title_block, leader_max=LEADER_MAX_MM,
                     stack_min=DIM_STACK_MIN_MM, round_views=()) -> list:
     """What is wrong with the layout, measured: items are the placed texts
@@ -1257,9 +1270,10 @@ def layout_problems(items, views, border, title_block, leader_max=LEADER_MAX_MM,
     box the view draws in}; round_views: the detail views, which draw a circle
     in their box (a text in its corners is not on it). Problems: text on text,
     text on a view, text nearer another view than its own, text off the border
-    or on the title block, a long leader, and dimension texts of one view
-    stacked too close. Pure."""
-    from .drawing_layout import DETAIL_SLACK_MM, on_detail_circle
+    or on the title block, a long leader, dimension texts of one view stacked
+    too close, and a dimension's line or a datum's stem through another text
+    (an item's "lines_mm": [[x1, y1, x2, y2]]). Pure."""
+    from .drawing_layout import DETAIL_SLACK_MM, LINE_GRAZE_MM, on_detail_circle, segment_hits_box
     out = []
     boxed = [i for i in items if i.get("box")]
     for n, a in enumerate(boxed):
@@ -1288,6 +1302,14 @@ def layout_problems(items, views, border, title_block, leader_max=LEADER_MAX_MM,
             out.append({"problem": "on_title_block", "item": a["name"]})
         if (a.get("leader_mm") or 0) > leader_max:
             out.append({"problem": "long_leader", "item": a["name"], "leader_mm": round(a["leader_mm"], 1)})
+    for a in boxed:
+        for b in boxed:
+            if b is a or not a.get("lines_mm"):
+                continue
+            if b["kind"] == "datum" and a["kind"] == "dimension" and _stem_on_line(b.get("lines_mm"), a["lines_mm"]):
+                continue  # a datum sits on a dimension line, its stem along it
+            if any(segment_hits_box(l[:2], l[2:4], b["box"], LINE_GRAZE_MM) for l in a["lines_mm"]):
+                out.append({"problem": "line_through_text", "item": b["name"], "line_of": a["name"]})
     return out
 
 

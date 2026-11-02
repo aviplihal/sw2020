@@ -1202,7 +1202,10 @@ async def arrange_drawing(path: str, mode: str = "full", move_views: bool = True
     text is left on a view, its own included (a detail view's circle counts,
     not its corners).
     mode "full" lays every text out afresh but prefers its current spot;
-    "fix" moves only the texts that clash. With move_views (full mode only)
+    "fix" moves only the texts that clash (and, when repairs leave problems,
+    lays the texts of the sheet out again as "full" does, the views kept). A
+    dimension's lines, a datum's stem and the frames riding on a dimension
+    count: a datum may sit on its dimension's line but not on its text. With move_views (full mode only)
     views first move apart where their texts need room; projected views stay
     aligned. Returns problems_before / problems_after (the layout problems of
     make_drawing), "moved", "views_moved", "unplaced" (texts with no free

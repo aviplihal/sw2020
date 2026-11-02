@@ -268,3 +268,41 @@ def test_the_check_knows_a_detail_view_is_a_circle():
     middle = dict(corner, name="M", box=(120.0, 120.0, 130.0, 124.0))
     found = ds.layout_problems([corner, middle], views, (0, 0, 400, 300), None, round_views=["Detail"])
     assert [p["item"] for p in found if p["problem"] == "text_on_view"] == ["M"]
+
+
+# --- after a move: what a dimension measures does not change (DTN2, DTN5) ----------
+
+
+def test_a_moved_dimension_keeps_its_span_and_reads_its_line_again():
+    # DTN5's D3 after its text went to a shoulder: the last two lines are no longer the
+    # halves of its dimension line, so classify_dimension would read a span of 12 mm
+    first = {"move": "linear", "axis": "x", "span": (106.55, 163.45), "line_at": 237.88,
+             "witness": [(222.83, 163.45), (222.83, 106.55)]}
+    drawn = [(222.83, 163.45, 242.17, 163.45), (222.83, 106.55, 242.17, 106.55),
+             (245.35, 175.67, 239.0, 175.67), (239.0, 175.67, 239.0, 163.45), (239.0, 163.45, 239.0, 106.55)]
+    now = dl.refresh_linear(first, drawn)
+    assert (now["axis"], now["span"], now["witness"]) == ("x", (106.55, 163.45), first["witness"])
+    assert now["line_at"] == 239.0 and len(now["lines_now"]) == 5
+
+
+def test_a_datum_sits_on_its_dimension_line():
+    from solidworks_mcp import drawing_spec as ds
+    views = {"V": (100.0, 100.0, 200.0, 180.0)}
+    dim = {"name": "D", "view": "V", "kind": "dimension", "box": (230, 150, 245, 158), "leader_mm": None,
+           "lines_mm": [[238.0, 106.0, 238.0, 163.0]]}
+    on = {"name": "B", "view": "V", "kind": "datum", "box": (235, 120, 241, 126), "leader_mm": None,
+          "lines_mm": [[237.5, 135.0, 237.5, 120.0]]}  # its stem along the line, 0.5 mm off
+    off = dict(on, name="C", box=(236, 150, 240, 156), lines_mm=[[220.0, 135.0, 220.0, 150.0]])
+    found = ds.layout_problems([dim, on, off], views, (0, 0, 400, 300), None)
+    assert [p["item"] for p in found if p["problem"] == "line_through_text"] == ["C"]
+
+
+def test_a_datum_lying_on_its_dimensions_text_is_seated_under_it():
+    """DTN2's datum A sat on the diameter's text and kept that offset wherever it went."""
+    views = {"V": (100.0, 100.0, 200.0, 180.0)}
+    dim = horizontal("D1", (100, 200), 190, (140, 189, 160, 192))
+    datum = {"key": "A", "kind": "datum", "view": "V", "box": (150, 190, 156, 196), "anchor": None}  # on the text
+    plan = dl.arrange([dim, datum], views, AREA, TITLE, "fix")
+    boxes = placed([dim, datum], plan)
+    assert not dl.overlap(boxes["A"], boxes["D1"])
+    assert "A" in plan["moves"]

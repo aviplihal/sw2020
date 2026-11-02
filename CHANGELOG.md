@@ -125,6 +125,21 @@ All notable changes to this project are documented here. This project follows
   The layout check treats a detail view as the circle it draws: texts in
   its corners are not on it. DTN7: 7 texts on views to 0 in both modes
   (fix 7.9 s, full 29 s).
+- arrange_drawing sees what crosses what, found on DTN2, DTN3 and DTN5: a
+  dimension's own lines and a datum's stem through another text
+  (`line_through_text` in the layout report; a datum on its dimension's line
+  is allowed), a frame or datum on its dimension's text, a leader across a
+  dimension's arrow (arrows drawn outside a short span included). A dimension's
+  line across another dimension's now costs more than stepping out a tier.
+  A datum lying on its dimension's text is seated under it. Moved texts land
+  a few mm off the plan, so the sheet is measured and repaired up to three
+  times (a moved dimension keeps the span it measures: its last two lines no
+  longer say), and `fix` that leaves problems lays the texts out again as
+  `full` does. Candidate spots that are only tight (close to a view, a text
+  or a cutting line) are priced against the distance moved instead of
+  counting as clashes: DTN7's hole callout no longer goes 85 mm.
+  DTN2, DTN3, DTN4, DTN5, DTN7: no layout problems in `full`; `fix` the
+  same except DTN2's tight sheet (one frame over a datum).
 
 ### Fixed (shop drawing layout, found on the real DTN7 drawing)
 - Dimensions and leaders in a detail of a turned view (a detail of the front

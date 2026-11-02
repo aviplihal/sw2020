@@ -53,10 +53,17 @@ LEADER_RINGS_MM = (6.0, 8.0, 10.0, 12.5, 15.0, 17.5, 20.0, 23.0, 26.0, 29.5, 33.
 LEADER_ANGLES = 48
 DIM_LINE_STEP_MM = 8.0  # between stacked dimension lines whose texts step past each other
 CROSSING_FAULT = 0.25
+# A dimension's line across another dimension's: tight, but priced past a tier
+# further out (TIGHT_COST), so a stack steps out and only crosses where it must
+DIM_CROSSING_FAULT = 0.9
 # A text inside the VIEW_GAP_MM round a view but off the view: tight, not
 # wrong (DTN7's frame 0.5 mm over detail E's circle; moving it pushed three texts on)
 NEAR_VIEW_FAULT = 0.5
 NEAR_TEXT_FAULT = 0.5  # likewise a text closer than TEXT_GAP_MM to another
+# What a tight spot costs against moving: per fault point (0.5 for one tight
+# spot = 12, some 80 mm of moving in "full"; a dimension line across another
+# dimension's must cost more than a tier further out)
+TIGHT_COST = 24.0
 LEADER_IN_VIEW_MM = 4.0  # a leader may cross this much of its own view's box (0.5 fault beyond)
 SLIDE_COST = 12.0  # a text slid past the end of its span costs two tiers further out
 ARROW_STUB_MM = 5.0  # an arrow drawn outside a short span, past its end
@@ -200,17 +207,35 @@ def classify_dimension(dim_type: int | None, lines, arcs=()) -> dict:
         shoulder, leader = lines[-1], lines[-2]
         if abs(shoulder[1] - shoulder[3]) < 0.05 and abs(leader[1] - leader[3]) > 0.05:
             return {"move": "leader", "anchor": (leader[0], leader[1])}
+    segments = [tuple(l[:4]) for l in lines or () if len(l) >= 4]
     lines = [tuple(l[:2]) for l in lines or ()]
+    now = {"lines_now": segments} if segments else {}  # as drawn, arrows outside a short span too
     if dim_type == 2 and lines and len(lines) >= 4:
         (ax, ay), (bx, by) = lines[-2], lines[-1]
         w1, w2 = lines[-4], lines[-3]
         if abs(ay - by) < 0.05 and abs(ax - bx) > 0.05:  # a horizontal dimension line
             return {"move": "linear", "axis": "y", "span": (min(ax, bx), max(ax, bx)), "line_at": ay,
-                    "witness": [tuple(w1), tuple(w2)]}
+                    "witness": [tuple(w1), tuple(w2)], **now}
         if abs(ax - bx) < 0.05 and abs(ay - by) > 0.05:
             return {"move": "linear", "axis": "x", "span": (min(ay, by), max(ay, by)), "line_at": ax,
-                    "witness": [tuple(w1), tuple(w2)]}
+                    "witness": [tuple(w1), tuple(w2)], **now}
     return {"move": "near"}
+
+
+def refresh_linear(first: dict, segments) -> dict:
+    """A linear dimension's classification after it moved: its axis, span and
+    witness points are the part's and stay as first measured; the lines it
+    draws now say where its dimension line runs (the longest segment along its
+    axis: a text on a shoulder adds short pieces that fooled classify_dimension,
+    which reads the last two lines, DTN2's span of 6 mm for 25). Pure."""
+    segments = [tuple(l[:4]) for l in segments or () if len(l) >= 4]
+    k = 0 if first["axis"] == "x" else 1  # the coordinate a vertical (x) or horizontal (y) line keeps
+    along = [l for l in segments if abs(l[k] - l[k + 2]) < 0.05 and abs(l[1 - k] - l[3 - k]) > 0.05]
+    out = dict(first, lines_now=segments)
+    if along:
+        longest = max(along, key=lambda l: abs(l[1 - k] - l[3 - k]))
+        out["line_at"] = longest[k]
+    return out
 
 
 def _classify_angle(lines, arcs) -> dict:
@@ -283,9 +308,10 @@ class _Sheet:
         self.load = {}  # (view, side): count
         self.dim_texts = []  # (box, key, view): each placed dimension's own text
         self.reserved = []  # (box, key, kind, view): spots kept for texts not placed yet
+        self.dim_keys = {}  # key: kind of each text placed, for its lines
 
     def faults(self, unit, box, lines, allow_own_view: bool, why: list | None = None,
-               reserved: bool = True) -> float:
+               reserved: bool = True, parts: list | None = None) -> float:
         """How badly a spot breaks the rules: 0 is free; off the area or on the
         title block counts 100, on a view 20 (inside the VIEW_GAP_MM round it
         but off the view itself NEAR_VIEW_FAULT), nearer another view 10, each
@@ -293,12 +319,15 @@ class _Sheet:
         NEAR_TEXT_FAULT), a leader across its own view 0.5, each line
         crossing a line (an extension line through a stacked dimension's line,
         accepted where there is no room) CROSSING_FAULT. `why` collects the
-        reasons."""
+        reasons, `parts` each fault's points. A fault under 1 is tight, not
+        wrong: see _split."""
         bad = 0.0
 
         def fault(points, reason):
             nonlocal bad
             bad += points
+            if parts is not None:
+                parts.append(points)
             if why is not None:
                 why.append(reason)
 
@@ -343,6 +372,8 @@ class _Sheet:
             for p, q in lines:
                 if segment_hits_box(p, q, other, LINE_GRAZE_MM):
                     fault(1, f"its line through {key}")
+        if unit.get("rider_parts"):
+            self._rider_faults(unit, box, lines, fault)
         if unit["kind"] == "dimension" and unit.get("move") == "linear":
             # stacked dimension texts keep STACK_GAP_MM, measured between the
             # texts themselves: a frame riding on one does not count
@@ -357,9 +388,12 @@ class _Sheet:
                 fault(NEAR_TEXT_FAULT, "close to a cutting line")  # tight, like a text close to a text
             if key == "fixed":
                 continue  # extension lines and leaders cross cutting lines as a matter of course
+            # a dimension's line across another dimension's line is a clash
+            # (smaller spans go nearer the view); a leader across one is tight
+            both = unit["kind"] == "dimension" and self.dim_keys.get(key) == "dimension"
             for c, d in lines:
                 if segments_cross(p, q, c, d):
-                    fault(CROSSING_FAULT, f"crosses a line of {key}")
+                    fault(DIM_CROSSING_FAULT if both else CROSSING_FAULT, f"crosses a line of {key}")
         return bad
 
     def _on_view(self, name, vbox, box, gap) -> bool:
@@ -368,6 +402,29 @@ class _Sheet:
         if name in self.round_views:
             return on_detail_circle(box, vbox, gap)
         return overlap(box, vbox, gap)
+
+    def _rider_faults(self, unit, box, lines, fault) -> None:
+        """A linear dimension against the frames and datums riding on it: its own
+        lines must not run through them, and a datum's stem, which SolidWorks
+        draws from the middle of the span on the dimension line (measured on
+        2020), must not run through the dimension's text. A frame cannot move
+        off its dimension's text (SolidWorks keeps it under it), so the
+        dimension moves: past the end of its span, where no line runs."""
+        dx, dy = box[0] - unit["box"][0], box[1] - unit["box"][1]
+        text = self._text_at(unit, box)
+        at = _dim_line_at(unit, lines)
+        lo, hi = unit["span"]
+        mid = (at, (lo + hi) / 2) if unit["axis"] == "x" else ((lo + hi) / 2, at)
+        for key, kind, rbox in unit["rider_parts"]:
+            rb = _shift(rbox, dx, dy)
+            # a datum sits on its dimension's line; a frame sits under the text, off it
+            if kind != "datum" and any(segment_hits_box(p, q, rb, LINE_GRAZE_MM) for p, q in lines):
+                fault(1, f"its line through {key}")
+            if overlap(rb, text):
+                fault(1, f"{key} on its text")
+            if kind == "datum" and at is not None:
+                if segment_hits_box(mid, nearest_point(rb, mid), text, LINE_GRAZE_MM):
+                    fault(1, f"the stem of {key} through its text")
 
     @staticmethod
     def _text_at(unit, box):
@@ -384,6 +441,7 @@ class _Sheet:
                 self.dim_texts.append((self._text_at(unit, b), unit["key"], unit["view"]))
         for p, q in lines:
             self.lines.append((p, q, unit["key"]))
+        self.dim_keys[unit["key"]] = unit["kind"]
         if side is not None:
             self.load[(unit["view"], side)] = self.load.get((unit["view"], side), 0) + 1
 
@@ -520,6 +578,11 @@ def _label_candidates(unit, vbox, below_mm: float):
 def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=None, round_views=()) -> dict:
     """New places for a sheet's texts. Pure.
 
+    In "fix", a view where a text finds no free spot is laid out again as in
+    "full", the other views kept as "fix" left them: a clash can need its
+    neighbours to move too (DTN2: two diameters with a frame and a datum on
+    one side of a section).
+
     items: [{"key", "kind" (dimension/note/datum/gtol/finish/label), "view"
     (its view's name, None for the sheet), "box": (x0, y0, x1, y1) paper mm,
     "anchor": (x, y) where its leader touches the part, or None,
@@ -529,7 +592,8 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
     {"boxes": [box], "lines": [((x, y), (x, y))]} (cutting-line arrows and
     letters, detail-circle letters); round_views: the detail views, which draw
     a circle in their box. mode "full" places every text afresh; "fix"
-    keeps each text where it is when that spot is free, and moves the rest.
+    keeps each text where it is when that spot is free, and moves the rest
+    (see above).
 
     An item may name its "host" (the key of the dimension SolidWorks attached
     it to, or None when it is attached to the part); a datum or frame without
@@ -544,6 +608,37 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
     """
     if mode not in MODES:
         raise ValueError(f"mode is one of {', '.join(MODES)} (got {mode!r}).")
+    first = _arrange(items, views, area, title_block, mode, obstacles, round_views)
+    by_key = {it["key"]: it for it in items}
+    redo = {by_key[k]["view"] for k in first["unplaced"]} if mode == "fix" else set()
+    if not redo:
+        return _result(items, first)
+    kept = {it["key"]: first["moves"].get(it["key"], (0.0, 0.0)) for it in items if it.get("view") not in redo}
+    moved = [dict(it, box=_shift(it["box"], *kept[it["key"]])) if it["key"] in kept else it for it in items]
+    second = _arrange(moved, views, area, title_block, "full", obstacles, round_views, frozen=set(kept))
+    second["moves"].update({k: v for k, v in kept.items()})
+    second["lines_crossed"] += [k for k in first["lines_crossed"] if k in kept]
+    return _result(items, second)
+
+
+def _result(items, plan) -> dict:
+    """arrange's answer from a plan: every text's new box and what it belongs to."""
+    moves, hosts = plan["moves"], plan["hosts"]
+    objects = []
+    for it in items:
+        dx, dy = moves.get(it["key"], (0.0, 0.0))
+        objects.append({"key": it["key"], "what": it["kind"],
+                        "belongs_to": {"view": it.get("view"), "on": hosts.get(it["key"]),
+                                       "leader_to": [round(c, 1) for c in it["anchor"]] if it.get("anchor") else None},
+                        "box": [round(c, 1) for c in _shift(it["box"], dx, dy)],
+                        "moved_mm": round(math.hypot(dx, dy), 1)})
+    moves = {k: v for k, v in moves.items() if math.hypot(*v) > 0.05}
+    return {"moves": moves, "objects": objects, "unplaced": plan["unplaced"], "lines_crossed": plan["lines_crossed"]}
+
+
+def _arrange(items, views, area, title_block, mode, obstacles, round_views, frozen=frozenset()) -> dict:
+    """One pass of arrange: {"moves", "hosts", "unplaced", "lines_crossed"}.
+    The texts in `frozen` stay where they are (as obstacles)."""
     by_key = {it["key"]: it for it in items}
     # SolidWorks names the dimension a symbol is attached to; else the nearest one
     hosts = {k: h for k, h in find_hosts([it for it in items if "host" not in it]).items()}
@@ -553,22 +648,39 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
     for rider, host in hosts.items():
         riders.setdefault(host, []).append(rider)
     sheet = _Sheet(area, title_block, views, obstacles, round_views)
-    units = []
+    units, reseat = [], {}  # reseat: {rider key: (dx, dy)} it is seated at, on top of its dimension's move
     for it in items:
         if it.get("view") not in views:  # texts on the sheet itself (general notes) stay put
             sheet.boxes.append((tuple(it["box"]), "fixed", "note", None))
             continue
+        if it["key"] in frozen:  # kept where an earlier pass put it
+            sheet.boxes.append((tuple(it["box"]), it["key"], it["kind"], it["view"]))
+            if it["kind"] == "dimension":
+                sheet.dim_texts.append((tuple(it["box"]), it["key"], it["view"]))
+            continue
         if it["key"] in hosts:
             continue  # it rides on its host
+        # a datum that lies on its dimension's text is seated under it, centred
+        # (SolidWorks leaves a free datum where it was when the text moves)
+        rboxes = {}
+        for r in riders.get(it["key"], ()):
+            rb = tuple(by_key[r]["box"])
+            if by_key[r]["kind"] == "datum" and overlap(rb, it["box"]):
+                shift = (_centre(it["box"])[0] - _centre(rb)[0],
+                         it["box"][1] - TEXT_GAP_MM - _h(rb) / 2 - _centre(rb)[1])
+                reseat[r] = shift
+                rb = _shift(rb, *shift)
+            rboxes[r] = rb
         unit = {"key": it["key"], "kind": it["kind"], "view": it["view"],
-                "box": _union([it["box"]] + [by_key[r]["box"] for r in riders.get(it["key"], ())]),
+                "box": _union([it["box"]] + list(rboxes.values())),
                 "text_box": it["box"], "anchor": it.get("anchor"), "riders": riders.get(it["key"], [])}
         if it["kind"] == "dimension":
             unit.update(it.get("dimension") or {"move": "near"})
             if unit["move"] == "linear":
                 # the riders keep their offset from the dimension's text
-                unit["ride"] = [(r, _centre(by_key[r]["box"])[0] - _centre(it["box"])[0],
-                                 _centre(by_key[r]["box"])[1] - _centre(it["box"])[1]) for r in riders.get(it["key"], ())]
+                unit["ride"] = [(r, _centre(rboxes[r])[0] - _centre(it["box"])[0],
+                                 _centre(rboxes[r])[1] - _centre(it["box"])[1]) for r in rboxes]
+                unit["rider_parts"] = [(r, by_key[r]["kind"], rboxes[r]) for r in rboxes]
         elif it["kind"] == "label":
             unit["move"] = "label"
         elif unit["anchor"] is not None:
@@ -646,42 +758,66 @@ def arrange(items, views, area, title_block=None, mode: str = "full", obstacles=
             cands = [(c + MOVE_COST_PER_MM * math.dist(p, c0) - (0.5 if math.dist(p, c0) < 0.05 else 0.0), p, l, s)
                      for c, p, l, s in cands]
         cands.sort(key=lambda c: (c[0], math.dist(c[1], c0)))
-        best = None  # (faults, rank, box, lines, side): the first free spot, else the least bad
-        if mode == "fix":  # it stays unless it runs into something (a line crossing is no reason)
+        # the spot with the fewest clashes; among those, the cheapest once its
+        # tight spots are priced in (TIGHT_COST): a tight spot near by beats a
+        # free one far off (DTN7's hole callout went 85 mm for two of them)
+        best = None  # ((clashes, cost + tight price), box, lines, side, tight)
+        if mode == "fix":  # it stays unless it runs into something (a tight spot is no reason)
             # judged without the spots kept for texts still to come: they keep
             # others out, they do not push a text that is fine off its own spot
             cost, centre, lines, side = cands[0]
-            bad = sheet.faults(unit, _at(box, *centre), lines, allow_own, reserved=False)
-            if bad < 1:
-                best, cands = (bad, 0, _at(box, *centre), lines, side), []
-        for rank, (cost, centre, lines, side) in enumerate(cands):
+            parts = []
+            sheet.faults(unit, _at(box, *centre), lines, allow_own, reserved=False, parts=parts)
+            hard, tight = _split(parts)
+            if not hard:
+                best, cands = ((0, 0.0), _at(box, *centre), lines, side, tight), []
+        for cost, centre, lines, side in cands:
+            if best is not None and not best[0][0] and cost >= best[0][1]:
+                break  # sorted by cost: nothing further on can beat it
             b = _at(box, *centre)
-            bad = sheet.faults(unit, b, lines, allow_own)
-            if best is None or bad < best[0]:
-                best = (bad, rank, b, lines, side)
-            if bad == 0:
+            parts = []
+            sheet.faults(unit, b, lines, allow_own, parts=parts)
+            hard, tight = _split(parts)
+            key = (hard, cost + TIGHT_COST * tight)
+            if best is None or key < best[0]:
+                best = (key, b, lines, side, tight)
+            if not hard and not tight:
                 break
-        if best[0] >= 1:
+        if best[0][0]:
             unplaced.append(unit["key"])
-        elif best[0]:
+        elif best[4]:
             crossed.append(unit["key"])
-        _, _, b, lines, side = best
+        _, b, lines, side, _ = best
         sheet.add(unit, [b], lines, side)
         dx, dy = b[0] - box[0], b[1] - box[1]
         moves[unit["key"]] = (dx, dy)
         for r in riders.get(unit["key"], ()):
-            moves[r] = (dx, dy)
+            sx, sy = reseat.get(r, (0.0, 0.0))
+            moves[r] = (dx + sx, dy + sy)
         sides[unit["key"]] = side
-    objects = []
-    for it in items:
-        dx, dy = moves.get(it["key"], (0.0, 0.0))
-        objects.append({"key": it["key"], "what": it["kind"],
-                        "belongs_to": {"view": it.get("view"), "on": hosts.get(it["key"]),
-                                       "leader_to": [round(c, 1) for c in it["anchor"]] if it.get("anchor") else None},
-                        "box": [round(c, 1) for c in _shift(it["box"], dx, dy)],
-                        "moved_mm": round(math.hypot(dx, dy), 1)})
-    moves = {k: v for k, v in moves.items() if math.hypot(*v) > 0.05}
-    return {"moves": moves, "objects": objects, "unplaced": unplaced, "lines_crossed": crossed}
+    return {"moves": moves, "hosts": hosts, "unplaced": unplaced, "lines_crossed": crossed}
+
+
+def _dim_line_at(unit, lines):
+    """Where a linear dimension's line runs (its x for a vertical one, its y
+    for a horizontal one) among its lines at a spot: the one along its axis
+    that covers its span. None when none does."""
+    lo, hi = unit["span"]
+    k = 0 if unit["axis"] == "x" else 1  # the coordinate that is constant along the line
+    for p, q in lines:
+        along = (p[1 - k], q[1 - k])
+        if abs(p[k] - q[k]) < 0.01 and min(along) <= lo + 0.05 and max(along) >= hi - 0.05:
+            return p[k]
+    return unit.get("line_at")
+
+
+def _split(parts) -> tuple:
+    """(clashes, tightness) of a spot's faults: one of 1 or more is a clash
+    (on a text, a view or a line, off the area), the smaller ones are tight
+    spots (close to a view, a text or a cutting line, a leader across its
+    view, a line crossing a line)."""
+    hard = sum(p for p in parts if p >= 1)
+    return hard, sum(parts) - hard
 
 
 def _side_of(unit, vbox) -> str:
@@ -692,7 +828,11 @@ def _side_of(unit, vbox) -> str:
 
 
 def _current_dimension_lines(unit) -> list:
-    """A linear dimension's extension and dimension lines as they are now."""
+    """A linear dimension's extension and dimension lines as they are now: as
+    SolidWorks drew them when known (arrows outside a short span run past its
+    ends: DTN3's thread callout went across 7/16's), else from its span."""
+    if unit.get("lines_now"):
+        return [(tuple(l[:2]), tuple(l[2:4])) for l in unit["lines_now"]]
     (w1x, w1y), (w2x, w2y) = unit["witness"]
     lo, hi = unit["span"]
     at = unit["line_at"]
