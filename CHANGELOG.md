@@ -143,7 +143,12 @@ All notable changes to this project are documented here. This project follows
 - A spec item may carry `"annotation": "RD1"`, the name of the annotation
   check_drawing finds it by in a saved drawing. A dimension drawn by hand in
   SolidWorks is named RD1, RD2, ... and not SPEC_<id>, so a drawing edited
-  by hand could not be checked against a spec that described the edit.
+  by hand could not be checked against a spec that described the edit. The
+  name may carry its view (`"Section View A-A/RD1"`), as RD1 recurs in every
+  view of a hand-made drawing.
+- A dimension may be marked `"rounded": true`: it is shown rounded to its
+  places (.4975 as .50), so check_drawing compares the model to those places
+  as it does for a reference dimension, not exactly.
 
 ### Fixed (shop drawing layout, found on the real DTN7 drawing)
 - Dimensions and leaders in a detail of a turned view (a detail of the front

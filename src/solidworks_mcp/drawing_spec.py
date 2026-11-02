@@ -24,7 +24,9 @@ STATUSES = ("read", "unreadable")
 TOLERANCE_DISPLAYS = ("bilateral", "symmetric", "limits")
 # Optional extra keys an item may carry besides its kind's own fields.
 # "annotation": the name of the annotation the item is found by in a saved
-# drawing, when it was added by hand and has no SPEC_ name (check_drawing only).
+# drawing, when it was added by hand and has no SPEC_ name (check_drawing only);
+# "Section View A-A/RD1" names it within a view, as hand-drawn dimensions are
+# named RD1, RD2, ... again in every view.
 OPTIONAL_KEYS = {"view", "remark", "annotation"}
 FIELDS = {  # required keys per kind (besides id, kind, status)
     "dimension": ("value", "decimals", "tolerance", "between"),
@@ -39,7 +41,7 @@ FIELDS = {  # required keys per kind (besides id, kind, status)
 # REFERENCE (in parentheses), and carry text before or after its value as
 # written ("10X", "4X", "MAX", "TYP"). A frame can carry a projected tolerance
 # zone: its height as written (".56"), shown after Ⓟ.
-OPTIONAL_FIELDS = {"thread": ("depth",), "dimension": ("basic", "reference", "prefix", "suffix"),
+OPTIONAL_FIELDS = {"thread": ("depth",), "dimension": ("basic", "reference", "rounded", "prefix", "suffix"),
                    "gdt": ("projected",)}
 
 GDT_CHARACTERISTICS = (
@@ -260,7 +262,8 @@ def _validate_dimension(item, where) -> Value:
     else:
         value.display = None
     value.basic, value.reference = item.get("basic", False), item.get("reference", False)
-    for key in ("basic", "reference"):
+    value.rounded = item.get("rounded", False)  # shown rounded to its places (a size on a hand-made drawing)
+    for key in ("basic", "reference", "rounded"):
         if not isinstance(item.get(key, False), bool):
             raise SolidWorksError(f"{where}: {key} is true or false.")
     if (value.basic or value.reference) and tolerance is not None:
@@ -453,9 +456,10 @@ def compare_dimension(item, read: dict) -> dict:
 
 def _model_tolerance(value: Value) -> Fraction | float:
     """How far the model may be from a dimension's nominal: exact, except for a
-    reference dimension, which is the model rounded to the places it shows."""
+    reference dimension, or one marked "rounded", which is the model rounded to
+    the places it shows."""
     exact = EXACT_DEG if value.kind == "angle" else EXACT_IN
-    if value.reference and value.format != "fraction":
+    if (value.reference or getattr(value, "rounded", False)) and value.format != "fraction":
         return Fraction(1, 2 * 10 ** (value.places or 0)) + Fraction(exact)
     if value.reference:
         return Fraction(1, 2 * FRACTION_DENOMINATOR) + Fraction(exact)
@@ -1332,6 +1336,7 @@ def compare(spec, read: dict) -> dict:
     for group in ("dimensions", "notes", "datums", "gtols", "finishes"):
         for entry in read.get(group, []):
             by_name.setdefault(entry.get("name"), []).append((group, entry))
+            by_name.setdefault(f"{entry.get('view')}/{entry.get('name')}", []).append((group, entry))
     used, lines = set(), []
     for item in checked["items"]:
         sid, kind = item["id"], item["kind"]

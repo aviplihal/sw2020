@@ -314,6 +314,34 @@ def test_an_item_added_by_hand_is_found_by_its_annotation_name():
     assert ds.compare(spec, {"dimensions": []})["items"][0]["status"] == "missing"
 
 
+def test_an_annotation_name_can_name_its_view():
+    """RD1 exists in every view of a hand-made drawing: 'view/name' picks one."""
+    item = {"kind": "dimension", "decimals": 3, "tolerance": None, "between": "x", "status": "read"}
+    spec = {"units": "in", "items": [
+        {**item, "id": "D1", "value": ".825", "annotation": "Drawing View1/RD1"},
+        {**item, "id": "D2", "value": "1.225", "annotation": "Section View A-A/RD1"}]}
+    dims = [{"name": "RD1", "view": "Section View A-A", "value": 1.225, "decimals": 3, "fraction": False,
+             "angle": False, "tolerance": "none", "shown": "1.225"},
+            {"name": "RD1", "view": "Drawing View1", "value": 0.825, "decimals": 3, "fraction": False,
+             "angle": False, "tolerance": "none", "shown": ".825"}]
+    out = ds.compare(spec, {"dimensions": dims})
+    assert [(l["id"], l["status"]) for l in out["items"]] == [("D1", "ok"), ("D2", "ok")]
+
+
+def test_a_rounded_dimension_is_checked_to_the_places_it_shows():
+    """A hand-made drawing shows .4975 as .50: exact for a plain dimension, ok when marked rounded."""
+    item = {"id": "D7", "kind": "dimension", "value": ".50", "decimals": 2, "tolerance": None, "between": "x",
+            "status": "read", "annotation": "Drawing View2/RD1"}
+    dims = [{"name": "RD1", "view": "Drawing View2", "value": 0.4975, "decimals": 2, "fraction": False,
+             "angle": False, "tolerance": "none", "shown": ".50"}]
+    exact = ds.compare({"units": "in", "items": [item]}, {"dimensions": dims})["items"][0]
+    rounded = ds.compare({"units": "in", "items": [{**item, "rounded": True}]}, {"dimensions": dims})["items"][0]
+    assert exact["status"] == "differs" and "model measures" in exact["detail"]
+    assert rounded["status"] == "ok"
+    with pytest.raises(SolidWorksError, match="rounded is true or false"):
+        ds.validate({"units": "in", "items": [{**item, "rounded": "yes"}]})
+
+
 def test_an_annotation_name_must_be_a_string_and_unique():
     item = {"id": "D9", "kind": "dimension", "value": "1/16", "decimals": None, "tolerance": None,
             "between": "x", "status": "read"}
