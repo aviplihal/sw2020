@@ -460,7 +460,7 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
   `bridge_probe read_all <slddrw>` dumps what check_drawing reads. Both drawings check clean (12 ok;
   32 ok with the five finish symbols as extras).
 - 2026-11-02 (DTN2): the user edited the hand-made `DTN2 Drawing.SLDDRW` in Dropbox (the original is
-  still in `_tmpefdrw\DTN2`; a read-back diff gives two changes: the end view's bore `.32` became
+  still in `_tmp\refdrw\DTN2`; a read-back diff gives two changes: the end view's bore `.32` became
   `.316/.315` with limits, and a note `R.03 Max` was added to section A-A). The drawing's dimensions are all
   named RD1, RD2, ... again in every view, so spec items find them by `"view/name"`, and its 2-place
   sizes (.50 for .4975) are marked `rounded`. `DTN2\DTN2_spec_edited.json` (16 items: the 9 of the
