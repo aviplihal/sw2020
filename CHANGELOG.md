@@ -54,7 +54,12 @@ All notable changes to this project are documented here. This project follows
 - `solidworks-mcp kb-fixed H-00n --commit X --by "..." --note "..."` moves an issue to
   Fixed, marks each digest hard part linked to it and drops its failures from the tool cards.
 - `scripts/kb_session_hook.py` and `.claude/settings.json`: a Claude Code `PreToolUse`
-  hook on `mcp__solidworks__.*` that records the session id and transcript path for the digest.
+  hook on `mcp__solidworks__.*|Bash|PowerShell` that records the session id and transcript path for the digest.
+  It records a session only for a SolidWorks MCP tool or a shell command that runs the file-queue
+  bridge's `call.py` / `call_dev.py`, never for other shell commands (a session running pytest).
+- The digest matches the Claude Code transcript to the timeline also when the calls were made through
+  that bridge from Bash or PowerShell: the method named after `call.py` / `call_dev.py` (quoted paths,
+  `cd ... &&`, several calls in one command) counts as the tool.
 
 ## [0.16.0] — 2026-10-10
 

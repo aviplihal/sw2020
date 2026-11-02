@@ -283,32 +283,34 @@ SolidWorks-internal metre/radian units at the boundary.
 
 ### Knowledge base tools
 
-A memory of earlier drawing jobs, kept on the Windows machine: one **case** per old
-drawing (by its DN number), searchable by how the drawing looks and what it
-describes. Install the extra: `pip install "solidworks-mcp[kb]"`. Every tool call is
-logged to the open case automatically. Design: [Docs/KNOWLEDGE-BASE.md](Docs/KNOWLEDGE-BASE.md);
-the workflow for an agent: [Docs/JOB-BRIEF.md](Docs/JOB-BRIEF.md).
+A memory of earlier drawing jobs, kept on the Windows machine as plain Markdown files
+(no database, no outside service): one **case** per old drawing (by its DN number), found
+by reading `INDEX.md` or by a plain text search. Install the extra:
+`pip install "solidworks-mcp[kb]"` (page rendering only). Every tool call, these included,
+is logged automatically as one row of a timeline kept for fix sessions. Design:
+[Docs/KNOWLEDGE-BASE.md](Docs/KNOWLEDGE-BASE.md); the workflow for an agent: [Docs/JOB-BRIEF.md](Docs/JOB-BRIEF.md).
 
 | Tool | Purpose |
 |---|---|
 | `kb_ingest_drawing(path, page)` | Start a case from `DN<n>.pdf`: check the DN number (from the file name), render the page, return an overview image |
 | `kb_view_region(box, dn)` | Zoom into the drawing: a region in page fractions at full resolution, to read small text |
-| `kb_describe_case(view_boxes, description, part_type, drawing_spec, handwritten_dn, dn_confirmed)` | Store the views, description and drawing spec; return the unreadable items and the most similar earlier cases |
-| `kb_update_spec(drawing_spec)` | Replace the open case's spec (the user's answers to unreadable items); earlier versions kept |
-| `kb_search(text, like_case, filters, limit)` | Keyword + vector search, one line per case; approved cases first |
-| `kb_get_case(dn, include_timeline)` | One case in full, with its files and, on request, every modelling step |
-| `kb_abandon_case(reason)` | Close the open case without finishing it; its DN can be ingested again |
+| `kb_describe_case(view_boxes, description, part_type, drawing_spec, handwritten_dn, dn_confirmed)` | Write `case.md` and `spec.json`; return the unreadable items and `INDEX.md` (one line per earlier case) |
+| `kb_update_spec(drawing_spec, answers)` | Replace the open case's spec; the questions and the user's answers are listed in the case |
+| `kb_search(text, part_type, status, limit)` | Case-insensitive text search over the cases; returns index lines, approved first |
+| `kb_get_case(dn)` | One case's `case.md` (description, questions, result, review, lessons) and its files |
+| `kb_abandon_case(reason)` | Close the open case without finishing it; its DN can be ingested again. Writes its digest and returns the hard parts to explain |
+| `kb_explain_digest(explanations, not_measured, fix_ideas, dn)` | One line per hard part of a closed case's digest (40 words at most); links each to an issue in `fixes\HOTSPOTS.md` |
 | `kb_tool_card(tool)` | What is known about a modelling tool: when to use it, how to call it, failures seen with cause and fix |
-| `kb_update_tool_card(tool, card)` | Store a tool card Claude tidied; refused over 8 bullets / 150 words or if a frequent failure lost its text |
-| `kb_reembed_pending()` | Embed cases saved while Voyage was unavailable |
+| `kb_update_tool_card(tool, card)` | Store a tool card Claude tidied; refused over 6 failure lines / 3 lessons / 150 words or if a frequent failure lost its text |
 
 A failing tool's error result carries `kb_hint`: its card's line for that failure, if there is one.
+The digests, timelines and hotspots under `fixes\` are for people and sessions improving the tools;
+no `kb_*` tool shows them to a CAD agent. Mark an issue fixed with
+`solidworks-mcp kb-fixed H-00n --commit X --by "..." --note "..."`.
 
 | Environment variable | Meaning |
 |---|---|
 | `SWMCP_KB_DIR` | Where the knowledge base lives (default `%LOCALAPPDATA%\solidworks-mcp\kb`) |
-| `VOYAGE_API_KEY` | Voyage AI key for the drawing and description vectors |
-| `SWMCP_VOYAGE_OPTED_OUT=1` | Set once the Voyage account has opted out of data use; until then nothing is sent to Voyage and cases wait as *embedding pending* |
 
 ## Architecture
 
