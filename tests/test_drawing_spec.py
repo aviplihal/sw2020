@@ -342,6 +342,20 @@ def test_a_rounded_dimension_is_checked_to_the_places_it_shows():
         ds.validate({"units": "in", "items": [{**item, "rounded": "yes"}]})
 
 
+def test_a_finish_mark_may_have_no_roughness_value():
+    """The old drawings' 'f' finish marks: machining required, no number (DTN3)."""
+    for blank in ("", None):
+        spec = {"units": "in", "items": [{"id": "F1", "kind": "finish", "symbol": "machined", "value": blank,
+                                          "surface": "bore", "status": "read"}]}
+        ds.validate(spec)
+        out = ds.compare(spec, {"finishes": [{"name": "SPEC_F1", "view": "V", "symbol": "machined", "value": ""}]})
+        assert out["items"][0]["status"] == "ok", blank
+        assert ds.compare(spec, {"finishes": [{"name": "SPEC_F1", "symbol": "machined", "value": "63"}]})["items"][0]["status"] == "differs"
+    with pytest.raises(SolidWorksError, match="roughness as written"):
+        ds.validate({"units": "in", "items": [{"id": "F1", "kind": "finish", "symbol": "machined", "value": "  ",
+                                               "surface": "x", "status": "read"}]})
+
+
 def test_an_annotation_name_must_be_a_string_and_unique():
     item = {"id": "D9", "kind": "dimension", "value": "1/16", "decimals": None, "tolerance": None,
             "between": "x", "status": "read"}

@@ -146,6 +146,12 @@ All notable changes to this project are documented here. This project follows
   by hand could not be checked against a spec that described the edit. The
   name may carry its view (`"Section View A-A/RD1"`), as RD1 recurs in every
   view of a hand-made drawing.
+- A finish item may have no roughness value (`"value": ""` or null): the
+  old drawings' "f" finish marks become real machining-required symbols
+  instead of leader notes reading "f" (DTN3 had six). The layout report
+  measures such a symbol from the lines it draws (it has no text), so the
+  checks and `arrange_drawing` see it; before, it was invisible to both and
+  one sat on a note.
 - A dimension may be marked `"rounded": true`: it is shown rounded to its
   places (.4975 as .50), so check_drawing compares the model to those places
   as it does for a reference dimension, not exactly.

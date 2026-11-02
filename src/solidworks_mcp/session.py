@@ -7056,7 +7056,7 @@ class SolidWorksSession:
         x, y = self._annotation_spot(target, place["point_mm"], 12.0, 2, place)
         ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
         made = binding.wrap(ext.InsertSurfaceFinishSymbol3(SW_SF_SYMBOLS[item["symbol"]], SW_LEADER_STRAIGHT, x, y,
-                                                           0.0, 0, SW_ARROW_CLOSED, "", "", "", "", item["value"],
+                                                           0.0, 0, SW_ARROW_CLOSED, "", "", "", "", item["value"] or "",
                                                            "", ""), self._mod.ISFSymbol)
         if made is None:
             raise SolidWorksError(f"SolidWorks could not place the finish symbol {sid}.")
@@ -7211,6 +7211,8 @@ class SolidWorksSession:
                     runs.append((m_to_mm(x), m_to_mm(y), m_to_mm(data.GetTextInBoxWidthAtIndex(i)),
                                  m_to_mm(data.GetTextHeightAtIndex(i)), data.GetTextAngleAtIndex(i)))
                 box = drawing_spec.text_box(runs)
+                if box is None and kind == "finish":
+                    box = self._symbol_box(annotation, data)  # a symbol without a value has no text
                 if box is None:
                     continue
                 if kind in ("gtol", "datum"):  # the frame's border runs past its text
@@ -7264,6 +7266,27 @@ class SolidWorksSession:
             counts[p["problem"]] = counts.get(p["problem"], 0) + 1
         return {"sheet_mm": size, "border_mm": border, "title_block_mm": title_block, "views": views,
                 "items": items, "problems": problems, "problem_counts": counts}
+
+    def _symbol_box(self, annotation, data):
+        """The box of a finish symbol that carries no text (the old-style machining
+        mark): the lines it draws, the one that runs to the part left out (measured
+        on 2020: its first line, from the symbol's tip to the end of its leader)."""
+        try:
+            points = list(annotation.GetLeaderPointsAtIndex(0) or ())
+        except pythoncom.com_error:
+            points = []
+        tail = (m_to_mm(points[3]), m_to_mm(points[4])) if len(points) >= 6 else None
+        xs, ys = [], []
+        for i in range(data.GetLineCount()):
+            line = list(data.GetLineAtIndex3(i) or ())
+            if len(line) < 9:
+                continue
+            ends = [(m_to_mm(line[4]), m_to_mm(line[5])), (m_to_mm(line[7]), m_to_mm(line[8]))]
+            if tail is not None and any(math.dist(e, tail) < 0.05 for e in ends):
+                continue  # the leader
+            xs += [e[0] for e in ends]
+            ys += [e[1] for e in ends]
+        return (min(xs), min(ys), max(xs), max(ys)) if xs else None
 
     # --- arranging a sheet ------------------------------------------------------
 

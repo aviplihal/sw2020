@@ -192,8 +192,11 @@ def validate(spec) -> dict:
         elif kind == "finish":
             if item["symbol"] not in FINISH_SYMBOLS:
                 raise SolidWorksError(f"{where}: symbol is one of {', '.join(FINISH_SYMBOLS)} (got {item['symbol']!r}).")
-            if not isinstance(item["value"], str) or not item["value"].strip():
-                raise SolidWorksError(f"{where}: value is the roughness as written, such as '63'.")
+            # no roughness at all ("" or null) is the old-style finish mark: machining required, no number
+            roughness = item["value"] if item["value"] is not None else ""
+            if not isinstance(roughness, str) or (roughness and not roughness.strip()):
+                raise SolidWorksError(f"{where}: value is the roughness as written, such as '63', or \"\" "
+                                      "for a symbol without one.")
         elif kind == "datum":
             if not isinstance(item["label"], str) or not re.fullmatch(r"[A-Z]{1,2}", item["label"]):
                 raise SolidWorksError(f"{where}: a datum label is a capital letter, such as 'A' (got {item['label']!r}).")
@@ -1381,8 +1384,9 @@ def _compare_one(item, group, got) -> dict:
         return {"status": "ok" if ok else "differs", "shown": got.get("label"), "spec": item["label"]}
     if kind == "finish":
         shown = f"{got.get('symbol')} {got.get('value')}"
-        ok = got.get("symbol") == item["symbol"] and norm_text(got.get("value")) == norm_text(item["value"])
-        return {"status": "ok" if ok else "differs", "shown": shown, "spec": f"{item['symbol']} {item['value']}"}
+        want = item["value"] or ""
+        ok = got.get("symbol") == item["symbol"] and norm_text(got.get("value")) == norm_text(want)
+        return {"status": "ok" if ok else "differs", "shown": shown, "spec": f"{item['symbol']} {want}"}
     if kind == "gdt":
         want = gdt_frame_text(item["characteristic"], item["tolerance"], item["modifier"], item["datums"],
                               item.get("projected"))

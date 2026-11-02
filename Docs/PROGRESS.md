@@ -466,3 +466,12 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
   sizes (.50 for .4975) are marked `rounded`. `DTN2\DTN2_spec_edited.json` (16 items: the 9 of the
   scan plus the 7 reference sizes) checks clean on a copy of the drawing. Reading hand-made frames
   gives no datum reference, so G1 and G2 list none. `DTN2_spec.json` is unchanged (it keeps THRU on the bore).
+- 2026-11-02 (DTN3 finish marks): the old drawing's "f" marks (machining required, no roughness) had been
+  written as six leader notes reading "f" because the spec's finish kind demanded a roughness value. A finish
+  item may now have an empty value, and `InsertSurfaceFinishSymbol3` takes "" as its roughness text.
+  2020: such a symbol has no text runs (the layout report used to skip it) and draws four lines: the leader
+  first (from the symbol's tip to the part), then the check mark; `session._symbol_box` boxes it from the
+  check-mark lines (about 8 x 9.5 mm). `DTN3\DTN3_spec_finish.json` (F1-F6 as `machined`, no value),
+  `DTN3\make_dtn3_finish.py`, `DTN3_finish_v2.SLDDRW`: check_drawing 19 ok; arrange fix 4 problems -> 0
+  (a symbol was on the 1/16 x 45 note); `DTN3_finish_v1*`, `DTN3_finish_try_*` are scratch.
+  Caution: `bridge_probe close_title <name>` also closes the part when the drawing shares its title.
