@@ -168,6 +168,7 @@ from .constants import (  # shop drawings
     SW_GTOL_MATERIAL,
     SW_GTOL_MATERIAL_TOKENS,
     SW_INCHES,
+    SW_LEADER_NONE,
     SW_LEADER_STRAIGHT,
     SW_PREF_DIMENSION_STANDARD,
     SW_PREF_DOUBLE_PRIME_MARK,
@@ -182,6 +183,7 @@ from .constants import (  # shop drawings
     SW_TOLERANCE_NAMES,
     SW_TOLERANCES,
     SW_UNIT_SYSTEM_IPS,
+    SW_SEL_FINISH_TARGETS,
     SW_SEL_PART_GEOMETRY,
     SW_VIEW_ENTITY_SILHOUETTE,
     SW_VIEW_ENTITY_EDGE,
@@ -7287,6 +7289,81 @@ class SolidWorksSession:
             xs += [e[0] for e in ends]
             ys += [e[1] for e in ends]
         return (min(xs), min(ys), max(xs), max(ys)) if xs else None
+
+    # --- finish marks on a saved drawing ------------------------------------------
+
+    _FINISH_DROP_MM = 7.0  # a symbol is dropped this far from its edge, on the air side; SolidWorks snaps its tip onto the edge
+    _FINISH_MAX_OFF_MM = 1.5  # how far from the picked point the tip may land before the mark is refused
+
+    def add_finish_marks(self, path: str, save_as: str, marks: list) -> dict:
+        """Put surface finish symbols directly on the edges of a saved .slddrw, no
+        leaders: each symbol stands on the line of its surface, its tip on the
+        line and its V open to the air side (drawing_spec.validate_finish_marks).
+        The drawing is copied to `save_as` first and the copy is edited, so the
+        source file is never touched; the copy is saved and measured again
+        (layout problems, e.g. a symbol on a note)."""
+        abs_path, out_path = os.path.abspath(path), os.path.abspath(save_as)
+        if not abs_path.lower().endswith(".slddrw") or not os.path.isfile(abs_path):
+            raise SolidWorksError(f"add_finish_marks works on a saved .slddrw (got '{path}').")
+        if not out_path.lower().endswith(".slddrw"):
+            raise SolidWorksError(f"save_as is a new .slddrw file (got '{save_as}').")
+        if os.path.exists(out_path):
+            raise SolidWorksError(f"{out_path} exists already; save_as is a new file name (nothing is overwritten).")
+        marks = drawing_spec.validate_finish_marks(marks)
+        sw = self._ensure()
+        shutil.copy2(abs_path, out_path)
+        placed, report = [], None
+        try:
+            result = sw.OpenDoc6(out_path, SW_DOC_DRAWING, SW_OPEN_DOC_SILENT, "", 0, 0)
+            doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+            if doc is None:
+                raise SolidWorksError(f"SolidWorks could not open the copy {out_path}.")
+            try:
+                drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+                ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
+                for n, mark in enumerate(marks, 1):
+                    placed.append(self._place_finish_mark(doc, drawing, ext, n, mark))
+                doc.EditRebuild3()
+                self._write_via_saveas3(out_path, doc)
+                report = self._layout_report(doc)
+            finally:
+                sw.CloseDoc(doc.GetPathName() or out_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.remove(out_path)  # the copy this call made, half edited
+            raise
+        return {"ok": True, "path": out_path, "source": abs_path, "placed": placed,
+                "problems": report["problems"], "problem_counts": report["problem_counts"]}
+
+    def _place_finish_mark(self, doc, drawing, ext, n: int, mark: dict) -> dict:
+        """One finish symbol on the edge under mark['at_mm'] of its view, no leader."""
+        where = f"finish mark {n} ({mark['view']} at {mark['at_mm'][0]:g}, {mark['at_mm'][1]:g} mm)"
+        if not drawing.ActivateView(mark["view"]):
+            raise SolidWorksError(f"{where}: the drawing has no view named '{mark['view']}'.")
+        x, y = mark["at_mm"]
+        doc.ClearSelection2(True)
+        manager = binding.wrap(doc.SelectionManager, self._mod.ISelectionMgr)
+        picked = ext.SelectByID2("", "", mm_to_m(x), mm_to_m(y), 0.0, False, 0, None, 0)
+        kind = manager.GetSelectedObjectType3(1, -1) if picked and manager.GetSelectedObjectCount2(-1) else None
+        if kind not in SW_SEL_FINISH_TARGETS:
+            raise SolidWorksError(f"{where}: nothing of the part shows there; at_mm is a point on the surface's line.")
+        dx, dy = {"above": (0, 1), "below": (0, -1), "left": (-1, 0), "right": (1, 0)}[mark["side"]]
+        drop = self._FINISH_DROP_MM
+        made = ext.InsertSurfaceFinishSymbol3(SW_SF_SYMBOLS[mark["symbol"]], SW_LEADER_NONE,
+                                              mm_to_m(x + dx * drop), mm_to_m(y + dy * drop), 0.0, 0, SW_ARROW_CLOSED,
+                                              "", "", "", "", mark["value"], "", "")
+        if made is None:
+            raise SolidWorksError(f"{where}: SolidWorks could not place the finish symbol.")
+        symbol = binding.wrap(made, self._mod.ISFSymbol)
+        # SolidWorks turns a symbol only for some sides (a left face), so it is set for every one
+        symbol.SetAngle(math.radians(drawing_spec.FINISH_SIDE_ANGLE_DEG[mark["side"]]))
+        annotation = binding.wrap(symbol.GetAnnotation(), self._mod.IAnnotation)
+        tip = [m_to_mm(c) for c in list(annotation.GetPosition())[:2]]
+        if math.dist(tip, mark["at_mm"]) > self._FINISH_MAX_OFF_MM:
+            raise SolidWorksError(f"{where}: SolidWorks attached the symbol {math.dist(tip, mark['at_mm']):.1f} mm "
+                                  "away, to another edge. Point at_mm at the surface's own line.")
+        return {"name": annotation.GetName(), "view": mark["view"], "tip_mm": [round(c, 2) for c in tip],
+                "side": mark["side"], "value": mark["value"], "symbol": mark["symbol"]}
 
     # --- arranging a sheet ------------------------------------------------------
 

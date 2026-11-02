@@ -78,6 +78,12 @@ All notable changes to this project are documented here. This project follows
   uses that sheet's area above the title block, and on B and C the general
   notes go in the free strip left of the title block.
 
+### Added (finish marks on a finished drawing)
+- `add_finish_marks(path, save_as, marks)` adds surface finish symbols to a saved drawing, as a copy. Each mark
+  names a view, a point on the surface's line (`at_mm`, sheet mm) and a side; the symbol has no leader, its tip
+  snaps onto the edge and it is turned to face away from the part. The tip is read back (within 1.5 mm) and the
+  copy is deleted if any mark fails. Cut-face lines of a section (selection type 12) are accepted.
+
 ### Fixed (shop drawings)
 - Points in a section view were projected with its parent's axes, so
   dimensions and details in a section went to the wrong place. Every view's

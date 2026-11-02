@@ -1217,6 +1217,28 @@ async def arrange_drawing(path: str, mode: str = "full", move_views: bool = True
 
 
 @mcp.tool()
+async def add_finish_marks(path: str, save_as: str, marks: list) -> dict:
+    """Put surface finish symbols directly on the edges of a saved .slddrw, no
+    leaders. The drawing is copied to `save_as` (a new file) and the copy is
+    edited and saved, so the source is never touched.
+
+    Each mark: {"view": "Section View A-A", "at_mm": [x, y], "side": "above" |
+    "below" | "left" | "right", "value": "125", "symbol": "machined"}. at_mm is
+    a point ON the surface's line, on the sheet in paper mm (the edges of a
+    section's cut face are lines there too); side is where the open air is
+    from that line: the symbol stands on that side with its tip on the line, its
+    V open to the air (above: upright; left: turned 90; right: -90; below:
+    upside down, so put a bore's symbol on the line of the half where the air is
+    above it). "value" "" gives the old-style mark without a number. A
+    surface needs one mark; they are not dimensions, so nothing is measured.
+    Returns each symbol's tip and name, and the layout problems of the saved
+    copy (a symbol on a note shows as text_overlap: move that mark to the
+    surface's other half or along its line, and make a new copy).
+    """
+    return await _call(_session.add_finish_marks, path, save_as, marks)
+
+
+@mcp.tool()
 async def close_part(save: bool = False) -> dict:
     """Close the current part or assembly without saving (export/save first if needed).
 

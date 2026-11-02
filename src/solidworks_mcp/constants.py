@@ -317,6 +317,7 @@ SW_GCS_TOKENS = {
 SW_GTOL_MATERIAL_TOKENS = {"<MOD-MMC>": "MMC", "<MOD-FMC>": "RFS", "<MOD-LMC>": "LMC"}
 SW_SF_SYMBOLS = {"basic": 0, "machined": 1, "no removal": 2}    # swSFSymType_e
 SW_SF_MAX_ROUGHNESS = 5                     # swSurfaceFinishSymbolText_e
+SW_LEADER_NONE = 0                          # swLeaderStyle_e: a symbol sits on its edge, no leader
 SW_LEADER_STRAIGHT = 1                      # swLeaderStyle_e
 SW_ARROW_CLOSED = 1                         # swArrowStyle_e
 SW_SECTION_CHANGE_DIRECTION = 4             # swCreateSectionViewAtOptions_e
@@ -327,6 +328,8 @@ SW_VIEW_ENTITY_EDGE = 1                     # swViewEntityType_e: model edges as
 # swSelectType_e: what a pick on a drawing sheet may land on for a leader: an edge, a face,
 # a silhouette (picked by position, a silhouette comes back as its face)
 SW_SEL_PART_GEOMETRY = {1, 2, 46}
+# add_finish_marks: also 12, the line of a section's cut-face outline (measured on 2020)
+SW_SEL_FINISH_TARGETS = SW_SEL_PART_GEOMETRY | {12}
 SW_IMPORT_ENTIRE_MODEL = 0
 # swInsertAnnotation_e: dimensions + those marked for drawings (no spec given)
 SW_INSERT_DIMENSIONS = 8 | 32768

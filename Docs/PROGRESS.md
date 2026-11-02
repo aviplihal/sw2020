@@ -475,3 +475,8 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
   `DTN3\make_dtn3_finish.py`, `DTN3_finish_v2.SLDDRW`: check_drawing 19 ok; arrange fix 4 problems -> 0
   (a symbol was on the 1/16 x 45 note); `DTN3_finish_v1*`, `DTN3_finish_try_*` are scratch.
   Caution: `bridge_probe close_title <name>` also closes the part when the drawing shares its title.
+
+- add_finish_marks (2020): `InsertSurfaceFinishSymbol3` with leader style 0 snaps the symbol tip onto the selected
+  edge; `SetAngle` 0 = opens upward, 90 = left face, -90 = right face, 180 = below. A pick on a section's
+  cut-face outline returns selection type 12. DTN5 example: six 125 marks on the user's drawing
+  (`DTN5\DTN5_finish.SLDDRW`), no leaders; layout report shows only the symbols' own text_on_view (they sit on edges).

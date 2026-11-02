@@ -53,6 +53,9 @@ GDT_ALIASES = {"roundness": "circularity", "true position": "position", "runout"
                "line profile": "profile of a line", "surface profile": "profile of a surface"}
 GDT_MODIFIERS = ("MMC", "LMC", "RFS")
 FINISH_SYMBOLS = ("basic", "machined", "no removal")
+# add_finish_marks: the side of a surface line the open air is on, and the angle (degrees, ISFSymbol.SetAngle)
+# that keeps the symbol's tip on the line with its V opening into the air (measured on 2020).
+FINISH_SIDE_ANGLE_DEG = {"above": 0.0, "left": 90.0, "right": -90.0, "below": 180.0}
 FRACTION_DENOMINATOR = 64  # the finest inch fraction a drawing shows
 EXACT_IN = 5e-6  # a model value this close to the spec's is the same value
 EXACT_DEG = 1e-3  # the same for an angle (0.001 deg: 4 millionths of an inch over a quarter inch)
@@ -290,6 +293,43 @@ def gdt_characteristic(name, where="gdt") -> str:
     if key not in GDT_CHARACTERISTICS:
         raise SolidWorksError(f"{where}: characteristic is one of {', '.join(GDT_CHARACTERISTICS)} (got {name!r}).")
     return key
+
+
+def validate_finish_marks(marks) -> list:
+    """add_finish_marks's `marks`, checked and completed: [{"view": "Section View A-A", "at_mm": [x, y]
+    (a point on the surface's line, on the sheet in paper mm), "side": "above" | "below" | "left" | "right"
+    (the side of that line the open air is on: the symbol stands there), "value": "125" (or "" for the
+    old-style mark without a number), "symbol": "machined" (default) | "basic" | "no removal"}]. Pure."""
+    if not isinstance(marks, list) or not marks:
+        raise SolidWorksError("marks is a non-empty list of {view, at_mm, side, value}.")
+    out = []
+    for n, mark in enumerate(marks, 1):
+        where = f"finish mark {n}"
+        if not isinstance(mark, dict):
+            raise SolidWorksError(f"{where} is not an object.")
+        extra = sorted(set(mark) - {"view", "at_mm", "side", "value", "symbol"})
+        if extra:
+            raise SolidWorksError(f"{where}: unknown field(s) {', '.join(extra)}.")
+        view = mark.get("view")
+        if not isinstance(view, str) or not view.strip():
+            raise SolidWorksError(f"{where}: view is the view's name on the drawing, such as \"Section View A-A\".")
+        at = mark.get("at_mm")
+        if (not isinstance(at, (list, tuple)) or len(at) != 2
+                or not all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) for c in at)):
+            raise SolidWorksError(f"{where}: at_mm is [x, y], a point on the surface's line, on the sheet in mm.")
+        side = mark.get("side")
+        if side not in FINISH_SIDE_ANGLE_DEG:
+            raise SolidWorksError(f"{where}: side is where the open air is from the line: "
+                                  f"{', '.join(FINISH_SIDE_ANGLE_DEG)} (got {side!r}).")
+        value = mark.get("value") if mark.get("value") is not None else ""
+        if not isinstance(value, str) or (value and not value.strip()):
+            raise SolidWorksError(f"{where}: value is the roughness as written, such as '125', or \"\".")
+        symbol = mark.get("symbol", "machined")
+        if symbol not in FINISH_SYMBOLS:
+            raise SolidWorksError(f"{where}: symbol is one of {', '.join(FINISH_SYMBOLS)} (got {symbol!r}).")
+        out.append({"view": view.strip(), "at_mm": [float(at[0]), float(at[1])], "side": side,
+                    "value": value.strip(), "symbol": symbol})
+    return out
 
 
 def annotation_name(spec_id: str) -> str:

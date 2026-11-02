@@ -356,6 +356,30 @@ def test_a_finish_mark_may_have_no_roughness_value():
                                                "surface": "x", "status": "read"}]})
 
 
+def test_finish_marks_are_checked_and_completed():
+    marks = ds.validate_finish_marks([{"view": " Section View A-A ", "at_mm": [190, 168.3], "side": "above", "value": "125"},
+                                      {"view": "V", "at_mm": [1, 2], "side": "right", "value": None}])
+    assert marks[0] == {"view": "Section View A-A", "at_mm": [190.0, 168.3], "side": "above", "value": "125",
+                        "symbol": "machined"}
+    assert marks[1]["value"] == ""  # the old-style mark without a number
+    assert ds.FINISH_SIDE_ANGLE_DEG == {"above": 0.0, "left": 90.0, "right": -90.0, "below": 180.0}
+
+
+@pytest.mark.parametrize("marks,message", [
+    ([], "non-empty list"),
+    ([{"view": "V", "at_mm": [1, 2], "side": "up"}], "side is where the open air is"),
+    ([{"view": "V", "at_mm": [1], "side": "above"}], "at_mm is"),
+    ([{"view": "V", "at_mm": [1, float("nan")], "side": "above"}], "at_mm is"),
+    ([{"view": "", "at_mm": [1, 2], "side": "above"}], "view is the view's name"),
+    ([{"view": "V", "at_mm": [1, 2], "side": "above", "value": "  "}], "roughness as written"),
+    ([{"view": "V", "at_mm": [1, 2], "side": "above", "symbol": "wavy"}], "symbol is one of"),
+    ([{"view": "V", "at_mm": [1, 2], "side": "above", "leader": True}], "unknown field"),
+])
+def test_finish_marks_refuse_bad_input(marks, message):
+    with pytest.raises(SolidWorksError, match=message):
+        ds.validate_finish_marks(marks)
+
+
 def test_an_annotation_name_must_be_a_string_and_unique():
     item = {"id": "D9", "kind": "dimension", "value": "1/16", "decimals": None, "tolerance": None,
             "between": "x", "status": "read"}
