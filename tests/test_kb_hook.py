@@ -58,7 +58,7 @@ def test_the_hook_and_the_server_agree_on_the_folder(tmp_path, monkeypatch):
 def test_the_repo_settings_register_the_hook_on_the_solidworks_tools():
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     [entry] = settings["hooks"]["PreToolUse"]
-    assert entry["matcher"] == "mcp__solidworks__.*"
+    assert entry["matcher"] == "mcp__solidworks__.*|Bash|PowerShell"
     [hook] = entry["hooks"]
     assert hook["type"] == "command" and ".venv/Scripts/python.exe" in hook["command"]
     assert "scripts/kb_session_hook.py" in hook["command"]

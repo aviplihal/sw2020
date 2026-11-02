@@ -8,7 +8,17 @@ person's text ends a wait (Docs/KNOWLEDGE-BASE.md §10.3).
 """
 
 import json
+import re
 from datetime import datetime
+
+# `python ...\sw_bridge\call.py add_fillet 3.05` (or call_dev.py): also quoted, after `cd ... &&`, in Bash or PowerShell
+_BRIDGE_CALL = re.compile(r"""(?:^|[\s"'/\\])call(?:_dev)?\.py["']?\s+["']?([A-Za-z_]\w*)""")
+SHELLS = ("Bash", "PowerShell")
+
+
+def bridge_methods(command) -> list:
+    """The tool names a shell command calls through the bridge's call.py / call_dev.py (none for any other command)."""
+    return _BRIDGE_CALL.findall(command) if isinstance(command, str) else []
 
 
 def _time(text, tz):
@@ -67,7 +77,11 @@ def read(paths, tz=None) -> dict:
                         if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") not in \
                                 entry.setdefault("seen", set()):
                             entry["seen"].add(block.get("id"))
-                            entry["tools"].append(str(block.get("name") or "").rsplit("__", 1)[-1])
+                            name = str(block.get("name") or "")
+                            if name in SHELLS:  # a job's calls go through the bridge: its method is the tool
+                                entry["tools"] += bridge_methods((block.get("input") or {}).get("command"))
+                            else:
+                                entry["tools"].append(name.rsplit("__", 1)[-1])
     return {"messages": [messages[k] for k in order], "assistant": sorted(assistant), "person": sorted(person)}
 
 

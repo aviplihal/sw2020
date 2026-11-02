@@ -82,7 +82,7 @@ def make_pdf(path, shape="bracket", pages=1):
 
 def transcript_lines(entries):
     """JSONL text of a small Claude Code transcript. Each entry is a tuple:
-    ('assistant', seconds, message_id, output_tokens, context_tokens, [tool names], extra) or ('user', seconds, text)
+    ('assistant', seconds, message_id, output_tokens, context_tokens, [tool names or (shell, command)]) or ('user', seconds, text)
     or ('result', seconds). Times are seconds after T0, written as UTC (tests read them with tz=UTC)."""
     lines = []
     for entry in entries:
@@ -92,8 +92,10 @@ def transcript_lines(entries):
         if kind == "assistant":
             _, _, message_id, out, ctx, tools = entry[:6]
             content = [{"type": "text", "text": "..."}] + [
-                {"type": "tool_use", "id": f"toolu_{message_id}_{k}", "name": f"mcp__solidworks__{name}", "input": {}}
-                for k, name in enumerate(tools)]
+                {"type": "tool_use", "id": f"toolu_{message_id}_{k}", "name": f"mcp__solidworks__{tool}", "input": {}}
+                if isinstance(tool, str) else  # ("Bash", "python ...call.py add_box 10"): a shell command
+                {"type": "tool_use", "id": f"toolu_{message_id}_{k}", "name": tool[0], "input": {"command": tool[1]}}
+                for k, tool in enumerate(tools)]
             usage = {"input_tokens": 5, "output_tokens": out, "cache_read_input_tokens": ctx - 5,
                      "cache_creation_input_tokens": 0}
             # one API message arrives as several lines that repeat its id and usage

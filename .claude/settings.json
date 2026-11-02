@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__solidworks__.*",
+        "matcher": "mcp__solidworks__.*|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
