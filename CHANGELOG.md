@@ -140,6 +140,10 @@ All notable changes to this project are documented here. This project follows
   counting as clashes: DTN7's hole callout no longer goes 85 mm.
   DTN2, DTN3, DTN4, DTN5, DTN7: no layout problems in `full`; `fix` the
   same except DTN2's tight sheet (one frame over a datum).
+- A spec item may carry `"annotation": "RD1"`, the name of the annotation
+  check_drawing finds it by in a saved drawing. A dimension drawn by hand in
+  SolidWorks is named RD1, RD2, ... and not SPEC_<id>, so a drawing edited
+  by hand could not be checked against a spec that described the edit.
 
 ### Fixed (shop drawing layout, found on the real DTN7 drawing)
 - Dimensions and leaders in a detail of a turned view (a detail of the front

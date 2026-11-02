@@ -23,7 +23,9 @@ KINDS = ("dimension", "thread", "hole", "finish", "datum", "gdt", "note")
 STATUSES = ("read", "unreadable")
 TOLERANCE_DISPLAYS = ("bilateral", "symmetric", "limits")
 # Optional extra keys an item may carry besides its kind's own fields.
-OPTIONAL_KEYS = {"view", "remark"}
+# "annotation": the name of the annotation the item is found by in a saved
+# drawing, when it was added by hand and has no SPEC_ name (check_drawing only).
+OPTIONAL_KEYS = {"view", "remark", "annotation"}
 FIELDS = {  # required keys per kind (besides id, kind, status)
     "dimension": ("value", "decimals", "tolerance", "between"),
     "thread": ("callout",),
@@ -154,7 +156,9 @@ def validate(spec) -> dict:
         if sid in seen:
             raise SolidWorksError(f"Two spec items share the id {sid!r}; ids must be unique.")
         seen.add(sid)
-        name = annotation_name(sid)
+        if "annotation" in item and (not isinstance(item["annotation"], str) or not item["annotation"].strip()):
+            raise SolidWorksError(f"{where}: annotation is the drawing annotation's name (a non-empty string).")
+        name = item.get("annotation") or annotation_name(sid)
         if name in names:
             raise SolidWorksError(f"Spec ids {names[name]!r} and {sid!r} are too alike (both become {name}).")
         names[name] = sid
@@ -1335,7 +1339,7 @@ def compare(spec, read: dict) -> dict:
         if item["status"] == "unreadable":
             lines.append({**line, "status": "unreadable", "detail": "flagged unreadable when the old drawing was read"})
             continue
-        found = by_name.get(annotation_name(sid), [])
+        found = by_name.get(item.get("annotation") or annotation_name(sid), [])
         if kind == "note":  # also found by its text when it sits unnamed in the notes block
             found = found or [("notes", n) for n in read.get("notes", [])
                               if norm_text(n.get("text")) == norm_text(item["text"])]

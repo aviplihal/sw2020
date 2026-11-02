@@ -449,3 +449,13 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
 - Results: DTN2 full 0 problems (4.6 s), fix 1 (frame over datum A, 19 s); DTN3 0/0 (4-6 s); DTN4
   0/0; DTN5 0/0; DTN7 0/0 (8 s / 11 s). Not done: the old DTN2 attempt v3 (frames and
   diameters piled on one side) stays unplaced, and 'fix' on DTN2's tight sheet.
+- 2026-11-02: the user edited DTN1_new_v4 and DTN6_new_v7 by hand (tolerances, the fillet and
+  chamfer as dimensions, the 1/16 and 30 deg chamfer dimensions back in place of note C2, F4 deleted,
+  five unnamed finish symbols). check_drawing found the SPEC_ items differing or missing and the
+  hand-drawn ones as extras. New spec files `DTN1_spec_edited.json` (12 items) and
+  `DTN6_spec_edited.json` (32 items) describe the edited drawings; hand-drawn dimensions are found by
+  their SolidWorks names through the new optional `annotation` field (D9 = RD1, D10 = RD2 on DTN1;
+  D9 = RD1, D17 = RD2 on DTN6). Limits are written as limits plus the tolerance around the modelled
+  nominal (DTN1 D2 `.621/.616`, +/-.0025 around .6185); an angle shows its places (`45.00°`).
+  `bridge_probe read_all <slddrw>` dumps what check_drawing reads. Both drawings check clean (12 ok;
+  32 ok with the five finish symbols as extras).

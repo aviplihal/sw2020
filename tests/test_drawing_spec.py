@@ -301,6 +301,28 @@ def test_compare_reports_ok_missing_differs_unreadable_and_extras():
     assert out["not_in_spec"] == [{"group": "dimensions", "name": "RD9", "view": "Drawing View1", "shown": "1.000"}]
 
 
+def test_an_item_added_by_hand_is_found_by_its_annotation_name():
+    """check_drawing finds SPEC_<id> unless the item names the annotation (a dimension
+    drawn by hand is called RD1 by SolidWorks)."""
+    spec = {"units": "in", "items": [
+        {"id": "D9", "kind": "dimension", "value": "1/16", "decimals": None, "tolerance": None,
+         "between": "chamfer length", "status": "read", "annotation": "RD1"}]}
+    read = {"dimensions": [{"name": "RD1", "view": "Drawing View1", "value": 0.0625, "angle": False,
+                            "decimals": 2, "fraction": True, "denominator": 16, "tolerance": "none", "shown": "1/16"}]}
+    out = ds.compare(spec, read)
+    assert [(l["id"], l["status"]) for l in out["items"]] == [("D9", "ok")] and out["not_in_spec"] == []
+    assert ds.compare(spec, {"dimensions": []})["items"][0]["status"] == "missing"
+
+
+def test_an_annotation_name_must_be_a_string_and_unique():
+    item = {"id": "D9", "kind": "dimension", "value": "1/16", "decimals": None, "tolerance": None,
+            "between": "x", "status": "read"}
+    with pytest.raises(SolidWorksError, match="annotation is the drawing annotation's name"):
+        ds.validate({"units": "in", "items": [{**item, "annotation": 5}]})
+    with pytest.raises(SolidWorksError, match="too alike"):
+        ds.validate({"units": "in", "items": [{**item, "annotation": "RD1"}, {**item, "id": "D10", "annotation": "RD1"}]})
+
+
 # --- orientation and layout --------------------------------------------------------------
 
 def test_the_natural_front_projects_to_the_standard_views():
