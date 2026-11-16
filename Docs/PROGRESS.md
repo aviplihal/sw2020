@@ -480,3 +480,4 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
   edge; `SetAngle` 0 = opens upward, 90 = left face, -90 = right face, 180 = below. A pick on a section's
   cut-face outline returns selection type 12. DTN5 example: six 125 marks on the user's drawing
   (`DTN5\DTN5_finish.SLDDRW`), no leaders; layout report shows only the symbols' own text_on_view (they sit on edges).
+- 2026-10-28 (branch `feat/kb-markdown`): knowledge base M1 and M2 built and unit-tested on the pure layer (Markdown storage, timeline logging of every call, digest, hotspots, `kb-fixed`, session hook). No SolidWorks involved, so nothing here is a 2020 finding; the integration tests did not run.

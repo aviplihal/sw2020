@@ -1,11 +1,12 @@
-# Knowledge Base — Design
+# Knowledge Base — Design (v2: plain Markdown)
 
-> Status: **design agreed, not built.** Nothing in this document exists in code yet.
-> It records the decisions made before implementation so a future session can build it
-> without re-deriving them. Branch: `feat/knowledge-base`.
-> Companion design: [SHOP-DRAWINGS.md](SHOP-DRAWINGS.md) (branch `feat/shop-drawings`),
-> built at the same time by another agent. Read §15 (working alongside the drawings branch)
-> before starting.
+> Status: **design agreed, partly built.** v1 (SQLite + FTS5 + Voyage image vectors) was
+> partly built and merged into `main` as K0, K1 and K3 (PR #2). v2 replaces its storage
+> with plain Markdown files and drops the vectors; §12.3 lists what changes in that code.
+> Every file type has a filled-in example in **[kb-templates/](kb-templates/)**, with its
+> size in tokens. Review those first: they are the format.
+> Companion design: [SHOP-DRAWINGS.md](SHOP-DRAWINGS.md) (branch `feat/shop-drawings`).
+> Section numbers match v1, so references from other files and the code still hold.
 
 ## 1. Purpose
 
@@ -16,477 +17,440 @@ old drawing (phone scan, PDF)  ──>  Claude models it  ──>  SLDPRT + SLDD
         DN17.pdf                    (MCP tools)            for your review                       into the knowledge base
 ```
 
-The knowledge base gives every new session a memory of earlier jobs:
+The knowledge base gives every new session a memory of earlier jobs, so Claude improves
+over time:
 
-- **"Have we done one like this before?"**: find earlier cases whose drawing looks similar
-  or whose description matches, and see how they were modelled and what went wrong.
-- **"What do we know about this tool?"**: one short, maintained card per MCP tool: when to
-  use it, when not to, how to call it, and the failures seen in practice with their cause.
+- **"Have we done one like this before?"** Earlier cases: what the part was, how it was
+  modelled, what went wrong, what you corrected.
+- **"What do we know about this tool?"** One short, maintained card per MCP tool.
+- **"Where is Claude wasting effort?"** A digest of every job (time and tokens per tool) and
+  one shared list of hotspots for you, or another session, to fix in the code.
 
-It runs on **one Windows machine**, next to SolidWorks and the MCP server. It is not shared
-across machines or users. The client is **Claude Desktop**.
+It runs on **one Windows machine**, next to SolidWorks and the MCP server. The client is
+**Claude Desktop**.
 
-## 2. Two sections
+### Why plain Markdown
+- **Claude reads it directly and cheaply.** No query layer: a file is the answer.
+- **You can read and edit it** in any editor. Backup = copy the folder.
+- **Small scale.** Hundreds of cases, not millions. An index of one line per case stays a
+  few thousand tokens; searching it is a text search.
+- **No outside service.** Only Claude sees the drawings (v1 also sent them to Voyage).
 
-### 2.1 Cases (one per drawing)
+## 2. What is stored: six types of file, for two readers
 
-A case is one drawing taken from input to output. Its ID is the **DN number** (`DN17`).
+```
+%LOCALAPPDATA%\solidworks-mcp\kb\        (override: SWMCP_KB_DIR)
+│   ── for CAD agents (doing a job), through the kb_* tools ──
+├── INDEX.md                 one line per case                       server, rebuilt on every change
+├── tools\add_fillet.md      one card per MCP tool, open failures    Claude's words, server's counts
+├── cases\DN17\
+│     case.md                the job: description, questions, model, result, review, lessons
+│     spec.json              the drawing spec (format: SHOP-DRAWINGS.md §4.1; tools read JSON)
+│     input.pdf  page.png  views\front.png …                         ingest / describe
+│     DN17.step  DN17 drawing.pdf                                    written at approval (§9)
+│   ── for fix agents (you, or a session improving the tools); no kb_* tool returns these ──
+└── fixes\
+      HOTSPOTS.md            the one file: effort, every issue, sessions, what fixed it
+      DN17\digest.md         this job's time and tokens, hard parts explained, session link
+      DN17\timeline.md       one line per tool call: the raw record
+```
 
-| Part of the case | Content | Searched by |
-|---|---|---|
-| Input | Original PDF, rendered page, three view crops | Image vectors |
-| Description | Claude's text description of the part, its part type, the drawing spec | Keywords + text vector |
-| Timeline | Every tool call in order: arguments, result, error, measurements | Keywords (tool names, error codes) |
-| Output | `DN17.step`, `DN17 drawing.pdf`, **exported at approval** from the files you checked; final mass/bbox | Not searched; opened on request |
-| Review | Your verdict (approved / needed changes), notes, and what you changed (measured) | Filters + ranking |
+| File | Written by | Read when | Size (example) |
+|---|---|---|---|
+| [INDEX.md](kb-templates/INDEX.md) | Server | CAD: every job, at describe | ~30 tokens per case |
+| [case.md](kb-templates/case.md) | Server + Claude (per section, see the templates README) | CAD: a similar case looks useful | ~470 tokens |
+| [tools/&lt;tool&gt;.md](kb-templates/tool-card.md) | Claude's words, server's counts | CAD: before using a tool; on its errors | ≤ 250 tokens |
+| [HOTSPOTS.md](kb-templates/HOTSPOTS.md) | Server; `kb-fixed` command | Fix: the starting point | ~150 tokens per issue |
+| [digest.md](kb-templates/digest.md) | Server numbers, Claude's explanations | Fix: detail of one job | ~600 tokens |
+| [timeline.md](kb-templates/timeline.md) | Server only | Fix: rarely; it feeds the others | ~30 tokens per call |
 
-### 2.2 Tool cards (one per MCP tool)
+**Nothing about time, tokens, hard parts or fixes is in the CAD files.** A CAD agent sees what
+helps it model; a fix agent sees what helps it fix.
 
-One card per tool (`add_revolved_profile`, `add_fillet`, …), never several scattered entries.
-**Short, simple and kept clean**, with a hard length limit (§7).
+**Rules for every file**
+- Fixed headings in a fixed order, so the server can find its sections and Claude knows
+  where to look. A short YAML header only where the server needs fields (case.md).
+- The server writes everything that is **counted or measured** (counts, times, sizes,
+  mass, dates). Claude writes only **judgement** (descriptions, lessons, card wording,
+  what was hard). Claude can never miscount.
+- Hard caps on the parts Claude writes (§7.2, §10.3); the server refuses text over a cap.
+- Units: millimetres in measurements, as the tools report them. The spec keeps the
+  drawing's inches exactly as written.
 
 ## 3. Case lifecycle
 
 ```
 ingested ──> described ──> modelling ──> finalised ──> approved
    │            │              │                  └─> changes_needed
-   │            │              │
-   └────────────┴──────────────┴──> abandoned        (embedding pending: a flag, not a state)
+   └────────────┴──────────────┴──> abandoned
 ```
 
-- **Only one case is open at a time.** Every logged tool call belongs to the open case.
-  The open case is stored in the database, not in memory, so it survives Claude Desktop
-  restarting the server.
-- **ingested:** the PDF has been read and rendered, and the DN number checked.
-- **described:** Claude has given the view boxes, description, part type and drawing spec,
-  and the vectors are stored (or marked pending).
-- **modelling:** the timeline grows automatically with each modelling tool call. The part
-  and drawing are saved under server-chosen names in the output folder (§6.2).
-- **finalised:** both files exist in the output folder and are saved; their measurements are
-  recorded; the tool cards are tidied. The case is closed: nothing more is logged to it.
-  Nothing is exported to the knowledge base yet.
-- **approved / changes_needed:** set by you after checking and fixing the SolidWorks files
-  (§9). That is when the STEP and PDF are made and stored. Until then the case is
-  **unreviewed**.
-- **abandoned:** `kb_abandon_case` closes an open case that should not go on (wrong file,
-  job dropped). It stays in the database, marked abandoned, and is never shown in search.
-  Its DN number is freed: the same DN can be ingested again as a fresh case. The old
-  abandoned record is kept under `DN17~1` for the log.
+- The status is the `status:` field in `case.md`'s header. **Only one case is open** (ingested,
+  described or modelling) at a time; the server finds it by reading the headers, so it
+  survives Claude Desktop restarting the server. Every logged tool call goes to the open case.
+- **ingested:** the PDF is read and rendered, the DN number checked.
+- **described:** Claude has given the view boxes, description, part type and spec.
+- **modelling:** the timeline grows with each tool call. The part and drawing are saved
+  under server-chosen names in the output folder (§6.2).
+- **finalised:** both files are saved; their measurements, the digest and the tidied tool
+  cards are written. Nothing more is logged to the case. Nothing is exported yet.
+- **approved / changes_needed:** set by you after checking and fixing the files (§9). Until
+  then the case is **unreviewed**.
+- **abandoned:** `kb_abandon_case(reason)` closes a case that should not go on. Its folder is
+  renamed `DN17~1`, it is left out of INDEX.md, and the DN can be ingested again.
 
 ## 4. Input: the DN number and the PDF
 
 ### 4.1 The DN number comes from the file name
-- You save the scan as **`DN<n>.pdf`** (e.g. `DN17.pdf`). The file name is the source of truth.
-- Ingest **refuses** any file whose name does not match `DN<number>.pdf`. A file is never
-  quietly given a number of its own.
-- **Another case is open:** refused, naming the open case. Finalise or abandon it first.
-- **Duplicate:** refused, e.g. *"DN17 already exists (ingested 2026-10-12)"*. An abandoned
-  case does not count.
-- **Gap:** if the highest existing case is DN15 and DN17 arrives, ingest warns that DN16 is
-  missing, but accepts it.
-- **Handwritten cross-check:** if "DN17" is also written on the paper, Claude reports what it
-  reads at the describe step (`handwritten_dn`). If that differs from the file name, the tool
-  refuses and Claude asks you. Once you confirm the file name is right, Claude calls it
-  again with `dn_confirmed=True`. The handwriting is only a check, never the source.
+- You save the scan as **`DN<n>.pdf`**. The file name is the source of truth; ingest
+  **refuses** any other name.
+- **Another case open:** refused, naming it. **Duplicate:** refused (an abandoned case does
+  not count). **Gap** (DN15 then DN17): a warning, accepted.
+- **Handwritten DN** on the sheet is only a cross-check: if it differs, describe refuses
+  and Claude asks you; once you confirm, it calls again with `dn_confirmed=True`.
 
 ### 4.2 Rendering the PDF
-- Phone scans: use the iPhone's document scanner (Notes or Files → *Scan Documents*), which
-  corrects perspective and lighting, and save as PDF.
-- The ingest tool renders the page to PNG with **`pypdfium2`** (Apache/BSD licence,
-  compatible with this project's MIT licence; **not** PyMuPDF, which is AGPL).
-- About **200 dpi**, stored as `page.png`. This full-resolution render is the source for
-  the view crops and for zooming in.
-- Optional `page` argument, default 1. **If the page does not exist, ingest refuses**
-  rather than using another one.
+- Phone scans: use the iPhone's document scanner and save as PDF.
+- Rendered with **`pypdfium2`** (Apache/BSD; **not** PyMuPDF, which is AGPL) at about
+  **200 dpi** to `page.png`. Optional `page` argument; a missing page is refused.
 
 ### 4.3 Letting Claude read small text
-Claude's vision scales every image down to about 1,500 px on the long side, and Claude
-Desktop limits the size of a tool result (about 1 MB). A whole sheet sent at 200 dpi would
-be shrunk to roughly 70 dpi on a letter page, and less on 11×17 or larger, too coarse to
-read small dimension text on a faded scan. So:
+Claude's vision scales images to about 1,500 px, so a whole sheet is too coarse for small
+dimension text.
+- Ingest returns an **overview** (whole page, ~1,500 px JPEG): for layout only.
+- **`kb_view_region(box)`** returns one region of `page.png` at full resolution. Claude reads
+  every value from zoomed regions, never the overview.
+- **Boxes are page fractions** `[x0, y0, x1, y1]`, 0 to 1, top-left origin.
+- Each zoom costs about 1,500–2,000 tokens, which is why the digest counts them (§10.3).
 
-- Ingest returns an **overview**: the whole page scaled to fit about 1,500 px, as JPEG.
-  Enough to see the layout and pick out the views, not to read every number.
-- **`kb_view_region(box)`** returns one region of `page.png` at full resolution (also
-  scaled to fit, as JPEG, so a small box is effectively a zoom). Claude reads every
-  dimension, tolerance and note from zoomed regions, never from the overview.
-- **Boxes are in page fractions**, `[x0, y0, x1, y1]` from 0 to 1, top-left origin. They
-  mean the same thing whatever size the image Claude saw was scaled to. The same format is
-  used for the view boxes at describe.
-- A region whose image would exceed the result-size limit is scaled down further, and the
-  result says so.
+## 5. Finding earlier cases
 
-## 5. Vectors and search
+No vectors, no search engine. Two steps, both plain text:
 
-### 5.1 What is embedded
+1. **INDEX.md** is one line per case (DN, part type, size, outcome, a one-line summary and
+   lesson), approved cases first, abandoned ones left out. `kb_describe_case` returns
+   the whole index (a few thousand tokens at a few hundred cases). Claude picks the lines that
+   look like the new part.
+2. **`kb_get_case(dn)`** returns that case's `case.md`. Its *How it was modelled* section
+   (built from the timeline) is the list of steps that worked; the timeline itself stays
+   with the fix files.
 
-| Vector | Model | Input |
-|---|---|---|
-| `view_front`, `view_top`, `view_side` | `voyage-multimodal-3.5` | View crops (Claude gives rough boxes; tool adds a generous margin) |
-| `sheet` | `voyage-multimodal-3.5` | Whole rendered page, a fallback in case the crops are poor |
-| `description` | `voyage-4` | Claude's text description |
+`kb_search(text, part_type, status)` is a plain case-insensitive text search over all
+`case.md` files (description, spec callouts and notes, lessons, review notes, error codes),
+returning the matching INDEX lines. Use it when the index has grown too long to read whole,
+or to find, say, every `1/2-13 UNC` thread.
 
-- **Compare like with like.** A new drawing's image vectors are only compared with stored
-  *input* drawings' vectors, never with output drawings or STEP files.
-- **Image embeddings, not outlines.** Contour fingerprints from photographed, annotated
-  old drawings are unreliable (glare, pencil marks, dimension lines crossing geometry).
-  Outline vectors are kept as an idea for later, if DXF inputs ever appear.
-- Every vector stores its **model name and version**. Changing models means running the
-  re-embed step, which rebuilds every vector from the stored crops and text.
-- Images sent to Voyage are scaled to at most 2 megapixels first, so each one costs a
-  known amount.
-
-### 5.2 Search
-- **Keyword search:** SQLite FTS5 over descriptions, part type, spec callouts and notes, tool
-  names, error codes and review notes.
-- **Vector search:** plain NumPy cosine similarity over all stored vectors. At this scale
-  (thousands of cases at most, ~12 MB of vectors), no vector database is needed.
-- **Merge:** **reciprocal rank fusion**: each result scores `1 / (60 + rank)` in each
-  list, and the scores are added. No tuning.
-- **Filters:** review status, part type, size range (largest bounding-box side).
-- **Part type** is a short free-text label Claude gives at describe (e.g. `bracket`,
-  `shaft`, `flange`, `plate`). Search offers the labels already in use, so the vocabulary
-  stays small.
-- **Ranking:** approved above unreviewed; cases that needed changes are flagged in results.
-  Abandoned cases are never returned.
-- **Result shape:** top 3–5 cases as **one-line summaries** (DN, what it is, outcome,
-  key lessons). Full detail is fetched only for a case Claude chooses.
-
-### 5.3 Voyage
-- Account and API key separate from Claude. Key in the environment variable
-  `VOYAGE_API_KEY` on the Windows machine, never in the knowledge-base folder or the repo.
-- Cost (October 2026): images $0.60 per billion pixels (at most $0.0012 per 2-megapixel
-  image), text $0.06 per million tokens. Four images and one text per case: about
-  **$0.005 per case at most**. The free allowance (150 B pixels, 200 M tokens) covers
-  roughly 18,000 cases.
-- **If Voyage fails, nothing is lost:** the case is still saved, marked *embedding pending*,
-  and the tool says so. A re-embed step later catches up.
-- Voyage receives images of the drawings and the spec text. See §5.4.
-
-### 5.4 Keeping the drawings private
-These are proprietary customer drawings, and two outside services see them.
-
-**Voyage** (from Voyage's FAQ, checked 2026-10-19):
-- For Voyage's hosted API, customers *"can opt-out from Voyage storing and using their data
-  for future model training"*. Opting out gives **zero-day retention**: the data is not
-  stored after the request. The FAQ implies that without the opt-out, data may be stored and
-  used for training.
-- To opt out you must be an **organization Admin** and have **a payment method on file**,
-  even if you stay inside the free allowance. It is done in the dashboard, under
-  Organization → Terms of Service.
-- The opt-out **cannot be undone in the dashboard** (re-opting in means emailing Voyage's
-  legal team). That is fine here: there is no reason to opt back in.
-- **Do this before the first real job.** Re-read the FAQ and terms at that point; they can
-  change.
-
-**Safety catch in the server:** the knowledge-base tools **refuse to send anything to
-Voyage** until the environment variable `SWMCP_VOYAGE_OPTED_OUT=1` is set. You set it once,
-after opting out. Without it, ingest still saves the case and marks it *embedding pending*
-(§5.3), so nothing is lost; `kb_reembed_pending` catches up once the variable is set.
-This makes forgetting the opt-out a loud refusal instead of a silent leak.
-
-**Claude** also reads every drawing. Check the data setting of the Claude account used in
-Claude Desktop (on personal plans: Settings → Privacy, whether chats may be used to improve
-the models), so it matches what Voyage is set to.
-
-**Contracts:** some contracts (e.g. export-controlled or defence work) forbid sending
-drawings to any outside service, opt-out or not. No setting fixes that; such a drawing
-must not go through this workflow. Checking this is up to you, per contract (§13).
+- **Part type** is a short label Claude gives at describe (`bracket`, `shaft`, `flange`).
+  The index shows the labels in use, so the vocabulary stays small.
+- **Ranking:** approved first; `changes_needed` flagged ⚠; unreviewed marked `?`.
+- **Given up from v1:** finding a case because its *drawing looks similar* (image vectors).
+  At this scale a description and part type find the same cases. If the index ever outgrows
+  this, local vectors could be added beside the files without changing them.
 
 ## 6. Output: two destinations, at two moments
 
 | When | Output folder (`SWMCP_OUTPUT_DIR`, e.g. `C:\SW-Output\`) | Knowledge base (`cases\DN17\`) |
 |---|---|---|
-| **While modelling** | `DN17.SLDPRT`, `DN17.SLDDRW`, saved by Claude under server-chosen names (§6.2) | The scan, the rendered page, the crops |
-| **At finalise** | Both files checked to exist and be saved; nothing is renamed or regenerated | Their measurements (mass, volume, bbox, drawing read-back), not the files |
+| **While modelling** | `DN17.SLDPRT`, `DN17.SLDDRW`, server-named (§6.2) | Scan, page render, crops, timeline |
+| **At finalise** | Both files checked to exist and be saved | Measurements, digest, cards |
 | **While you review** | You check and fix the two files in place | — |
-| **At approval** (§9) | The server opens your checked files and exports from them | `DN17.step` (from the SLDPRT), `DN17 drawing.pdf` (from the SLDDRW) |
-| **After approval** | You move the files out and add the company's data | Never reads them again |
+| **At approval** (§9) | The server opens your checked files and exports | `DN17.step`, `DN17 drawing.pdf` |
+| **After approval** | You move the files out and add company data | Never reads them again |
 
-- **The SLDPRT and SLDDRW are never stored in the knowledge base.** The part carries the
-  full feature tree, and both get company data added after they leave the output folder,
-  which later sessions must not see. Apart from approval (§9), the knowledge-base tools
-  **never read the output folder**, so moving files out of it afterwards breaks nothing.
+- **The SLDPRT and SLDDRW are never stored in the knowledge base**, and apart from approval
+  the knowledge-base tools never read the output folder.
 - **The stored STEP and PDF are made from exactly the files you approved,** with your fixes,
-  and before any company data goes in. The PDF is printed from the same SLDDRW Claude made
-  and checked: nothing is regenerated, so it is the drawing the shop machines from.
-- **The finalise result** lists both file names and reminds you: *review and fix the files
-  in place, tell me "DN17 approved", and only then move them out.*
+  before any company data goes in.
 
 ### 6.1 Shop drawings: designed separately
-How the drawing itself is made (third-angle, inches, default template, per-dimension
-precision, callouts, view choice, the spec-vs-drawing check, renaming with Pack and Go) is in
-**[SHOP-DRAWINGS.md](SHOP-DRAWINGS.md)**, built on its own branch. What the knowledge base
-needs to know about it:
-
-- **The drawing is a shop-floor document**: parts are machined from it after review.
-- **The drawing spec** (format in SHOP-DRAWINGS.md §4.1) is written by Claude at the
-  describe step and **stored in the case as JSON**. The knowledge base does not import
-  `drawing_spec.py`; it stores and returns the spec as-is. The spec is also searchable
-  (keywords over its callouts and notes, e.g. a thread size or a finish).
-- **The stored spec can be corrected.** After describe, Claude asks you about every
-  `unreadable` item. Your answers go back into the stored spec with `kb_update_spec`, which
-  replaces it whole and keeps the previous versions in the case. The spec Claude passes to
-  `make_drawing` and `check_drawing`, and the one shown at review, is always the latest.
-- **Claude makes and checks the drawing while modelling** (`make_drawing` with its chosen
-  views and the spec, then `check_drawing`), saved as `DN17.SLDDRW`. Finalise does not make
-  another drawing. Once the drawings branch has merged, finalise reads the saved drawing
-  back with `check_drawing` against the stored spec and stores the result (§15.3).
-- **Approval is a release gate.** A case stays *unreviewed* until you approve it, and
-  search never presents an unreviewed or *changes_needed* drawing as a good reference.
-- At review you are shown the stored spec beside the old drawing, so a misreading by Claude
-  is visible as a line in a list (SHOP-DRAWINGS.md §6).
+How the drawing is made is in **[SHOP-DRAWINGS.md](SHOP-DRAWINGS.md)**. What the knowledge
+base needs:
+- **The drawing spec** is written by Claude at describe and stored as `spec.json`, as-is
+  (the knowledge base does not import `drawing_spec.py`).
+- **The spec can be corrected** with `kb_update_spec`, after you answer the `unreadable`
+  items. It replaces `spec.json`; each question and your answer are listed in `case.md`
+  under *Questions asked*, so the change is visible without keeping old copies.
+- **Approval is a release gate:** an unreviewed or `changes_needed` drawing is never presented
+  as a good reference.
 
 ### 6.2 The server names every file
-A drawing links to its part by file path, and `make_drawing` refuses an unsaved part. So the
-part must be saved **before** the drawing is made, and under its final name: if Claude saved
-it as `bracket.sldprt` and finalise renamed it to `DN17.SLDPRT` later, the drawing would still
-point at `bracket.sldprt`. And Claude typing names is how a mix-up like `DN71` happens.
-
-So while a case is open:
-- **`save_part` and `make_drawing` take no path.** Their `path` argument becomes optional.
-  With a case open and no path, the server writes `SWMCP_OUTPUT_DIR\DN17.SLDPRT` and
-  `DN17.SLDDRW`. A path that differs from those is **refused**, naming the right one.
-- The part has its final name from its first save, so the drawing's link is right from the
-  start and nothing is ever renamed.
-- Calling them again (after a fix) overwrites the same two files.
-- With no case open, both tools work as today, with a path.
-
-The lookup is one function, `case_output_path(kind)` in `src/solidworks_mcp/case_paths.py`,
-returning `None` with no open case. It arrives as a stub in the shared commit (§15.1); the
-knowledge-base branch fills it in. `save_part` and `make_drawing` call
-`case_paths.resolve(kind, path)` as their first line; see §15.2 for who edits what.
+While a case is open, **`save_part` and `make_drawing` take no path**: the server writes
+`SWMCP_OUTPUT_DIR\DN17.SLDPRT` and `DN17.SLDDRW` and refuses a different path. The part
+has its final name from its first save, so the drawing's link to it is right from the start.
+With no case open both tools work as today, with a path. The lookup is
+`case_paths.case_output_path(kind)` (stub on `main`, filled in at K2).
 
 ## 7. Tool cards
 
-### 7.1 Two layers
-1. **Raw event log** (append-only, automatic): every call, its arguments, result, error
-   signature and measurements (§8). It is never shown to the agent directly.
-2. **One card per tool**, built from the log.
+### 7.1 One file per tool
+`tools\add_fillet.md`. Built from the timelines of all cases; never several scattered
+entries for one tool.
 
 ### 7.2 Card format (fixed, capped)
+See [kb-templates/tool-card.md](kb-templates/tool-card.md). In short:
 
 ```
-add_fillet                         (server 0.16.0, SOLIDWORKS 2020 SP5, updated 2026-10-18)
-Use when:      <one line>
-Don't use when:<one line>
-How to call:   <one line; signature comes from the docstring>
-Known failures:
-  - <cause → fix>                                    (seen 4×, last DN17)
-  - <cause → fix>                                    (seen 1×, last DN9)
+# add_fillet
+<server line: versions, updated, used N×, failed N×>
+**Use when:** <one line>
+**Don't use when:** <one line>
+**How to call:** <one line, from the docstring>
+## Known failures
+- `<SIGNATURE>` <cause → fix> (<server: seen N×, last DN17, SW revision>)
 ```
 
-- **Hard cap: 8 bullets or about 150 words.** The server **refuses** a card over the cap,
-  so it stays short whatever the agent does.
-- **The card is stored as fields, not as one text.** Claude writes only the words: the
-  *Use when* and *Don't use when* lines, and each failure's *cause → fix* text, keyed by its
-  error signature (§8.1). The server renders the card and adds everything that is counted:
-  the header, the *How to call* line, and each failure's count and last case. Claude cannot
-  drop, invent or miscount a failure line's numbers.
-- The *How to call* line is generated from the tool's docstring in `server.py`, never
-  maintained by hand, so it cannot drift from the code.
-- Every failure line carries the **server version and the SOLIDWORKS revision** it was last
-  seen on (`RevisionNumber`, e.g. `28.5.0`; the same tool can fail on 2020 and work on a
-  later release). A failure is dropped from the card when it has not been seen since the
-  server version or SOLIDWORKS revision changed, and the tool has since been used
-  successfully at least 3 times. Neither branch bumps the server version (§15.2), so until
-  the next release this rule only acts on SOLIDWORKS upgrades.
+- **Cap: 6 failure lines and 150 words of Claude's text.** The server refuses more.
+- Claude writes only the *Use when* / *Don't use when* lines and each failure's
+  *cause → fix* text. The server writes the header line, *How to call* (from the docstring
+  in `server.py`) and every count, so nothing can be miscounted or drift from the code.
+- The server **recounts from the timelines** each time it writes a card; the counts in the
+  file are never the source of truth, so hand-editing a card cannot break them.
+- **A fixed failure is removed from the card** (§10.5), so CAD agents never read about
+  problems that no longer happen. If it is seen again after the fix, it comes back on the
+  card marked *again after H-00n*.
+- A failure not seen since a SOLIDWORKS upgrade, with 3+ successful uses since, is dropped.
 
 ### 7.3 Keeping cards clean
-- **Deduplication is pure code:** events are grouped by error signature (§8.1), so six
-  Revolve failures with the same root become one bullet with a count.
-- **Rewording needs an LLM**, and the only one is Claude in Desktop (the server cannot call
-  Claude). So **tidying is part of finalise**: the server hands Claude each used tool's
-  current card fields plus that case's new events; Claude returns the rewritten fields; the
-  server checks that every signature on the card still has a text, checks the cap, and
-  stores it.
-- **Lessons from your review** (§9) are handed over at the next tidy of the tool at fault.
+- **Deduplication is code:** failures are grouped by error signature (§8.1).
+- **Rewording is Claude's job at finalise:** the server hands Claude each used tool's card
+  plus this case's failures; Claude returns the new wording; the server checks the cap and
+  that every signature still has a text.
+- **Lessons from your review** (§9) are handed over at the next tidy of that tool's card.
 
-### 7.4 Cards reach the agent automatically
-When a modelling tool returns an error, the response includes the matching line from that
-tool's card (`kb_hint`), if one exists. The agent does not have to remember to look.
+### 7.4 Cards reach Claude automatically
+When a tool returns an error, the result includes the matching card line (`kb_hint`). If
+the failure belongs to a **fixed** issue, `kb_hint` instead gives that issue's
+*If it happens again* note from HOTSPOTS.md. That is the only time a CAD agent sees anything
+from the fix files, and only when it is needed.
 
 ## 8. Errors and why they happened
 
-### 8.1 Error signatures (pure code)
-- **The server's own errors:** `SolidWorksError` gains a stable **`code`**
-  (e.g. `FILLET_TOO_LARGE`) and structured **`params`**, set at each place it is raised in
-  `session.py`. The signature is the code. There are about 400 raise sites, so this is done
-  one tool family at a time, starting with the families that fail most (fillet, chamfer,
-  shell, revolve, cuts, holes). Raises without a code fall back to the normalised text
-  below, so nothing is lost meanwhile.
-- **Raw COM errors and anything else:** a regex pass replaces feature names
-  (`Sketch3` → `<SKETCH>`, `Boss-Extrude2` → `<FEATURE>`), numbers, paths and HRESULTs
-  with placeholders, then hashes the result. Deterministic and unit-tested.
-- Both the raw text and the signature are stored.
+### 8.1 Error signatures (pure code; already built)
+- The server's own errors carry a stable **`code`** (e.g. `FILLET_TOO_LARGE`); that is the
+  signature. Codes are added one tool family at a time.
+- Other errors: feature names, numbers, paths and HRESULTs are replaced with placeholders,
+  then hashed (`T:9f2c1a04b7e3`).
 
-### 8.2 Context probes (the "because")
-A fillet that fails at 5 mm may only fail because the wall is 2 mm. The cause must be
-recorded **without the agent writing it**. When a tool fails, the server runs that tool's
-**probe** and stores the measurements beside the error:
-
-| Tool family | Probe records |
-|---|---|
-| `add_fillet`, `add_full_round`, `add_chamfer` | Requested size, edge length, widths of the two adjacent faces, local wall thickness, largest size that fits (already found by commit `766bfda` for fillets) |
-| `add_shell` | Requested thickness, part's thinnest extent |
-| `add_revolved_profile` | Whether the profile crosses or touches the axis |
-| `cut_*`, extrude cuts | Requested depth vs the body's extent in that direction |
-| Holes / Hole Wizard | Hole size vs face size and distance to the face edges |
-
-- The probe runs on the COM thread inside `run_guarded`, after the rollback, so it measures
-  the part as it was before the failed call. **A probe that fails itself is recorded as
-  such and never replaces or hides the original error.**
-- Code also computes simple ratios (e.g. radius ÷ wall = 2.5). When the card is tidied,
-  Claude can generalise to *"fails when radius > wall"*. That is interpretation of measured
-  data, not memory.
-- A probe is written once per tool family. Tools without a probe still log the error and
-  the part's bounding box and volume.
+### 8.2 Context probes: later, only if needed
+v1 planned a measuring probe per tool family after each failure (wall thickness next to a
+fillet, and so on). **Deferred:** build one only when a card or HOTSPOTS.md shows that a
+failure keeps coming back and the error alone doesn't say why. The fillet error already
+names the largest radius that fits.
 
 ## 9. Your review
 
-While the files are still in the output folder, you check and **fix them in place**
-(`DN17.SLDPRT`, `DN17.SLDDRW`), then tell Claude, for example:
-- *"DN17 approved"*, or
-- *"DN17 needed changes: the bore was Ø.750, not Ø.875"* (after you have fixed it).
+While the files are still in the output folder, you check and **fix them in place**, then
+tell Claude *"DN17 approved"* or *"DN17 needed changes: the bore was Ø.750, not Ø.875"*.
 
-`kb_review_case` then:
-1. **Refuses if either file is missing** from the output folder, and says the review needs
-   them there. It never approves without the files.
-2. **Opens your checked files in SolidWorks and exports** `DN17.step` from the SLDPRT and
-   `DN17 drawing.pdf` from the SLDDRW into `cases\DN17\`. It closes them again without
-   saving. Opening, exporting and comparing are separate calls on the COM thread, so no single
-   call runs into the 120 s timeout.
-3. **Works out what you changed, by code**, against what was recorded at finalise: the
-   part's volume and bounding box, and (once the drawings branch has merged) every drawing
-   dimension, tolerance and note that was added, removed or altered, from `check_drawing`'s
-   read-back. The changes are stored in the case next to your note, so a correction is
-   recorded even if your note is brief. If the files did not change since finalise, it
-   says so.
-4. Never copies the SLDPRT or SLDDRW into the knowledge base (§6).
-5. Ends with: *"Stored DN17.step and DN17 drawing.pdf. You can now move DN17.SLDPRT and
-   DN17.SLDDRW out of the output folder."*
+`kb_review_case(dn, verdict, notes)` then:
+1. **Refuses if either file is missing** from the output folder.
+2. **Opens your checked files and exports** `DN17.step` and `DN17 drawing.pdf` into
+   `cases\DN17\`, closing them without saving. Separate worker calls, so none hits the
+   120 s timeout.
+3. **Works out what you changed, by code**: volume and bounding box against finalise (and,
+   after the drawings branch merges, every drawing dimension and note from `check_drawing`).
+4. Writes the verdict, your note and the measured changes into `case.md` → *Review*, and
+   rebuilds INDEX.md.
+5. Ends with: *"Stored DN17.step and DN17 drawing.pdf. You can now move the files out."*
 
-Both verdicts store the STEP and PDF of the fixed files; the verdict decides how the case
-ranks. This:
-- sets the case **outcome**: approved cases rank first; cases that needed changes are flagged;
-- turns each correction into a **lesson on the card** of the tool at fault (e.g. *"check
-  the bore diameter against the section view"*), at the next card tidy;
-- means future sessions only ever see the **fixed** STEP and drawing, the ones the shop
-  machined from, without the company data added later.
+Each correction becomes a lesson on the card of the tool at fault at its next tidy, and a
+line in the case's *Lessons*. Your review is the most reliable signal the knowledge base gets.
 
-Your review is the most reliable signal the knowledge base gets.
+## 10. Logging, the session digest and hotspots
 
-## 10. Logging (automatic, at one choke point)
+### 10.1 Timeline: why it exists
+The timeline is the server's own record of a job. Everything counted elsewhere is built
+from it: the digest's numbers, the tool cards' counts, and case.md's *How it was modelled*.
+It is kept because it is the only record that is **always there**: the session transcript
+may not exist (a Claude Desktop chat has none on disk), and Claude Code deletes transcripts
+after 30 days by default (setting `cleanupPeriodDays`). Agents rarely read it directly.
 
-- Every tool call goes through `_call()` in `server.py` (which knows the tool name,
-  arguments and result) and `run_guarded()` in `session.py` (which knows about errors and
-  rollbacks). The event is written there, so the timeline is complete and accurate.
-- **All tools are logged except the `kb_*` tools.** Read-only tools (`list_faces`,
-  `screenshot`, `get_status`, …) are logged too, since what Claude looked at before a step
-  is part of how a case was modelled; the timeline view marks them so they can be folded
-  away.
-- **The agent adds only judgement:** the description and spec at describe, spec answers,
-  and the card wording at finalise.
-- With no open case, calls are not logged to any case (still counted for tool cards).
-- **A logging failure never breaks a modelling call**, but it is reported as a warning in
-  that call's result, not swallowed (fail loud, rule 4).
+- Every tool call goes through `_call()` in `server.py`; the server appends **one line**
+  to `fixes\DN17\timeline.md`: number, time, tool, short arguments, outcome, duration,
+  result size in tokens, and the pause before it.
+  See [kb-templates/timeline.md](kb-templates/timeline.md).
+- **All tools are logged, including `kb_*`** (v1 left those out, but zooms are among the
+  biggest token costs). Read-only tools are marked `·`.
+- Arguments are cut to ~80 characters; full results are not stored (only the measured
+  volume / bbox, or the error code). A 100-call job is about 3,000 tokens.
+- With no case open nothing is written to a case, but tool-card counts still go up
+  (in `fixes\_unassigned\timeline.md`).
+- **A logging failure never breaks a modelling call**; it is reported as a warning in that
+  call's result.
 
-## 11. New MCP tools
+### 10.2 Linking the session
+Each digest names the **session ID and the transcript file** of the chat that did the job,
+so a fix agent can open exactly that conversation (it is a local `.jsonl` file) instead of
+searching through all the sessions on the computer.
 
-All typed and fixed, consistent with rule 8 (no arbitrary-code tool).
+- An MCP server is not told which chat called it, so a **Claude Code hook** tells it: a
+  `PreToolUse` hook on `mcp__solidworks__.*` writes the hook's `session_id` and
+  `transcript_path` to `kb\fixes\.session.json` before each call. The server reads that file
+  when logging, so a job that spans two sessions lists both. Setting the hook up is one
+  entry in the CAD project's `.claude/settings.json`; it ships in the repo.
+- **Claude Desktop chat** (not the Code tab) has no hooks and no local transcript. The digest
+  then says *session: not recorded*, and everything measured still works.
+- Raise `cleanupPeriodDays` in Claude Code's user settings so transcripts outlive the 30-day
+  default (set to 3650 on the Windows machine, 2026-10-28; `0` would turn saving off). The
+  digest keeps the numbers either way.
+
+### 10.3 Session digest: where the effort went, and why
+Written at **finalise** (and at abandon), to `fixes\DN17\digest.md`. See
+[kb-templates/digest.md](kb-templates/digest.md).
+
+**The server measures.** From the timeline:
+- **Time:** total; tools running; Claude working between calls (the pause before each call).
+- **Result tokens:** what each tool result put into Claude's context: text at ~4 characters
+  per token, images at width × height ÷ 750 (Anthropic's formula).
+- **Top 5 tools** by time and tokens; **loops** (the same tool 3+ times in a row, the same
+  zoom box twice); **failures** by signature.
+
+When the transcript is linked, the server also reads it at finalise. It is plain JSON, with
+a timestamp, Claude's output tokens and the context size for every step. From it:
+- **Claude's own tokens** (thinking and text) written before each call, so a long pause can
+  be told apart: a lot of thinking, or a slow tool, or a long reply to you.
+- **Waiting on you**, exactly: from Claude's last message to your next one. (Without the
+  transcript, any pause over 5 minutes counts as waiting.)
+- **Context size**, so you can see when a job's context got large.
+
+**Then the server picks the hard parts** (`D1`, `D2`, …, at most 6): the longest pauses,
+the steps where Claude wrote the most tokens, every loop, every repeated failure, and (with
+the transcript) any step where the context grew by more than 30,000 tokens, so Claude says
+what filled it (a large `list_faces` result, several zooms kept in context). These are
+chosen by measurement. Claude does not decide what was hard.
+
+**Claude explains each one** (`kb_explain_digest`, one line each, 40 words at most):
+what it was doing in that pause and why it took long. It writes these at finalise, while
+the job is still in its context. It may add up to 2 hard parts the numbers can't show
+(say, a missing recipe in the guide), marked *not measured*. "Not sure" is an allowed answer.
+The transcript is the evidence; Claude's line is the summary.
+
+Each hard part links to an issue in HOTSPOTS.md (`→ H-005`): an existing one if it is the
+same problem, otherwise a new one. **Fix ideas go to HOTSPOTS.md**, not the digest.
+
+### 10.4 HOTSPOTS.md: the one file for fix agents
+`fixes\HOTSPOTS.md` ([kb-templates/HOTSPOTS.md](kb-templates/HOTSPOTS.md)) brings together
+everything a fix session needs, so it starts there and opens a digest only for detail.
+
+- **Measured:** the tools costing the most time and tokens over the last 10 jobs.
+- **Open issues**, worst first (jobs × cost per job). Each issue lists:
+  - the measured cost per job;
+  - **every job it was seen in, with that job's session ID and hard part** (`DN17 efb18dde D4`),
+    so the conversation can be opened straight away;
+  - Claude's fix idea.
+  Issues come from hard parts (§10.3), and from any failure signature seen in 2 or more jobs.
+- **Fixed issues**, with what fixed it, the commit, and an *If it happens again* note for a
+  CAD agent that runs into it anyway.
+- **Cap:** 20 open issues; the cheapest move to *Parked*.
+
+### 10.5 Marking an issue fixed
+When you or a fix session has fixed something, run one command. It keeps the three files
+that mention the issue in step, so nobody edits them by hand:
+
+```
+solidworks-mcp kb-fixed H-002 --commit a1b2c3d --by "kb_view_region returns earlier readings of a box" --note "call kb_view_region with note= after reading"
+```
+
+1. **HOTSPOTS.md:** moves H-002 to *Fixed* with the date, commit, `--by` and `--note`.
+2. **Each digest** whose hard part points to H-002 gets, next to it:
+   `✓ fixed by <--by> (<commit>, <date>)`. Reading a digest later, you see what was hard
+   *and* what was made to make it easier.
+3. **Tool cards:** failure signatures that belong to H-002 are removed from the cards.
+
+If an H-002 failure happens again after that date: `kb_hint` shows the *If it happens again*
+note, the failure returns to the card marked *again after H-002*, and HOTSPOTS.md opens a new
+issue pointing back to H-002. So a fix that didn't hold is visible at once.
+
+## 11. MCP tools
+
+All typed and fixed (rule 8: no arbitrary-code tool).
 
 | Tool | Does |
 |---|---|
-| `kb_ingest_drawing(path, page=1)` | Check DN number, render the page, open the case, return the overview image |
-| `kb_view_region(box)` | One region of the open case's page at full resolution, as an image (§4.3) |
-| `kb_describe_case(view_boxes, description, part_type, drawing_spec, handwritten_dn=None, dn_confirmed=False)` | Crop, embed, store the description, part type and drawing spec (JSON, format in SHOP-DRAWINGS.md §4.1); run search; return the top similar cases |
-| `kb_update_spec(drawing_spec)` | Replace the open case's spec (after you answer the unreadable items); earlier versions kept |
-| `kb_search(text=None, like_case=None, filters=None, limit=5)` | Hybrid search; one-line summaries |
-| `kb_get_case(dn, include_timeline=False)` | Full detail of one case; with `include_timeline`, the full step list. The case's STEP file can be opened for reference |
+| `kb_ingest_drawing(path, page=1)` | Check DN, render the page, open the case, return the overview image |
+| `kb_view_region(box)` | One region of the page at full resolution (§4.3) |
+| `kb_describe_case(view_boxes, description, part_type, drawing_spec, handwritten_dn=None, dn_confirmed=False)` | Crop the views, write `case.md` and `spec.json`; return INDEX.md |
+| `kb_update_spec(drawing_spec, answers)` | Replace `spec.json`; add the questions and your answers to `case.md` |
+| `kb_search(text=None, part_type=None, status=None, limit=10)` | Text search over the cases; returns INDEX lines |
+| `kb_get_case(dn)` | That case's `case.md` |
 | `kb_tool_card(tool)` | One tool's card |
-| `kb_finalise_case()` | Check both files are saved in the output folder; record their measurements; close the case; return the cards to tidy |
-| `kb_update_tool_card(tool, card)` | Store a tidied card's fields (refused over the cap, or if a failure signature lost its text) |
-| `kb_abandon_case(reason)` | Close the open case without finishing it; frees its DN (§3) |
-| `kb_review_case(dn, verdict, notes=None)` | Record your review; export STEP and PDF from your checked files; store what changed (§9) |
-| `kb_reembed_pending()` | Embed cases that were marked pending |
+| `kb_finalise_case(lessons)` | Check files, record measurements, write the digest's numbers, close the case; return the cards to tidy and the hard parts to explain |
+| `kb_explain_digest(explanations, not_measured=None, fix_ideas=None)` | One line per hard part (`{"D1": "…"}`), up to 2 extra ones, and fix ideas; links each to an H-issue and updates HOTSPOTS.md |
+| `kb_update_tool_card(tool, card)` | Store a tidied card's wording (refused over the cap) |
+| `kb_abandon_case(reason)` | Close the case without finishing; writes the digest; frees the DN |
+| `kb_review_case(dn, verdict, notes=None)` | Export STEP + PDF from your checked files; record what changed (§9) |
 
-Changed existing tools: `save_part` and `make_drawing` take an optional `path`; with a case
-open the server names the file (§6.2).
+Dropped from v1: `kb_reembed_pending` (no vectors), `include_timeline`. Changed: `save_part` /
+`make_drawing` take an optional `path` (§6.2).
 
-Adding them follows the usual pattern in `CLAUDE.md` (session method → server wrapper →
-tests → README tool count, guide, CHANGELOG).
+Not an MCP tool (CAD agents never need it): the command `solidworks-mcp kb-fixed` (§10.5),
+run by you or a fix session.
 
-## 12. Storage and packaging
+## 12. Storage, packaging and the change from v1
 
 ### 12.1 Layout
-```
-%LOCALAPPDATA%\solidworks-mcp\kb\        (override: SWMCP_KB_DIR)
-├── kb.sqlite
-│     cases            dn, status, open flag, part type, description, drawing spec (JSON,
-│                      with earlier versions), drawing check result, measurements at
-│                      finalise and at review, review, timestamps
-│     events           case, seq, tool, args, result, error_code/signature, probe data,
-│                      server version, SOLIDWORKS revision
-│     error_signatures signature, tool, count, first/last seen, last versions
-│     tool_cards       tool, card fields (JSON), versions, updated
-│     vectors          case, kind (view_front/…/description), model, model_version, blob
-│     fts              FTS5 index over descriptions, part types, spec callouts and notes,
-│                      tools, error codes, review notes
-└── cases\DN17\
-      input.pdf  page.png  views\front.png top.png side.png  thumb.png
-      DN17.step  DN17 drawing.pdf          (written at approval, §9)
-```
-- SQLite in **WAL mode**, so a crash mid-write cannot corrupt the database.
-- One writer (Claude Desktop runs one server process): no locking issues.
-- **Backup = copy the folder.**
-- FTS5 is usually included in Python's `sqlite3` on Windows. **Check this on the target
-  install** before building on it.
+See §2. Every file is UTF-8 Markdown or JSON. **One writer** (the one server process), so no
+locking. Each write goes to a temporary file that is then renamed over the old one, so a
+crash never leaves half a file. **Backup = copy the folder.** You may keep it in git.
 
 ### 12.2 Packaging
-- Optional extra **`solidworks-mcp[kb]`**: `voyageai`, `pypdfium2`, `numpy`, `Pillow`.
-  The core server stays light.
-- Without the extra, the knowledge-base tools fail loud: *"install solidworks-mcp[kb]"*.
+Optional extra **`solidworks-mcp[kb]`**: `pypdfium2`, `Pillow` (for the page render and zooms).
+`voyageai` and `numpy` are no longer needed. Without the extra, the PDF tools fail loud.
 
-### 12.3 Testing
-- **Pure tests** (run on any OS, including the Mac): DN-name parsing, region boxes and
-  scaling, error normalisation, signatures, card fields and cap, rank fusion, storage layer,
-  lifecycle transitions (including abandon and re-ingest), server-chosen paths. Voyage is
-  faked.
-- **Integration tests** (Windows + SolidWorks): with a case open, `save_part` and
-  `make_drawing` write `DN17.SLDPRT` and `DN17.SLDDRW` and the drawing links to that part;
-  approval writes `DN17.step` and `DN17 drawing.pdf` from edited files; a forced fillet
-  failure records the probe data.
-- On the Mac nothing end-to-end can run. Say so rather than claiming it was verified.
+### 12.3 What changes in the code already on `main`
+| File | v1 (built) | v2 |
+|---|---|---|
+| `kb/store.py` | SQLite tables, FTS5 | Read/write the Markdown files: headers, fixed sections, atomic writes |
+| `kb/embed.py` | Voyage client | **Removed** |
+| `kb/search.py` | FTS5 + vectors + rank fusion | Text search over `case.md` files, ~40 lines |
+| `kb/cards.py` | Card fields in SQLite | Same fields and cap, rendered to / parsed from `tools\*.md` |
+| `kb/log.py` | Event rows | One timeline line per call; adds duration, tokens, pause; logs `kb_*` too |
+| `kb/digest.py` | — | **New**: digest numbers from a timeline (+ transcript), hard-part picking, HOTSPOTS update, `kb-fixed` |
+| `.claude/settings.json`, `scripts/kb_session_hook.py` | — | **New**: the `PreToolUse` hook that records the session (§10.2) |
+| `kb/dn.py`, `signatures.py`, `images.py`, `config.py` | | Kept as they are |
+| `server.py` `kb_*` wrappers | | Signatures as in §11; `kb_reembed_pending` removed |
+
+### 12.4 Testing
+- **Pure tests** (any OS): file round-trips for each of the six types (write → parse →
+  identical), caps, lifecycle (including abandon and re-ingest), index order, text search,
+  digest numbers from a sample timeline and a sample transcript, hard-part picking,
+  hotspot merging, `kb-fixed` updating all three files, a fixed failure coming back,
+  atomic writes. A CAD-facing tool never returning anything from `fixes\`.
+- **Integration tests** (Windows + SolidWorks): server-named saves, a real call appending
+  a timeline line with duration and tokens, approval exporting STEP + PDF from edited files.
 
 ## 13. Open points
 
-Decided 2026-10-19:
-1. **Past timelines and STEP files can be shown.** Search returns summaries; `kb_get_case`
-   returns the full step list and the STEP file on request.
-2. **Voyage data use:** opt out before the first real job (§5.4).
-3. **Storage timing:** the SLDPRT and SLDDRW are the files you check, in the output folder.
-   The STEP and PDF are made from them only at approval, before you move them out and add
-   company data (§6, §9).
-4. **File names:** chosen by the server from the open case while modelling, not at
-   finalise (§6.2).
-5. **Shop drawing standard:** see SHOP-DRAWINGS.md §3–§4.
+Decided:
+1. **Plain Markdown, no database, no outside embedding service** (2026-10-28).
+1a. **Two readers, two folders:** CAD agents never see time, tokens, hard parts or fixes;
+   fix agents work from `fixes\`, with the session of every issue linked (2026-10-28).
+2. Past timelines and STEP files can be shown on request.
+3. The SLDPRT and SLDDRW stay in the output folder; STEP and PDF are made at approval.
+4. File names are chosen by the server from the open case.
+5. Shop drawing standard: SHOP-DRAWINGS.md §3–§4.
+
+6. **The case prefix is `DN<n>`** (2026-10-28). `DTN<n>` (DTN6, DTN7, in
+   `C:\Users\Sandbox\Projects\DTN*`) means **drawing test number**: test runs made while the
+   MCP tools and drawings were still being built, before the knowledge base existed. They are
+   full of errors from that development work, so they are **not cases**: ingest refuses a
+   `DTN` name like any other, and their errors must never be read as lessons about
+   the finished tools. Use them only as test material for the tools.
 
 Still open:
-6. **Contract restrictions.** Whether any contract forbids sending its drawings to outside
-   services at all (§5.4). This is yours to check per contract.
+7. **Contract restrictions.** Whether a contract forbids letting Claude read its drawings.
 
 ## 14. Build order
 
-| Step | Content |
-|---|---|
-| — | Shared commit on `main` first (§15.1) |
-| K0 | Storage layer (open case in the database), error normalisation, `SolidWorksError` codes for the first tool families, automatic logging |
-| K1 | `kb_ingest_drawing`, `kb_view_region`, `kb_describe_case`, `kb_update_spec`, `kb_abandon_case`, Voyage embedding, `kb_search`, `kb_get_case` |
-| K2 | Server-chosen paths in `save_part` / `make_drawing` (§6.2); `kb_finalise_case` |
-| K3 | Tool cards: fields, rendering, cap, tidy at finalise, `kb_hint` on errors |
-| K4 | Context probes, one tool family at a time (fillet/chamfer first), with their error codes |
-| K5 | `kb_review_case`: export STEP and PDF from the checked files, part before/after; ranking by outcome; lessons from corrections. The drawing before/after comparison uses `check_drawing`'s read-back, so it lands after the drawings merge (with K6) |
-| K6 | After the drawings branch has merged: finalise stores `check_drawing`'s result against the stored spec; review compares the drawing read-back before and after (§15.3) |
+| Step | Content | Needs SolidWorks |
+|---|---|---|
+| ✓ | Shared commit; K0 (logging, signatures, error codes); K1 (ingest, zoom, describe); K3 (cards). On `main`, with SQLite storage | — |
+| M1 | **Switch storage to Markdown** (§12.3): `store.py`, `search.py`, `cards.py`, `log.py` with duration/tokens/pause; remove Voyage; tests per file type | No |
+| M2 | Digest, transcript reading, hard parts, HOTSPOTS, `kb-fixed` (`kb/digest.py`); session hook. Pure, tested on sample files | No |
+| K2 | Server-named paths; `kb_finalise_case` (measurements, digest, card tidy) | Yes |
+| K5 | `kb_review_case`: STEP + PDF export, measured changes | Yes |
+| K6 | After the drawings branch merges: `check_drawing` read-back at finalise and review | Yes |
+| later | Context probes (§8.2), only for failures that keep coming back | Yes |
 
 ## 15. Working alongside the drawings branch
 
