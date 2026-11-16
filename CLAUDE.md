@@ -27,6 +27,18 @@ Everything in this repository is written in **English**: Markdown docs, code com
 error messages, commit messages and PR text. If you find text in another language (e.g. Dutch from upstream), translate
 it to English rather than adding to it. Reply in whatever language the user writes in, but write files in English.
 
+## Keeping things clean: one clone, worktrees in one place
+
+- **`C:\Users\Sandbox\Projects\sw2020` is the only clone.** Never clone `aviplihal/sw2020` anywhere else (e.g. `Documents\GitHub`), and
+  never commit from another copy. Simple test branches are made in this clone with `git switch -c`; no worktree is needed.
+- **When making a worktree, use `scripts/new-worktree.ps1`** (e.g. `.\scripts\new-worktree.ps1 -Name shop-drawings`). It puts the
+  worktree in `C:\Users\Sandbox\Projects\sw2020-worktrees\<Name>` with its own `.venv` and `.mcp.json`. Never run `git worktree add`
+  by hand and never create worktrees under `.claude\worktrees`.
+- Commit or save everything in a worktree before ending a session in it. Remove it once its branch is merged
+  (`git worktree remove <path>`, then `git branch -d <branch>`).
+- **The knowledge base data is never committed.** It lives in `%LOCALAPPDATA%\solidworks-mcp\kb` (or `SWMCP_KB_DIR`), outside every
+  repo. Only the KB *code* and `Docs/kb-templates/` are tracked. Never copy case files, digests or `kb.sqlite` into the repo.
+
 ## What this is
 
 `solidworks-mcp` (v0.16.0, MIT, Python ≥3.11): an **MCP server that drives a running SolidWorks on Windows over COM**, so an AI agent can model parametric parts and assemblies **and verify its own work**. Every modelling tool returns measured volume / mass / bounding box, so the agent can compare with a hand calculation and correct itself.
