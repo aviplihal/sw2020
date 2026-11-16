@@ -517,3 +517,15 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
   `make_drawing C:\Users\Sandbox\Projects\_tmp\tb_test.SLDDRW`, then `set_title_block "{}" path=...` (lists the
   links) and `set_title_block "{\"material\": \"6061-T6\", \"finish\": \"ANODIZE BLACK\"}" path=...`.
 
+### 2026-11-16 (later) — `set_title_block` verified on SOLIDWORKS 2020 (28.4.0)
+
+Through the bridge, on a throwaway 50 x 30 x 10 block and its A-sheet drawing:
+- The stock `a - landscape.slddrt` title block links: `$PRPSHEET` (the part) for **Material**, **Finish**,
+  **Description**, Weight; `$PRP` (the drawing) for **Revision**, DrawnBy/Date, CheckedBy/Date, the approvals,
+  COMPANYNAME and the SW- system fields. There is **no part-number field** on the stock sheet: `part_number` is
+  stored and reported with `shown: null`.
+- `INote.PropertyLinkedText` on the sheet's template notes, `CustomPropertyManager("")`, `Add3` and `Get4`
+  all work as coded. After saving the part and rebuilding the drawing, all four values showed (`shown: true`).
+- `check_drawing` reopened the saved drawing and matched title items (a wrong revision came back `differs`).
+- The tool closed what it opened; the current part stayed open and unmodified.
+
