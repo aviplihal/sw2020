@@ -26,6 +26,7 @@ import asyncio
 import concurrent.futures
 import queue
 import threading
+import time
 
 import pythoncom
 
@@ -47,6 +48,7 @@ class ComWorker:
         self._queue: "queue.Queue" = queue.Queue()
         self._ready = threading.Event()
         self._shutting_down = False
+        self._running = None  # (label, start time) of the job on the COM thread now
         self._thread = threading.Thread(target=self._run, name="solidworks-com", daemon=True)
         self._thread.start()
         self._ready.wait()  # block until the apartment is initialised
@@ -59,39 +61,55 @@ class ComWorker:
                 job = self._queue.get()
                 if job is self._STOP:
                     break
-                fn, fut = job
+                fn, fut, label = job
                 if not fut.set_running_or_notify_cancel():
                     continue  # awaiter timed out / gave up before we started this job
+                self._running = (label, time.monotonic())
                 try:
                     fut.set_result(fn())
                 except BaseException as exc:  # noqa: BLE001 - relay to the caller
                     fut.set_exception(exc)
+                finally:
+                    self._running = None
         finally:
             pythoncom.CoUninitialize()
 
-    def submit(self, fn) -> "concurrent.futures.Future":
+    def submit(self, fn, label: str = "the call") -> "concurrent.futures.Future":
         if self._shutting_down:
             raise SolidWorksError("The COM worker is shut down; no new operations are possible.")
         fut: "concurrent.futures.Future" = concurrent.futures.Future()
-        self._queue.put((fn, fut))
+        self._queue.put((fn, fut, label))
         return fut
 
-    async def call(self, fn):
+    async def call(self, fn, timeout_s: float | None = None, label: str = "the call"):
         """Submit `fn` to the COM thread and await its result, with a timeout.
 
-        On timeout the COM call is almost always blocked on a modal dialog. We
-        cannot force-abort it, so we raise a clear, actionable error rather than
-        hang forever. The job, if not yet started, is skipped when dequeued.
+        A COM call cannot be force-aborted, so on timeout this raises a clear
+        error rather than hang forever; the job, if not yet started, is skipped
+        when dequeued. The error says what the COM thread is busy with: a long
+        call that is still working (a big drawing took 190 s on SOLIDWORKS 2020)
+        is not a modal dialog, and the next call waits until it ends.
         """
-        fut = self.submit(fn)
+        timeout_s = self._call_timeout_s if timeout_s is None else timeout_s
+        fut = self.submit(fn, label)
         try:
-            return await asyncio.wait_for(asyncio.wrap_future(fut), self._call_timeout_s)
+            return await asyncio.wait_for(asyncio.wrap_future(fut), timeout_s)
         except asyncio.TimeoutError:
-            raise SolidWorksError(
-                f"SolidWorks did not respond within {self._call_timeout_s:.0f}s. "
-                "A modal dialog is probably open in SolidWorks. "
-                "Close any dialogs; restart the server if it keeps hanging."
-            )
+            raise SolidWorksError(self.timeout_message(label, timeout_s, fut.running()))
+
+    def timeout_message(self, label: str, timeout_s: float, started: bool) -> str:
+        running = self._running
+        busy = f"{running[0]} has been running for {time.monotonic() - running[1]:.0f}s" if running else None
+        if started:
+            text = f"{label} did not finish within {timeout_s:.0f}s. SolidWorks may still be working on it"
+        elif busy:
+            text = (f"{label} did not start within {timeout_s:.0f}s: SolidWorks is still busy with an earlier "
+                    "call that timed out")
+        else:
+            text = f"{label} did not start within {timeout_s:.0f}s"
+        return (text + (f" ({busy})" if busy else "") + ". A call cannot be stopped once it runs, and the next "
+                "call waits for it to end. If SolidWorks shows a dialog, close it; if it stays busy for "
+                "minutes, restart SolidWorks and the server.")
 
     def shutdown(self) -> None:
         self._shutting_down = True

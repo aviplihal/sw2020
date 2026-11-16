@@ -1,6 +1,7 @@
 # Shop Drawings — Design
 
-> Status: **design agreed, not built.** Branch: `feat/shop-drawings`.
+> Status: **built (D1–D7) and verified on SOLIDWORKS 2020 SP4 through the bridge** (§11).
+> Branch: `feat/shop-drawings`.
 > Companion design: [KNOWLEDGE-BASE.md](KNOWLEDGE-BASE.md) (branch `feat/knowledge-base`),
 > built at the same time by another agent. Read §8 (working alongside the knowledge base)
 > before starting.
@@ -33,7 +34,7 @@ datums dimensions are measured from.
 | Projection | **Third-angle** (ANSI) | Was first-angle: use SolidWorks' third-angle view creation |
 | Views | **Chosen per part by good drafting practice** (§4.4). **No isometric, ever** | Was a fixed front/top/right + isometric |
 | Units | **Inches** on the drawing | Was millimetres |
-| Template, sheet and title block | **The user's default drawing template**, the one SolidWorks' own *New → Drawing* uses. It already carries the correct sheet and title block | `make_drawing` already reads the default template, but then forces `SW_DWG_PAPER_A4`. Stop forcing a paper size: the template's sheet is used as-is |
+| Template, sheet and title block | **The user's default drawing template**, the one SolidWorks' own *New → Drawing* uses. On this SOLIDWORKS 2020 install that template carries **no sheet format** (New → Drawing asks for one), so the sheet is **always A size (11 × 8.5 in) landscape with SolidWorks' stock ANSI format `a - landscape.slddrt`** and its title block (decided by the user, 2026-10-19) | Was A4. `make_drawing` starts from the default template, then sets the sheet with `SetupSheet5` |
 | Title block contents | **Left empty.** The user fills it in; it holds information the model cannot see | The server writes nothing into it |
 
 **Inches in, millimetres inside, inches out.** The server keeps working in millimetres at
@@ -143,6 +144,14 @@ Rules:
   datum order.
 - `view` records **where the item was on the old drawing**. It is reading context only: it
   does **not** say which view the item goes in on the new drawing (§4.4).
+- A dimension may also carry (added 2026-10-27 for DTN7): `"basic": true` (a theoretically
+  exact value, boxed, `tolerance` null), `"reference": true` (in parentheses, `tolerance`
+  null; checked against the model to the places it shows), and `"prefix"` / `"suffix"`
+  text exactly as written (`"10X"`, `"4X"`, `"MAX"`, `"TYP"`). The drawing must show
+  `10X [36°]`, `(6.78)`, `.033 MAX`; check_drawing reads the box, the parentheses and the
+  texts back, so a lost box or bracket reads `differs`.
+- A `gdt` item may carry `"projected": ".56"`: a projected tolerance zone, shown as
+  `Ø.041 Ⓟ .56` in the frame and read back.
 - A pure module **`drawing_spec.py`** validates this format and converts dimension values to
   mm through `units.py`. The knowledge base stores the spec as JSON and does not depend on
   this module (§8.2). Claude reaches it through the `read_drawing_spec` tool (§5).
@@ -200,7 +209,23 @@ So:
   modelling guidance, written into `guide.md`.
 
 ### 4.3 The spec drives the drawing
+
+**How a spec item maps to the drawing (decided by the user, 2026-10-19):** the drawing
+carries **its own dimensions, one per spec dimension**. The model's own dimensions are
+not inserted (on DTN6 they were radii and distances from the origin, not the old
+drawing's scheme). For each spec item Claude gives a **placement**: the view and the
+model points (mm) on the edges it runs between, or the circle for a diameter (§5.2). The
+tool adds that dimension in the drawing and **names its annotation after the spec id**
+(`SPEC_D10`, `IAnnotation.SetName`), so the id travels inside the saved `.slddrw`; no
+side file is needed. Datums, frames, finishes, callouts and notes are named the same way.
+
 - Each dimension shown at the spec's `decimals`, in inches, with its tolerance if any.
+  A value written as a fraction (`"5 15/16"`, `decimals` null) is shown as a fraction
+  (64ths, reduced, no inch mark); limits (`".500/.498"`) are shown as limits, set from the
+  model's measured value so the two numbers are exactly the spec's.
+- **Inches on the drawing** is both: the document is set to IPS / inches / ANSI, and each
+  dimension gets its own units, places and tolerance (`IDisplayDimension.SetUnits2`,
+  `SetPrecision3`, `IDimensionTolerance`). Both work on 2020.
 - Every thread and hole callout, finish symbol and note in the spec placed on the drawing.
 - Dimensions the model's own dimensions don't cover get added as reference or driven
   dimensions in the drawing, so that nothing in the spec goes missing.
@@ -239,9 +264,59 @@ the spec was lost in the re-layout.
 
 | Tool | Change |
 |---|---|
-| `make_drawing(path=None, spec=None, views=None)` | Default template as-is, third-angle, no isometric, inches, empty title block. `views`: the list Claude chose (standard orthographic views by direction; section views by cutting plane; detail views by a feature and scale). With a `spec`: apply precision, tolerances, datums, GD&T, callouts, finishes, notes. **Without either it still works** (front/top/right layout), so existing callers keep working. `path` is optional: with a knowledge-base case open, the server names the file (`DN17.SLDDRW` in the output folder) through `case_output_path` and refuses a different path (KNOWLEDGE-BASE.md §6.2). Without an open case a path is required, as now |
+| `make_drawing(path=None, spec=None, views=None, placements=None)` | Default template as-is, third-angle, no isometric, inches, empty title block. `views`: the list Claude chose (standard orthographic views by direction; section views by cutting plane; detail views by a feature and scale). With a `spec`: apply precision, tolerances, datums, GD&T, callouts, finishes, notes. **Without either it still works** (front/top/right layout), so existing callers keep working. `path` is optional: with a knowledge-base case open, the server names the file (`DN17.SLDDRW` in the output folder) through `case_output_path` and refuses a different path (KNOWLEDGE-BASE.md §6.2). Without an open case a path is required, as now |
 | `read_drawing_spec(spec)` *(new, pure, needs no SolidWorks)* | Validates the spec (§4.1) and returns every dimension in the units the modelling tools take: mm for lengths, degrees for angles; for a limit or a one-sided tolerance, the upper, lower and middle values, and which one to model. Lists the problems found (unknown `type`, a `limit` with only one value, `decimals` that don't match the written value, items with no `link`, basic/GD&T warnings §4.1.1). This is the "drawing-spec tool" the job brief means when it says code does the conversion |
 | `check_drawing(path, spec)` *(new)* | Reads the saved drawing back and compares it with the spec (§6) |
+
+### 5.1 `views` (decided 2026-10-19)
+A typed list; the first is the drawing's front view, the rest are placed third angle:
+
+```json
+[{"kind": "standard", "model_view": "front", "up": "-x"},
+ {"kind": "standard", "direction": "right"},
+ {"kind": "section", "from": "front", "cut": "vertical", "label": "A", "through_mm": [0, 133, 0]},
+ {"kind": "detail", "from": "front", "label": "B", "center_mm": [6.34, 127.8, 0],
+  "radius_mm": 3, "scale": "4:1"}]
+```
+
+- The front view shows a model view (`model_view`: front/back/top/bottom/left/right),
+  optionally turned so model axis `up` points up on the sheet: a part turned about model Y
+  (DTN6) lies along the sheet with `"up": "-x"`. Projected views are `top`, `bottom`,
+  `left` or `right` of it; `drawing_spec.view_orientations` works out which model view and
+  turn each needs.
+- Sections cut through a model point, vertically or horizontally across their parent
+  (`"flip": true` looks the other way). Details circle a model point at a scale.
+- An **angled section** cuts through two model points (`"line_mm": [[x,y,z], [x,y,z]]`) or at
+  `"angle_deg"` on its parent through `through_mm`; it is turned upright (`"up"`: a model
+  axis or vector pointing up the sheet, default along the cutting line) and placed freely.
+  A section or detail may be cut **from a section** (`"from": "section A"`).
+- **Marks** on any view: `{"kind": "center_mark", "at_mm"}`, `{"kind": "point", "id",
+  "at_mm"}`, `{"kind": "circle", "id", "center_mm", "through_mm"}` (a bolt circle),
+  `{"kind": "line", "id", "from_mm", "to_mm", "extend_mm"}` (a centreline). Each point
+  must be a hole or arc centre, on an axis, or on an edge of the model. Placements measure
+  to them by id (§5.2).
+- Each view gets an id (`front`, `right`, `section A`, `detail B`, or its own `id`),
+  which placements refer to. The sheet scale is the largest standard one at which the
+  views fit (`drawing_spec.layout`). An isometric view is refused.
+- Without `views`: front, top, right.
+- `"at_mm": [x, y]` on a view puts its centre there (paper mm from the sheet's lower left;
+  `[x, null]` / `[null, y]` for a vertical / horizontal section); a collision is refused.
+- `sheet`: `"A"` (default), `"B"` or `"C"`, landscape, each with SolidWorks' stock ANSI format
+  (`a/b/c - landscape.slddrt`). The views use the area inside the border above the title
+  block; on B and C the general notes go left of the title block.
+
+### 5.2 `placements`
+`{spec id: where}`. Every read item except general notes needs one; an item flagged
+`unreadable` is refused. All points are model points in mm on an edge as the view shows
+it, or on a silhouette line (the side of a cone or cylinder):
+
+| Kind | Placement |
+|---|---|
+| dimension | `{"view", "measure": horizontal / vertical / distance / diameter / radius / angle, "points_mm": [two points] or [one point on the circle], "side": above / below / left / right, "offset_mm": 10}`. A circle seen edge-on gives its diameter. A point may be a mark id of the view: `["BC"]` (bolt circle diameter), `["CL_SLOT", "CL_H1"]` (angle between centrelines), `["O", [x,y,z]]` (centre to an edge), `[[x,y,z], "AX"]` (an edge to a hole axis) |
+| datum, gdt | `{"view", "on": "D13"}` on a placed dimension (a feature of size; the symbol sits on its dimension line) or thread/hole, or `{"view", "point_mm"}` on a surface's edge |
+| finish, thread, hole, local note | `{"view", "point_mm"}`: a leader to that edge |
+| text of any leader item | optional `"side"` (above/below/left/right) with `"offset_mm"` beyond the view's outline, or `"text_mm": [dx, dy]` from the attach point (from the dimension's text for a symbol `"on"` one) |
+| general note | none: they stack at the lower left |
 
 Following the usual pattern in `CLAUDE.md`: session method → server wrapper with a precise
 docstring → pure tests + integration tests → README tool table, `guide.md`, CHANGELOG,
@@ -253,6 +328,13 @@ docstring → pure tests + integration tests → README tool table, `guide.md`, 
 annotations back from SolidWorks — not from what it meant to place — and compares them with
 the spec. It returns one line per spec item: `ok`, `missing`, `differs` (with both values),
 or `unreadable` (flagged at reading), plus anything on the drawing that is **not** in the spec.
+
+As built: `check_drawing` opens the saved `.slddrw` and finds each item by its annotation
+name (§4.3); a general note is also found by its text. A dimension is `ok` only when the
+text it shows (rebuilt from its read-back units, places, fraction and tolerance) equals the
+spec's **and** the model value behind it is the spec's nominal (inside the limits, for
+limits): a fraction rounded to 64ths cannot hide a wrong model. The title block's own notes
+(sheet format) and the section/detail view labels are left out of the extras.
 
 **Limit of this check:** it compares the new drawing against *Claude's reading* of the old
 one. If Claude misreads `.375` as `.315`, the model, the drawing and the check all agree
@@ -347,6 +429,12 @@ One small commit, so both branches start from the same contract:
    they make the part clearer. They do not copy the old drawing's views; the information
    does (§4.4).
 
+3. **Sheet:** always A size landscape with the stock ANSI format (the 2020 default
+   template has none).
+4. **Spec to drawing:** the drawing's own dimension per spec dimension, placed by Claude,
+   named after the spec id (§4.3).
+5. **Inches:** document in IPS/ANSI, plus per-dimension units, places and tolerance (§4.3).
+
 ## 10. Build order
 
 | Step | Content |
@@ -359,3 +447,26 @@ One small commit, so both branches start from the same contract:
 | D5 | Datums and GD&T frames; thread and hole callouts; finish symbols; notes |
 | D6 | `check_drawing`: read the drawing back and compare with the spec |
 | D7 | `guide.md`: drafting habits (§4.4), model the way the old drawing is dimensioned, Pack and Go note |
+
+## 11. As built (2026-10-19)
+
+All of D1–D7 are on `feat/shop-drawings`. Verified on SOLIDWORKS 2020 SP4 (28.4) through
+the file-queue bridge, with the DTN6 part (on a copy) and an exact-inch test box:
+
+- fractions (`5 15/16`, `5/8`, `25/32`, `5/16`), limits (`.378/.375`, `.500/.498`),
+  symmetric tolerance (`1.500 ±.005`), a whole number (`1`), an angle (`45°`): placed and
+  read back `ok`; a wrong spec value reads back `differs` with both values;
+- datum A on the Ø.500/.498 dimension, a datum on an edge; feature control frames
+  (concentricity `.002 TIR | A` on a thread callout, position `Ø.010 MMC | A` on a hole
+  diameter); finish symbols on an edge and on a silhouette; a thread callout with its
+  length; leader notes and general notes;
+- the front view turned along the sheet, a projected right view, section A-A, detail B 4:1;
+- `.slddrw` and `.pdf` output; the part is never left changed.
+
+Not verified on 2020: the `radius` and `distance` measures, horizontal section cuts,
+sections or details cut from a section or detail view, and hole callouts (placed as notes
+with a leader, not SolidWorks' own hole callout). The integration tests in
+`tests/test_drawing.py` were run as the same calls through the bridge, not under pytest
+(pytest against SolidWorks is not run from the Claude app on this machine).
+Layout is placement-driven: dimension text goes where `side` and `offset_mm` put it, and
+crowded areas (DTN6's 45° bevel text over the part) need the agent to choose them.

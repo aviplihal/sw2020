@@ -119,6 +119,27 @@ stray drag in SolidWorks can change the part.
   The Hole Wizard only makes *cosmetic* threads; `thread="modeled"` drills the
   ISO basic minor diameter and cuts a real, printable thread with the Thread
   feature, over the standard depth (2 x D) or all the way through.
+- **Inch holes**: an inch size takes SolidWorks' ANSI Inch tables instead.
+  Tapped: diameter-threads per inch, with an optional series and class:
+  `'7/8-9'`, `'.875-9UNC-3B'`, `'1-1/8-7'`, `'#10-24'` (a decimal must be an
+  exact 1/64 fraction or a numbered size). Clearance, counterbore (socket head
+  cap screw) and countersink (82 degree flat socket head screw) take the screw
+  diameter: `'1/4'`, `'#10'`. SolidWorks picks the tap drill (7/8-9: .7656);
+  give the drill depth from a drawing as text in inches, `depth_in="1.96"`,
+  and the code converts it. `hole` holds every size in mm and as `*_in`. An
+  inch size SolidWorks' table lacks (`'7/8-10'`) fails. Modeled threads are
+  ISO only.
+- **Radial holes in a round part**: there is no flat face, so start the hole
+  on a plane tangent to the outside. `add_plane("right", angle_deg=30,
+  about="y")` turns a plane to the hole's direction (for a part revolved about
+  Y), then `add_plane(<that plane>, offset_mm=<outer radius>)` moves it out to
+  touch the OD. Give `face=None, plane=<name>` and a point on the tangent line
+  (origin + the height along the axis): the hole drills toward the axis and
+  its depth counts from the plane. A tapped hole takes `thread_depth_in`
+  ("MIN FULL THD") apart from the tap drill depth, and a near-side
+  countersink, `csink_diameter_in=".94", csink_angle_deg=90`. The countersink
+  is sized where it meets the plane. From a plane that also cuts through the
+  part elsewhere (one tangent to a bore) SOLIDWORKS 2020 makes no hole.
 - **Adding material to a part**: `add_boss_on_face` (a round boss: standoff,
   peg) and `add_extruded_profile_on_face` (a polygon pad or ledge) grow out of
   any planar face. A PCB standoff is a boss plus a blind hole in its top.
@@ -248,10 +269,10 @@ stray drag in SolidWorks can change the part.
   bodies the tools act on the first. A file holding an assembly opens with
   `open_assembly` instead: its parts come in as components at their places,
   ready for `list_components` and `add_mate`.
-- **Drawings**: `make_drawing("part.pdf")` puts front, top and right views
-  (first angle) and an isometric view on A4 with the model's own dimensions,
-  each shown once, so a fully dimensioned part gives a complete sketch to
-  print or send; `.slddrw` keeps it editable. Save the part first.
+- **Drawings**: `make_drawing("part.slddrw")` without a spec puts front, top
+  and right views (third angle, inches, A-size sheet) with the model's own
+  dimensions: a quick dimensioned sketch. A shop drawing from an old drawing
+  is made with a spec and placements: see section 8. Save the part first.
 - **Open documents**: `list_documents` lists what SolidWorks has open;
   `activate_document(title)` makes one current again, also a new part that was
   never saved (after `open_part` and `close_part` on another).
@@ -381,3 +402,86 @@ a proven battery socket:
 - Tools failing in ways this guide does not explain? Ask the user to run
   `uvx solidworks-mcp --selftest` with SolidWorks open: it shows which tool
   areas work on their installation and ends with where to report it.
+
+## 8. Shop drawings from an old drawing
+
+The job (Docs/JOB-BRIEF.md): an old inch drawing comes in, you model the part
+and make a clean drawing that the shop machines from. **The views are yours to
+choose; the information must be the old drawing's, all of it.** A wrong or
+missing dimension is a scrapped part.
+
+### Model it the way the old drawing is dimensioned
+- Build from the spec's numbers, converted by code (`drawing_spec` /
+  `units.in_to_mm`), never in your head. 1 in = 25.4 mm exactly.
+- Use the old drawing's datums and reference edges: put the origin on the
+  datum the lengths run from (DTN6: the journal end), so the edges you
+  dimension between are where the drawing says.
+- Model a toleranced size at a value inside its limits (DTN6's Ø.500/.498
+  bearing at .499). Model fractions exactly (15/16 = 23.8125 mm).
+
+### Drafting habits (SHOP-DRAWINGS.md §4.4)
+- **Fewest views that fully describe the part.** A turned part: one view along
+  its axis plus an end view if it has flats or holes.
+- **The front view is the most descriptive one**, the part in its natural or
+  machined position: a shaft lies along the sheet. Choose it with
+  `model_view` and `up` (a part turned about model Y: `"up": "-x"`).
+- **Section views for internal features** instead of hidden lines; **detail
+  views** for features too small to dimension at sheet scale.
+- **Dimension each feature once, where it shows its true shape**, never to a
+  hidden line, and from the same datums as the old drawing.
+- Dimensions outside the outline, grouped, not crossing: give `side` and
+  stagger `offset_mm` (10, 18, 26, …) for dimensions on the same side.
+- **Never an isometric view** (the tool refuses one).
+
+### Placing the spec
+- Every read spec item needs a placement except general notes (they stack at
+  the lower left). Items flagged `unreadable` are refused: ask the user, update
+  the spec, then place them.
+- Points are model points in mm on an edge as that view shows it: `list_edges`
+  gives lines' ends and circles; for a circle, a point on it (centre + radius
+  along an axis across it). A point on the side of a cone or cylinder (its
+  silhouette in that view) works too.
+- A diameter on a turned part: `measure: "diameter"` with one point on a circle
+  seen edge-on. A length along it: `"horizontal"` between two such circles.
+- A datum on a feature of size (a diameter) goes `"on"` its dimension, the way
+  an old `-A-` under a size dimension meant; a frame on a thread or hole goes
+  `"on"` that callout.
+- **Basic and reference dimensions, `10X`, `MAX`**: say so in the spec item
+  (`"basic": true`, `"reference": true`, `"prefix": "10X"`, `"suffix": "MAX"`);
+  the tool boxes, brackets and writes the text. A frame's `"projected": ".56"`
+  adds Ⓟ .56.
+- **Hole patterns and centres**: give the view `marks`: a `point` at the part
+  centre, a `circle` (bolt circle) through a hole centre, `line`s from the
+  centre through hole centres or along a slot or a radial hole's axis. Then
+  measure to them by id: `["BC"]` diameter, `["CL_SLOT", "CL_H1"]` angle (its
+  text goes between the lines), `["O", [x,y,z]]` centre to the slot floor,
+  `[[x,y,z], "AX"]` a face to a hole axis. Marks must sit on the model.
+- **Fixing a crowded sheet**: read `layout.problems` from make_drawing (or
+  check_drawing). Move views with `"at_mm"`, leader texts with `"side"` /
+  `"offset_mm"` or `"text_mm"`, dimensions with `side` / `offset_mm`, and make
+  the drawing again until the problems you care about are gone; then look at
+  the PDF.
+- **Tidying a sheet in one call**: `arrange_drawing(path)` moves the texts of a
+  saved drawing off each other, the views, the border and the title block,
+  each kept near what it describes. Use `mode="fix"` on a drawing that is
+  mostly right (only clashing texts move), `"full"` (default) on a crowded
+  one. Read `problems_after` and `unplaced`, look at the PDF, then call
+  `check_drawing` again: moving texts does not change what they say.
+- **A big part or many views**: `sheet="B"` (17 x 11 in) or `"C"` (22 x 17 in)
+  gives a larger scale than the A sheet (DTN7 with four sections and a
+  detail: 1:10 on A, 1:4 on B). The `scale` in the result says what it got.
+- **Holes at an angle on a round part**: an angled section through two hole
+  centres, `{"kind": "section", "from": "front", "line_mm": [p, q], "up": "+y"}`,
+  stands upright with the part's axis up. A section of a section (a plan cut
+  through radial holes) and a detail of a section work too; a detail keeps its
+  own scale (1:1, 2:1) when the sheet is 1:4 or 1:5.
+- Then call `check_drawing(path, spec)`. Fix every `missing` and `differs` and
+  make the drawing again. `differs` on a dimension can mean the drawing shows
+  the wrong text **or the model is wrong**: it compares the measured model
+  value with the spec too.
+
+### Renaming the files: Pack and Go
+A `.slddrw` points to its part by file name. Never rename `DN17.SLDPRT` in
+Explorer: the drawing loses it. Rename both with SolidWorks' **Pack and Go**
+(File → Pack and Go, with a new name or prefix), or rename the part, open the
+drawing, point it at the renamed part and save.
