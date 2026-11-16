@@ -1,8 +1,8 @@
 # Job Brief: Old Drawing → STEP + Clean Drawing
 
 > Served as the MCP resource `solidworks://job`; a session reads it when given a `DN<n>.pdf`.
-> Steps 1–6 run with the tools that exist today (design: [KNOWLEDGE-BASE.md](../../Docs/KNOWLEDGE-BASE.md),
-> [SHOP-DRAWINGS.md](../../Docs/SHOP-DRAWINGS.md)). `kb_review_case` (step 7) is not built yet.
+> Every step runs with the tools that exist today (design: [KNOWLEDGE-BASE.md](../../Docs/KNOWLEDGE-BASE.md),
+> [SHOP-DRAWINGS.md](../../Docs/SHOP-DRAWINGS.md)).
 > If a tool named here is missing, say so instead of improvising around it.
 >
 > SolidWorks is reached through the bridge the user starts (`scripts\start-bridge.cmd`). Call a
@@ -129,8 +129,8 @@ with the reason, after telling the user.
 
 ### 7. Review (the user, later)
 The user checks and fixes the files in the output folder, then says e.g. *"DN17 approved"*
-or *"DN17 needed changes: …"*. (`kb_review_case` is not built yet: until it is, say so and
-leave the case `finalised`.) Call `kb_review_case` **before** the files are moved out. It
+or *"DN17 needed changes: …"*. Call `kb_review_case(dn, verdict, notes)` **before** the files are moved out
+(`verdict` is `approved` or `changes_needed`; `notes` is what they changed). It
 exports the STEP and the drawing PDF from their checked files into the knowledge base. If
 the user says the files are already moved, say that the review needs them back in the output
 folder. When it succeeds, tell the user the files can now be moved out.

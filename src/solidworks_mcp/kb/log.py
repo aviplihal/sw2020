@@ -21,6 +21,7 @@ READ_ONLY_TOOLS = frozenset({
     "check_printability", "export", "screenshot", "slice_mesh", "compare_with_mesh", "list_components",
     "check_interference", "measure_distance", "check_motion", "swept_region", "get_assembly_bounding_box",
     "kb_view_region", "kb_search", "kb_get_case", "kb_tool_card", "measure_saved_part",
+    "export_reviewed_part", "export_reviewed_drawing",
 })
 
 SESSION_MAX_AGE_S = 1800  # the hook's .session.json counts for a call if it was written this recently

@@ -515,6 +515,61 @@ class SolidWorksSession:
                                   "then make the drawing again if the part changed.")
         return {"ok": True, "path": abs_path, **self.get_mass_properties()}
 
+    def _open_reviewed(self, path: str, doc_type: int, kind: str):
+        """(document, whether it was open already) for a file the user checked; refuses unsaved fixes."""
+        abs_path = os.path.abspath(path)
+        if not os.path.isfile(abs_path):
+            raise SolidWorksError(f"No {kind} at {abs_path}: it must stay in the output folder until the review.")
+        sw = self._ensure()
+        already = any(os.path.normcase(d.GetPathName() or "") == os.path.normcase(abs_path)
+                      for d in self._open_documents())
+        result = sw.OpenDoc6(abs_path, doc_type, SW_OPEN_DOC_SILENT, "", 0, 0)
+        doc = binding.wrap(result[0] if isinstance(result, tuple) else result, self._mod.IModelDoc2)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks could not open the {kind} {abs_path}.")
+        if already and doc.GetSaveFlag():
+            raise SolidWorksError(f"{os.path.basename(abs_path)} is open in SolidWorks with unsaved changes: "
+                                  "save your fixes first, then review again.")
+        return doc, already
+
+    def export_reviewed_part(self, path: str, step_path: str) -> dict:
+        """For kb_review_case: export the user's checked part to STEP and measure it.
+        The part is closed again without saving unless it was open before."""
+        doc, already = self._open_reviewed(path, SW_DOC_PART, "part")
+        previous = self._model
+        try:
+            self._write_via_saveas3(os.path.abspath(step_path), doc)
+            self._model = doc
+            measured = self.get_mass_properties()
+        finally:
+            self._model = previous  # not this part unless it was open before: then it may be the current one
+            if not already:
+                self._sw.CloseDoc(doc.GetPathName())
+        return {"ok": True, "step": os.path.abspath(step_path), **measured}
+
+    def export_reviewed_drawing(self, path: str, pdf_path: str, spec: dict | None = None) -> dict:
+        """For kb_review_case: save the user's checked drawing as a PDF and, with the
+        case's spec, compare it again (what the user changed on the drawing). Closed
+        again without saving unless it was open before."""
+        doc, already = self._open_reviewed(path, SW_DOC_DRAWING, "drawing")
+        try:
+            self._write_via_saveas3(os.path.abspath(pdf_path), doc)
+            result = {"ok": True, "pdf": os.path.abspath(pdf_path)}
+            if spec is not None:
+                try:
+                    drawing_spec.validate(spec)
+                    check = drawing_spec.compare(spec, self._read_drawing(doc))
+                    result["check"] = {"clean": check["clean"], "counts": check["counts"],
+                                       "not_in_spec": len(check["not_in_spec"]),
+                                       "problems": [line for line in check["items"]
+                                                    if line.get("status") in ("missing", "differs")][:20]}
+                except SolidWorksError as exc:
+                    result["check"] = {"error": str(exc)}
+        finally:
+            if not already:
+                self._sw.CloseDoc(doc.GetPathName())
+        return result
+
     @staticmethod
     def _native_or_neutral(path: str, native: str, kind: str) -> tuple:
         """(absolute path, whether it needs an import); other formats are refused

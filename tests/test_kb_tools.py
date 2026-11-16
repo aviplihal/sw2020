@@ -269,6 +269,97 @@ def test_while_a_case_is_open_the_server_names_its_files(tools, tmp_path, monkey
     assert (tmp_path / "out").is_dir()
 
 
+# --- review ------------------------------------------------------------------------------
+
+
+def exported(files, volume=79412.4, size=(76.2, 50.8, 38.1), check=None):
+    """What the server's two export calls return, with the STEP and PDF written."""
+    for key in ("step", "pdf"):
+        pathlib.Path(files[key]).write_bytes(b"x")
+    part = {"ok": True, "mass_properties": {"volume_mm3": volume, "mass_kg": 0.2144,
+                                            "bounding_box_mm": {"size_mm": list(size)}}}
+    drawing = {"ok": True, **({"check": check} if check is not None else {})}
+    return {"part": part, "drawing": drawing}
+
+
+def finalised(tools, tmp_path, monkeypatch):
+    modelled(tools, tmp_path, monkeypatch)
+    tools.finalise_case(["Fillet before the holes."], MEASURED)
+
+
+def test_an_approved_review_stores_the_exports_and_says_nothing_changed(tools, tmp_path, monkeypatch):
+    finalised(tools, tmp_path, monkeypatch)
+    files = tools.review_files("DN17", "approved")
+    assert files["step"].endswith("DN17.step") and files["pdf"].endswith("DN17 drawing.pdf")
+    assert files["spec"] == SPEC
+    check = {"clean": True, "counts": {"ok": 2, "unreadable": 1}, "not_in_spec": 0, "problems": []}
+    result = tools.review_case("DN17", "approved", "Moved a note.", exported(files, check=check))
+    assert result["measured_changes"] == ["part unchanged", "drawing against the spec: 2 ok · 1 unreadable"]
+    case = tools.kb.case("DN17")
+    assert (case["status"], case["reviewed"]) == ("approved", "2026-10-12")
+    assert case["sections"]["Review"].startswith('**Approved** 2026-10-12. Your note: "Moved a note."')
+    assert "✓" in tools.kb.index_text()
+
+
+def test_changes_needed_records_what_changed_and_a_lesson(tools, tmp_path, monkeypatch):
+    finalised(tools, tmp_path, monkeypatch)
+    files = tools.review_files("DN17", "changes_needed", "bore was .750")
+    result = tools.review_case("DN17", "changes needed", "bore   was .750",
+                               exported(files, volume=78000.0, size=(76.2, 50.8, 40.0)))
+    assert result["measured_changes"][0] == "part volume 79,412 → 78,000 mm³, bbox 76.2 × 50.8 × 38.1 → 76.2 × 50.8 × 40.0 mm"
+    case = tools.kb.case("DN17")
+    assert case["status"] == "changes_needed"
+    assert case["sections"]["Lessons"].splitlines() == ["- Review: bore was .750", "- Fillet before the holes."]
+
+
+def test_a_review_is_refused_without_files_notes_a_finalised_case_or_an_export(tools, tmp_path, monkeypatch):
+    modelled(tools, tmp_path, monkeypatch)
+    with pytest.raises(SolidWorksError, match="only a finalised case is reviewed"):
+        tools.review_files("DN17", "approved")
+    tools.finalise_case(["x"], MEASURED)
+    with pytest.raises(SolidWorksError, match="verdict is"):
+        tools.review_files("DN17", "fine")
+    with pytest.raises(SolidWorksError, match="Say what the user changed"):
+        tools.review_files("DN17", "changes_needed")
+    with pytest.raises(SolidWorksError, match="was not exported .* unsaved changes"):
+        tools.review_case("DN17", "approved", None, {"part": {"ok": False, "error": "unsaved changes"}})
+    (tmp_path / "out" / "DN17.SLDDRW").unlink()
+    with pytest.raises(SolidWorksError, match="back in the output folder"):
+        tools.review_files("DN17", "approved")
+    assert tools.kb.case("DN17")["status"] == "finalised"
+
+
+class _FakeReviewSession:
+    """Stands in for SolidWorks: 'exports' by writing the files, measures the part as finalised."""
+
+    def __init__(self):
+        self.calls = []
+
+    def export_reviewed_part(self, path, step_path):
+        self.calls.append(("part", path))
+        pathlib.Path(step_path).write_bytes(b"step")
+        return {"ok": True, **MEASURED}
+
+    def export_reviewed_drawing(self, path, pdf_path, spec=None):
+        self.calls.append(("drawing", path, spec == SPEC))
+        pathlib.Path(pdf_path).write_bytes(b"pdf")
+        return {"ok": True}
+
+
+def test_the_server_exports_the_checked_files_then_records_the_review(tools, tmp_path, monkeypatch):
+    finalised(tools, tmp_path, monkeypatch)
+    fake = _FakeReviewSession()
+    monkeypatch.setattr(server, "_kb_tools", tools)
+    monkeypatch.setattr(server, "_session", fake)
+    monkeypatch.setattr(server, "_worker", None)
+    result = asyncio.run(server.kb_review_case("DN17", "approved"))
+    assert result["ok"] and result["measured_changes"][0] == "part unchanged", result
+    out = tmp_path / "out"
+    assert fake.calls == [("part", str(out / "DN17.SLDPRT")), ("drawing", str(out / "DN17.SLDDRW"), True)]
+    refused = asyncio.run(server.kb_review_case("DN99", "approved"))
+    assert refused == {"ok": False, "error": "No case DN99."} and len(fake.calls) == 2
+
+
 # --- the MCP side ---------------------------------------------------------------------
 
 
@@ -284,7 +375,7 @@ def _kb_delegations():
 @pytest.mark.parametrize("tool,params,method,passed", list(_kb_delegations()))
 def test_kb_tools_forward_their_arguments_in_order(tool, params, method, passed):
     assert method == tool.removeprefix("kb_")
-    added = ["measured"] if tool == "kb_finalise_case" else []  # the server measures the part first
+    added = ["measured"] if tool in ("kb_finalise_case", "kb_review_case") else []  # the server measures the part first
     assert passed == params + added, f"{tool} forwards {passed} but takes {params}"
     assert list(inspect.signature(getattr(CaseTools, method)).parameters)[1:] == params + added
 
@@ -293,7 +384,7 @@ def test_the_tool_list_is_the_one_in_the_design():
     names = {tool for tool, *_ in _kb_delegations()}
     assert names == {"kb_ingest_drawing", "kb_view_region", "kb_describe_case", "kb_update_spec", "kb_search",
                      "kb_get_case", "kb_abandon_case", "kb_explain_digest", "kb_tool_card", "kb_update_tool_card",
-                     "kb_finalise_case"}
+                     "kb_finalise_case", "kb_review_case"}
     assert list(inspect.signature(server.kb_search).parameters) == ["text", "part_type", "status", "limit"]
     assert list(inspect.signature(server.kb_get_case).parameters) == ["dn"]
     assert list(inspect.signature(server.kb_explain_digest).parameters) == ["explanations", "not_measured",

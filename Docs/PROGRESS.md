@@ -493,7 +493,11 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
   open; and `kb_finalise_case` did not exist, so a case could never close and the next `kb_ingest_drawing`
   was refused. `measure_saved_part` (OpenDoc6 on the saved file, `GetSaveFlag`, mass properties) needs a
   first check on 2020.
-- `kb_review_case` (step 7, at the user's review) is still not built.
+- `kb_review_case` built the same day: `review_files` checks the case (KB side), the server runs
+  `export_reviewed_part` (STEP via SaveAs3 + mass properties) and `export_reviewed_drawing` (PDF via SaveAs3, as the
+  `pdf_silent` probe did on 2020, plus `drawing_spec.compare` against the case spec), then `review_case` records the
+  verdict and the measured changes against `measured.json` written at finalise. Files open with unsaved changes are
+  refused; files it opened are closed without saving. Unit-tested with a stand-in session; needs a first run on 2020.
 - The bridge is now started with `scripts\start-bridge.cmd` (sw2020's `.venv` and `src`), not from the old
   `Projects\SolidWorks-MCP` copy (0.16.0, not a git repo). `bridge_dev.py` reloads `drawing_layout` too.
 

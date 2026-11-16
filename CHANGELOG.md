@@ -21,7 +21,8 @@ All notable changes to this project are documented here. This project follows
   required as before.
 
 ### Knowledge base
-- `kb_finalise_case(lessons)`: measures the saved part (refused with unsaved changes), records the steps that worked and the lessons in `case.md`, closes the case and writes its digest, so the next job can start. `kb_review_case` is still to come.
+- `kb_finalise_case(lessons)`: measures the saved part (refused with unsaved changes), records the steps that worked and the lessons in `case.md`, closes the case and writes its digest, so the next job can start. 
+- `kb_review_case(dn, verdict, notes)`: after the user checked and fixed the files in place, exports `DN17.step` and `DN17 drawing.pdf` into the case from their files, measures what changed since finalise (volume, size, the drawing against the spec), and records the verdict; `changes_needed` notes become the case's first lesson.
 - While a case is open, `save_part` and `make_drawing` with no path write `SWMCP_OUTPUT_DIR\DN17.SLDPRT` / `.SLDDRW` (the case path lookup was a stub).
 - `scripts\start-bridge.cmd` starts the SolidWorks bridge on this checkout, with `TMP`/`TEMP` and a default output folder (`Projects\SW-Output`).
 - Every tool call, the `kb_*` tools included, is logged as one row of a Markdown

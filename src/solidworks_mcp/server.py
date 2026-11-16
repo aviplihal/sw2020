@@ -103,7 +103,7 @@ else:
 
 # Tools that are slow while healthy get more than the COM worker's 120 s:
 # make_drawing of a real 33-item shop drawing took 53-190 s on SOLIDWORKS 2020.
-_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0}
+_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0, "export_reviewed_drawing": 300.0}
 
 
 async def _call(fn, *args, **kwargs) -> dict:
@@ -1626,6 +1626,28 @@ async def kb_finalise_case(lessons: list[str]) -> dict:
     if part is not None:
         measured = await _call(_session.measure_saved_part, part)
     return await _kb_call("finalise_case", lessons, measured)
+
+
+@mcp.tool()
+async def kb_review_case(dn: str, verdict: str, notes: str | None = None) -> dict:
+    """Record the user's review of a finalised case, once they checked and fixed
+    DN17.SLDPRT and DN17.SLDDRW in place, BEFORE they move the files out.
+
+    verdict: 'approved' or 'changes_needed' (then notes says what they changed,
+    e.g. 'the bore was Ø.750, not Ø.875'). Opens their checked files, exports
+    DN17.step and 'DN17 drawing.pdf' into the knowledge base, measures what changed
+    since finalise (part volume and size, the drawing against the spec) and writes
+    the verdict into the case. Refused if a file is missing or has unsaved changes."""
+    try:
+        files = _kb().review_files(dn, verdict, notes)
+    except SolidWorksError as exc:
+        measured = {"error": str(exc)}  # review_case raises it again, and the call is logged
+    else:
+        part = await _call(_session.export_reviewed_part, files["part"], files["step"])
+        drawing = (await _call(_session.export_reviewed_drawing, files["drawing"], files["pdf"], files["spec"])
+                   if part.get("ok") else {"ok": False, "error": "not tried: the part export failed"})
+        measured = {"part": part, "drawing": drawing}
+    return await _kb_call("review_case", dn, verdict, notes, measured)
 
 
 @mcp.tool()

@@ -15,7 +15,7 @@ from .. import __version__
 from ..errors import SolidWorksError
 from . import cards, config, digest, hotspots, images, search
 from . import dn as dn_names
-from .files import atomic_write_json, read_text
+from .files import atomic_write_json, read_json, read_text
 from .store import KnowledgeBase
 
 VIEWS = ("front", "top", "side")
@@ -54,6 +54,23 @@ def _spec_summary(spec: dict) -> str:
     text = ", ".join(f"{n} {kind}{'s' if n > 1 else ''}" for kind, n in kinds.items()) or "no items"
     unreadable = sum(1 for item in spec["items"] if item["status"] == "unreadable")
     return text + (f" · {unreadable} unreadable" if unreadable else "")
+
+
+REVIEW_VERDICTS = {"approved": "approved", "changes needed": "changes_needed", "needs changes": "changes_needed"}
+
+
+def _part_changes(before: dict | None, after: dict) -> list:
+    """'part unchanged', or the volume and size changes since finalise (beyond measuring noise)."""
+    if not before or "volume_mm3" not in after:
+        return ["part: not compared (no finalise measurement)"]
+    changes = []
+    v0, v1 = before["volume_mm3"], after["volume_mm3"]
+    if abs(v1 - v0) > max(1.0, 1e-4 * abs(v0)):
+        changes.append(f"volume {v0:,.0f} → {v1:,.0f} mm³")
+    s0, s1 = before.get("size_mm") or [], (after.get("bounding_box_mm") or {}).get("size_mm") or []
+    if s0 and s1 and any(abs(a - b) > 0.01 for a, b in zip(s0, s1)):
+        changes.append(f"bbox {' × '.join(f'{v:.1f}' for v in s0)} → {' × '.join(f'{v:.1f}' for v in s1)} mm")
+    return ["part " + ", ".join(changes)] if changes else ["part unchanged"]
 
 
 def _tools_used(rows: list) -> list:
@@ -286,6 +303,8 @@ class CaseTools:
         fields = {"finalised": self.kb.today()}
         if size_text:
             fields["size_mm"] = size_text
+        atomic_write_json(self.kb.case_folder(case["dn"]) / "measured.json",
+                          {"volume_mm3": props["volume_mm3"], "mass_kg": props["mass_kg"], "size_mm": list(size)})
         case = self.kb.set_status(case, "finalised", sections, **fields)
         result = {"ok": True, "finalised": case["dn"], "files": [str(folder / f"{case['dn']}{ext}")
                                                                  for ext in (".SLDPRT", ".SLDDRW")],
@@ -301,6 +320,73 @@ class CaseTools:
                           "cards_to_tidy with kb_update_tool_card, then tell the user the files, the "
                           "check_drawing result and what to look at first.")
         return result
+
+    # --- review ------------------------------------------------------------------------
+
+    def review_files(self, dn: str, verdict: str, notes: str | None = None) -> dict:
+        """Check a review can run; the files the server exports from and to, and the case's spec."""
+        case = self._case(dn)
+        verdict = REVIEW_VERDICTS.get(str(verdict).strip().lower().replace("_", " "))
+        if verdict is None:
+            raise SolidWorksError("verdict is 'approved' or 'changes_needed'.", code="KB_BAD_VERDICT")
+        if case["status"] not in ("finalised", "approved", "changes_needed"):
+            raise SolidWorksError(f"{case['dn']} is {case['status']}: only a finalised case is reviewed "
+                                  "(kb_finalise_case first).", code="KB_NOT_FINALISED")
+        if verdict == "changes_needed" and not (notes or "").strip():
+            raise SolidWorksError("Say what the user changed (notes), e.g. 'the bore was Ø.750, not Ø.875'.",
+                                  code="KB_NO_REVIEW_NOTES")
+        out = config.output_dir()
+        files = {"part": out / f"{case['dn']}.SLDPRT", "drawing": out / f"{case['dn']}.SLDDRW"}
+        missing = [p.name for p in files.values() if not p.is_file()]
+        if missing:
+            raise SolidWorksError(f"Not in {out}: {', '.join(missing)}. The review needs the checked files back in "
+                                  "the output folder.", code="KB_FILES_MISSING", params={"missing": missing})
+        folder = self.kb.case_folder(case["dn"])
+        return {"dn": case["dn"], "verdict": verdict, "part": str(files["part"]), "drawing": str(files["drawing"]),
+                "step": str(folder / f"{case['dn']}.step"), "pdf": str(folder / f"{case['dn']} drawing.pdf"),
+                "spec": read_json(folder / "spec.json")}
+
+    def review_case(self, dn: str, verdict: str, notes: str | None = None, measured: dict | None = None) -> dict:
+        """Record the user's verdict once the server exported the STEP and PDF from the checked files:
+        what changed (measured by code), the note, and a lesson for changes_needed."""
+        files = self.review_files(dn, verdict, notes)
+        case = self._case(files["dn"])
+        measured = measured or {}
+        for side, label in (("part", "STEP"), ("drawing", "PDF")):
+            got = measured.get(side) or {}
+            if not got.get("ok"):
+                raise SolidWorksError(f"The {label} was not exported from {case['dn']}'s checked {side}: "
+                                      f"{got.get('error') or measured.get('error') or 'not run'}",
+                                      code="KB_EXPORT_FAILED")
+        for key in ("step", "pdf"):
+            if not os.path.isfile(files[key]):
+                raise SolidWorksError(f"{files[key]} was not written.", code="KB_EXPORT_FAILED")
+        changes = _part_changes(read_json(self.kb.case_folder(case["dn"]) / "measured.json"),
+                                measured["part"].get("mass_properties") or {})
+        check = measured["drawing"].get("check")
+        if check is None:
+            changes.append("drawing: not compared (no spec)")
+        elif "error" in check:
+            changes.append(f"drawing: not compared ({check['error']})")
+        else:
+            counts = " · ".join(f"{n} {status}" for status, n in sorted(check["counts"].items()))
+            changes.append(f"drawing against the spec: {counts or 'no items'}"
+                           + (f" · {check['not_in_spec']} not in the spec" if check.get("not_in_spec") else ""))
+        verdict = files["verdict"]
+        note = " ".join((notes or "").split())
+        heading = "**Approved**" if verdict == "approved" else "**Changes needed**"
+        review = f"{heading} {self.kb.today()}." + (f' Your note: "{note}"' if note else "")
+        review += "\nMeasured changes: " + " · ".join(changes)
+        sections = {"Review": review}
+        if verdict == "changes_needed":
+            lessons = (case["sections"].get("Lessons") or "").splitlines()
+            lessons = [line for line in lessons if not line.startswith("- Review: ")]
+            sections["Lessons"] = "\n".join([f"- Review: {note}", *lessons])
+        self.kb.set_status(case, verdict, sections, reviewed=self.kb.today())
+        return {"ok": True, "dn": case["dn"], "verdict": verdict, "measured_changes": changes,
+                "stored": [files["step"], files["pdf"]],
+                "next": f"Stored {case['dn']}.step and {case['dn']} drawing.pdf. Tell the user the files can now "
+                        "be moved out of the output folder."}
 
     def explain_digest(self, explanations: dict, not_measured: list | None = None, fix_ideas: dict | None = None,
                        dn: str | None = None) -> dict:
