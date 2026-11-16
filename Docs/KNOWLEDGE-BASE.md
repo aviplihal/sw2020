@@ -178,7 +178,7 @@ While a case is open, **`save_part` and `make_drawing` take no path**: the serve
 `SWMCP_OUTPUT_DIR\DN17.SLDPRT` and `DN17.SLDDRW` and refuses a different path. The part
 has its final name from its first save, so the drawing's link to it is right from the start.
 With no case open both tools work as today, with a path. The lookup is
-`case_paths.case_output_path(kind)` (stub on `main`, filled in at K2).
+`case_paths.case_output_path(kind)`: `SWMCP_OUTPUT_DIR\DN17.SLDPRT` / `.SLDDRW` for the open case (built 2026-11-16).
 
 ## 7. Tool cards
 

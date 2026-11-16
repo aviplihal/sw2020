@@ -14,6 +14,7 @@ from importlib import resources
 
 from mcp.server.fastmcp import FastMCP, Image
 
+from . import case_paths
 from .errors import SolidWorksError
 from .kb import log as kb_log
 from .selftest import main as run_selftest
@@ -1606,6 +1607,25 @@ async def kb_get_case(dn: str) -> dict:
     modelled, result, review, lessons; and its files (the scan, the spec; once approved,
     the STEP and drawing PDF)."""
     return await _kb_call("get_case", dn)
+
+
+@mcp.tool()
+async def kb_finalise_case(lessons: list[str]) -> dict:
+    """Finish the open case once DN17.SLDPRT and DN17.SLDDRW are saved (save_part and
+    make_drawing without a path) and check_drawing is clean. Measures the saved part
+    (refused with unsaved changes), records the steps that worked and up to 5
+    `lessons` (short lines a later job should know), closes the case and writes its
+    digest. Returns the hard parts to explain (kb_explain_digest) and the tool cards
+    to tidy (kb_update_tool_card). Exports nothing: that happens at review."""
+    try:
+        part = case_paths.case_output_path("part")
+    except SolidWorksError as exc:
+        part, measured = None, {"error": str(exc)}
+    else:
+        measured = {"error": "no knowledge-base case is open"}
+    if part is not None:
+        measured = await _call(_session.measure_saved_part, part)
+    return await _kb_call("finalise_case", lessons, measured)
 
 
 @mcp.tool()

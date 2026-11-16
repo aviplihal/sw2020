@@ -20,7 +20,7 @@ READ_ONLY_TOOLS = frozenset({
     "list_documents", "get_mass_properties", "get_bounding_box", "list_faces", "list_edges",
     "check_printability", "export", "screenshot", "slice_mesh", "compare_with_mesh", "list_components",
     "check_interference", "measure_distance", "check_motion", "swept_region", "get_assembly_bounding_box",
-    "kb_view_region", "kb_search", "kb_get_case", "kb_tool_card",
+    "kb_view_region", "kb_search", "kb_get_case", "kb_tool_card", "measure_saved_part",
 })
 
 SESSION_MAX_AGE_S = 1800  # the hook's .session.json counts for a call if it was written this recently

@@ -35,7 +35,7 @@ it "looks about right".
   holes, counterbores, slots and pockets on any face; rounded polygon corners; ISO and ANSI inch holes from the Hole Wizard; real ISO metric threads;
   fillets, chamfers, shells, patterns, mirrors, ribs, equations and materials. Assemblies
   with mates and interference checks. STEP/STL/3MF export and screenshots.
-  Engraved and embossed text. Work on existing parts: list, delete, suppress and reorder features; read, extrude and cut a person's sketches; import STEP. Colours per part or component. Joints with concentric and angle mates, checked over their range. Printability checks and dimensioned drawings. Planes at any offset or angle. Several bodies per part, combined and split. Variable fillets and full rounds. Free sketches with tangent arcs and splines. 101 tools in total.
+  Engraved and embossed text. Work on existing parts: list, delete, suppress and reorder features; read, extrude and cut a person's sketches; import STEP. Colours per part or component. Joints with concentric and angle mates, checked over their range. Printability checks and dimensioned drawings. Planes at any offset or angle. Several bodies per part, combined and split. Variable fillets and full rounds. Free sketches with tangent arcs and splines. 102 tools in total.
 - **It fails loud.** A call that cannot do what was asked returns
   `{ok: false, error}` with the cause, never silently wrong geometry.
 - **A fixed, typed tool surface.** There is no "run arbitrary code" tool; the
@@ -303,6 +303,7 @@ is logged automatically as one row of a timeline kept for fix sessions. Design:
 | `kb_update_spec(drawing_spec, answers)` | Replace the open case's spec; the questions and the user's answers are listed in the case |
 | `kb_search(text, part_type, status, limit)` | Case-insensitive text search over the cases; returns index lines, approved first |
 | `kb_get_case(dn)` | One case's `case.md` (description, questions, result, review, lessons) and its files |
+| `kb_finalise_case(lessons)` | Once DN17.SLDPRT and DN17.SLDDRW are saved: measure the part, record the steps that worked and up to 5 lessons, close the case, write its digest; returns the hard parts to explain and the tool cards to tidy |
 | `kb_abandon_case(reason)` | Close the open case without finishing it; its DN can be ingested again. Writes its digest and returns the hard parts to explain |
 | `kb_explain_digest(explanations, not_measured, fix_ideas, dn)` | One line per hard part of a closed case's digest (40 words at most); links each to an issue in `fixes\HOTSPOTS.md` |
 | `kb_tool_card(tool)` | What is known about a modelling tool: when to use it, how to call it, failures seen with cause and fix |

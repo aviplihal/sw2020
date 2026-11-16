@@ -22,8 +22,10 @@ drawings via make_drawing, and the knowledge base `kb_*`). Read CLAUDE.md for th
   (source: src/solidworks_mcp/job.md) and follow it step by step. Nothing is invented; unreadable values are asked.
 - Before modelling, look at earlier jobs: kb_search / kb_get_case, and kb_tool_card for each tool you will use.
 - Real jobs are DN<n>. DTN<n> are old development test runs: never lessons, never KB cases.
-- SolidWorks is driven through the bridge in ..\sw_bridge, which the USER starts in their own Command Prompt
-  (never from this app). Check with `call_dev.py bridge_ping`; if it is down, ask the user to start it.
+- SolidWorks is driven through the bridge in ..\sw_bridge, which the USER starts (double-click
+  scripts\start-bridge.cmd; never from this app). Call tools as
+  `.venv\Scripts\python.exe ..\sw_bridge\call_dev.py <tool> [args] [key=value]`. Check with
+  `call_dev.py bridge_ping`; if it is down, ask the user to start it.
 - Drawing style: thread/hole notes as leader notes at the feature; size notes become real dimensions.
 - Docs: Docs/KNOWLEDGE-BASE.md, Docs/SHOP-DRAWINGS.md, Docs/PROGRESS.md (2020 conversion log).
 """

@@ -201,6 +201,74 @@ def test_abandon_frees_the_dn_and_re_ingest_works(tools, tmp_path):
     assert tools.get_case("DN17~1")["status"] == "abandoned"
 
 
+# --- finalise ----------------------------------------------------------------------------
+
+MEASURED = {"ok": True, "mass_properties": {"volume_mm3": 79412.4, "mass_kg": 0.2144,
+                                            "bounding_box_mm": {"size_mm": [76.2, 50.8, 38.1]}}}
+
+
+def modelled(tools, tmp_path, monkeypatch, files=(".SLDPRT", ".SLDDRW")):
+    """DN17 ingested, described and modelled (two calls logged), its files saved in the output folder."""
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("SWMCP_OUTPUT_DIR", str(out))
+    ingest(tools, tmp_path, 17)
+    call("add_box", 10, arguments={"width_mm": 76.2})
+    call("list_faces", 20)
+    call("add_fillet", 30, ok=False, code="FILLET_TOO_LARGE", message="too large")
+    call("add_fillet", 40, arguments={"radius_mm": 3})
+    call("save_part", 50)
+    for ext in files:
+        (out / f"DN17{ext}").write_bytes(b"x")
+    return out
+
+
+def test_finalise_closes_the_case_and_records_what_a_later_job_needs(tools, tmp_path, monkeypatch):
+    modelled(tools, tmp_path, monkeypatch)
+    result = tools.finalise_case(["Fillet before the holes.", "  One   callout per hole size. "], MEASURED)
+    assert result["finalised"] == "DN17" and result["measured"].startswith("Volume 79,412 mm³ · mass 0.214 kg")
+    assert [c["tool"] for c in result["cards_to_tidy"]] == ["add_box", "add_fillet", "save_part"]
+    case = tools.kb.case("DN17")
+    assert (case["status"], case["size_mm"], case["finalised"]) == ("finalised", "76.2 x 50.8 x 38.1", "2026-10-12")
+    assert case["sections"]["Lessons"] == "- Fillet before the holes.\n- One callout per hole size."
+    assert case["sections"]["How it was modelled"].splitlines() == [
+        "1. add_box: width_mm=76.2", "2. add_fillet: radius_mm=3"], "failed and read-only calls are left out"
+    assert "Files: DN17.SLDPRT, DN17.SLDDRW" in case["sections"]["Result"]
+    assert tools.kb.open_case() is None
+    assert tools.ingest_drawing(make_pdf(tmp_path / "DN18.pdf"))[0]["dn"] == "DN18", "the next job can start"
+
+
+def test_finalise_refuses_missing_files_unmeasured_parts_and_bad_lessons(tools, tmp_path, monkeypatch):
+    modelled(tools, tmp_path, monkeypatch, files=(".SLDPRT",))
+    with pytest.raises(SolidWorksError, match="DN17.SLDDRW"):
+        tools.finalise_case(["x"], MEASURED)
+    (tmp_path / "out" / "DN17.SLDDRW").write_bytes(b"x")
+    with pytest.raises(SolidWorksError, match="unsaved changes"):
+        tools.finalise_case(["x"], {"ok": False, "error": "DN17.SLDPRT has unsaved changes"})
+    with pytest.raises(SolidWorksError, match="At most 5 lessons"):
+        tools.finalise_case(["a"] * 6, MEASURED)
+    with pytest.raises(SolidWorksError, match="lessons is a list"):
+        tools.finalise_case("one line", MEASURED)
+    assert tools.kb.open_case()["status"] == "modelling", "a refused finalise leaves the case open"
+
+
+def test_finalise_refuses_a_case_that_was_never_modelled(tools, tmp_path):
+    ingest(tools, tmp_path, 17)
+    with pytest.raises(SolidWorksError, match="DN17 is described: model the part"):
+        tools.finalise_case(["x"], MEASURED)
+
+
+def test_while_a_case_is_open_the_server_names_its_files(tools, tmp_path, monkeypatch):
+    from solidworks_mcp import case_paths
+
+    monkeypatch.setenv("SWMCP_OUTPUT_DIR", str(tmp_path / "out"))
+    assert case_paths.case_output_path("part") is None
+    tools.ingest_drawing(make_pdf(tmp_path / "DN17.pdf"))
+    assert case_paths.case_output_path("part") == str(tmp_path / "out" / "DN17.SLDPRT")
+    assert case_paths.resolve("drawing", None) == str(tmp_path / "out" / "DN17.SLDDRW")
+    assert (tmp_path / "out").is_dir()
+
+
 # --- the MCP side ---------------------------------------------------------------------
 
 
@@ -216,14 +284,16 @@ def _kb_delegations():
 @pytest.mark.parametrize("tool,params,method,passed", list(_kb_delegations()))
 def test_kb_tools_forward_their_arguments_in_order(tool, params, method, passed):
     assert method == tool.removeprefix("kb_")
-    assert passed == params, f"{tool} forwards {passed} but takes {params}"
-    assert list(inspect.signature(getattr(CaseTools, method)).parameters)[1:] == params
+    added = ["measured"] if tool == "kb_finalise_case" else []  # the server measures the part first
+    assert passed == params + added, f"{tool} forwards {passed} but takes {params}"
+    assert list(inspect.signature(getattr(CaseTools, method)).parameters)[1:] == params + added
 
 
 def test_the_tool_list_is_the_one_in_the_design():
     names = {tool for tool, *_ in _kb_delegations()}
     assert names == {"kb_ingest_drawing", "kb_view_region", "kb_describe_case", "kb_update_spec", "kb_search",
-                     "kb_get_case", "kb_abandon_case", "kb_explain_digest", "kb_tool_card", "kb_update_tool_card"}
+                     "kb_get_case", "kb_abandon_case", "kb_explain_digest", "kb_tool_card", "kb_update_tool_card",
+                     "kb_finalise_case"}
     assert list(inspect.signature(server.kb_search).parameters) == ["text", "part_type", "status", "limit"]
     assert list(inspect.signature(server.kb_get_case).parameters) == ["dn"]
     assert list(inspect.signature(server.kb_explain_digest).parameters) == ["explanations", "not_measured",

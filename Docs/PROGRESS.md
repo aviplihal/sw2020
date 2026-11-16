@@ -481,3 +481,19 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
   cut-face outline returns selection type 12. DTN5 example: six 125 marks on the user's drawing
   (`DTN5\DTN5_finish.SLDDRW`), no leaders; layout report shows only the symbols' own text_on_view (they sit on edges).
 - 2026-10-28 (branch `feat/kb-markdown`): knowledge base M1 and M2 built and unit-tested on the pure layer (Markdown storage, timeline logging of every call, digest, hotspots, `kb-fixed`, session hook). No SolidWorks involved, so nothing here is a 2020 finding; the integration tests did not run.
+
+### 2026-11-16 — All branches merged; a job can run start to finish
+
+- `main` now holds the drawing tools (PR #3), the Markdown knowledge base and the session briefing. The
+  older A4/first-angle `make_drawing` options on `feat/kb-markdown` were dropped in favour of the shop-drawing
+  `make_drawing` on main; `set_units` and `set_dimension_tolerance` were kept. Every other branch was already
+  in main and was deleted locally; the old `.claude/worktrees/shop-drawings-25aa4f` worktree was removed.
+- Two gaps stopped a job before it could finish, both fixed (unit-tested only, not yet run on SolidWorks 2020):
+  `case_paths.case_output_path` was a stub, so `save_part` / `make_drawing` with no path failed while a case was
+  open; and `kb_finalise_case` did not exist, so a case could never close and the next `kb_ingest_drawing`
+  was refused. `measure_saved_part` (OpenDoc6 on the saved file, `GetSaveFlag`, mass properties) needs a
+  first check on 2020.
+- `kb_review_case` (step 7, at the user's review) is still not built.
+- The bridge is now started with `scripts\start-bridge.cmd` (sw2020's `.venv` and `src`), not from the old
+  `Projects\SolidWorks-MCP` copy (0.16.0, not a git repo). `bridge_dev.py` reloads `drawing_layout` too.
+

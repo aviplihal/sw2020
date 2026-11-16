@@ -13,7 +13,7 @@ import shutil
 
 from .. import __version__
 from ..errors import SolidWorksError
-from . import cards, digest, hotspots, images, search
+from . import cards, config, digest, hotspots, images, search
 from . import dn as dn_names
 from .files import atomic_write_json, read_text
 from .store import KnowledgeBase
@@ -242,6 +242,64 @@ class CaseTools:
             result["hard_parts"] = written["hard_parts"]
             result["next"] = ("Explain each hard part with kb_explain_digest(explanations={'D1': '...'}): what you "
                               "were doing and why it took long, 40 words at most, 'not sure' is allowed.")
+        return result
+
+    def finalise_case(self, lessons: list, measured: dict | None = None) -> dict:
+        """Check both files, record the part's measurements, the steps that worked and the
+        lessons, close the case; write the digest; return the hard parts and the cards to tidy.
+
+        `measured` is the saved part's get_mass_properties result, measured by the server
+        before this runs (SolidWorks work stays out of the knowledge base)."""
+        case = self.kb.require_open_case()
+        if case["status"] != "modelling":
+            raise SolidWorksError(f"{case['dn']} is {case['status']}: model the part and make the drawing first, "
+                                  "or abandon the case (kb_abandon_case).", code="KB_NOT_MODELLED")
+        if not isinstance(lessons, list) or not all(isinstance(x, str) and x.strip() for x in lessons):
+            raise SolidWorksError('lessons is a list of short lines, e.g. ["Fillet before the holes."].',
+                                  code="KB_BAD_LESSONS")
+        if len(lessons) > 5:
+            raise SolidWorksError(f"At most 5 lessons (got {len(lessons)}): keep the ones a later job needs most.",
+                                  code="KB_BAD_LESSONS")
+        folder = config.output_dir()
+        missing = [name for name in (f"{case['dn']}.SLDPRT", f"{case['dn']}.SLDDRW") if not (folder / name).is_file()]
+        if missing:
+            raise SolidWorksError(f"Not saved in {folder}: {', '.join(missing)}. Call save_part and make_drawing "
+                                  "without a path first.", code="KB_FILES_MISSING", params={"missing": missing})
+        props = (measured or {}).get("mass_properties")
+        if not props:
+            reason = (measured or {}).get("error") or "the part was not measured"
+            raise SolidWorksError(f"Could not measure {case['dn']}.SLDPRT: {reason}", code="KB_NOT_MEASURED")
+        size = (props.get("bounding_box_mm") or {}).get("size_mm") or []
+        size_text = " x ".join(f"{v:.1f}" for v in size) if size else None
+        result_line = f"Volume {props['volume_mm3']:,.0f} mm³ · mass {props['mass_kg']:.3f} kg"
+        if size_text:
+            result_line += f" · bbox {size_text.replace(' x ', ' × ')} mm"
+        _, rows = self.kb.read_timeline(case["dn"])
+        steps = [f"{k}. {r['tool']}: {r['args']}" if r["args"] else f"{k}. {r['tool']}"
+                 for k, r in enumerate((r for r in rows if r["ok"] and not r["read_only"]
+                                        and not r["tool"].startswith("kb_")
+                                        and r["tool"] not in ("save_part", "make_drawing")), start=1)]
+        sections = {"Result": f"{result_line}\nFiles: {case['dn']}.SLDPRT, {case['dn']}.SLDDRW",
+                    "Lessons": "\n".join(f"- {' '.join(x.split())}" for x in lessons)}
+        if steps:
+            sections["How it was modelled"] = "\n".join(steps)
+        fields = {"finalised": self.kb.today()}
+        if size_text:
+            fields["size_mm"] = size_text
+        case = self.kb.set_status(case, "finalised", sections, **fields)
+        result = {"ok": True, "finalised": case["dn"], "files": [str(folder / f"{case['dn']}{ext}")
+                                                                 for ext in (".SLDPRT", ".SLDDRW")],
+                  "measured": result_line, "cards_to_tidy": self._cards_to_tidy(case)}
+        try:
+            written = digest.write_digest(self.kb, case["dn"])
+        except Exception as exc:  # noqa: BLE001 - the case is closed either way; say what went wrong
+            result["warning"] = f"The digest was not written: {type(exc).__name__}: {exc}"
+            written = {"written": False, "hard_parts": []}
+        if written["written"] and written["hard_parts"]:
+            result["hard_parts"] = written["hard_parts"]
+        result["next"] = ("Explain each hard part with kb_explain_digest (if any), rewrite each card in "
+                          "cards_to_tidy with kb_update_tool_card, then tell the user the files, the "
+                          "check_drawing result and what to look at first.")
         return result
 
     def explain_digest(self, explanations: dict, not_measured: list | None = None, fix_ideas: dict | None = None,

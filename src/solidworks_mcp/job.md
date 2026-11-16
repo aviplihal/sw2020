@@ -1,10 +1,17 @@
 # Job Brief: Old Drawing → STEP + Clean Drawing
 
-> Drop this into a new Claude Desktop session (or a Claude Desktop Project's instructions)
-> before starting a drawing job. It describes the finished workflow. The `kb_*` tools and
-> the new drawing options come from [KNOWLEDGE-BASE.md](../../Docs/KNOWLEDGE-BASE.md) and
-> [SHOP-DRAWINGS.md](../../Docs/SHOP-DRAWINGS.md); until those are built, the steps that use them
-> cannot run yet. Say so instead of improvising around a missing tool.
+> Served as the MCP resource `solidworks://job`; a session reads it when given a `DN<n>.pdf`.
+> Steps 1–6 run with the tools that exist today (design: [KNOWLEDGE-BASE.md](../../Docs/KNOWLEDGE-BASE.md),
+> [SHOP-DRAWINGS.md](../../Docs/SHOP-DRAWINGS.md)). `kb_review_case` (step 7) is not built yet.
+> If a tool named here is missing, say so instead of improvising around it.
+>
+> SolidWorks is reached through the bridge the user starts (`scripts\start-bridge.cmd`). Call a
+> tool as `.venv\Scripts\python.exe ..\sw_bridge\call_dev.py <tool> [args] [key=value ...]` from the repo; check it first with
+> `call_dev.py bridge_ping`. If the bridge is down, ask the user to start it, then go on.
+>
+> Work through the steps without stopping for permission between them. Stop and ask the user
+> only for an unreadable value (step 2), a DN mismatch, or a tool that keeps failing after its
+> card's fix.
 
 ## The job
 
@@ -122,7 +129,8 @@ with the reason, after telling the user.
 
 ### 7. Review (the user, later)
 The user checks and fixes the files in the output folder, then says e.g. *"DN17 approved"*
-or *"DN17 needed changes: …"*. Call `kb_review_case` **before** the files are moved out. It
+or *"DN17 needed changes: …"*. (`kb_review_case` is not built yet: until it is, say so and
+leave the case `finalised`.) Call `kb_review_case` **before** the files are moved out. It
 exports the STEP and the drawing PDF from their checked files into the knowledge base. If
 the user says the files are already moved, say that the review needs them back in the output
 folder. When it succeeds, tell the user the files can now be moved out.

@@ -11,14 +11,23 @@ import os
 from .errors import SolidWorksError
 
 KINDS = {"part": "save_part", "drawing": "make_drawing"}
+EXTENSIONS = {"part": ".SLDPRT", "drawing": ".SLDDRW"}
 
 
 def case_output_path(kind: str) -> str | None:
     """The open case's file for `kind` ('part' or 'drawing'), or None with no case open.
 
-    A stub until the knowledge base fills it in.
+    SWMCP_OUTPUT_DIR\\DN17.SLDPRT and DN17.SLDDRW; the folder is made if missing.
     """
-    return None
+    from .kb import config
+    from .kb import log as kb_log
+
+    case = kb_log.knowledge_base().open_case()
+    if case is None:
+        return None
+    folder = config.output_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    return str(folder / f"{case['dn']}{EXTENSIONS[kind]}")
 
 
 def resolve(kind: str, path: str | None) -> str:

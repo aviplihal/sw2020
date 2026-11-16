@@ -497,6 +497,24 @@ class SolidWorksSession:
         self._model = model
         return {"ok": True, "title": model.GetTitle(), "path": abs_path}
 
+    def measure_saved_part(self, path: str) -> dict:
+        """For kb_finalise_case: make the saved part at `path` current (opening it if
+        needed), refuse unsaved changes, and return its mass properties."""
+        abs_path = os.path.abspath(path)
+        if not os.path.isfile(abs_path):
+            raise SolidWorksError(f"No part saved at {abs_path}: call save_part first.")
+        sw = self._ensure()
+        result = sw.OpenDoc6(abs_path, SW_DOC_PART, 0, "", 0, 0)  # an open document is returned as it is
+        doc = result[0] if isinstance(result, tuple) else result
+        model = binding.wrap(doc, self._mod.IModelDoc2)
+        if model is None:
+            raise SolidWorksError(f"Could not open the part: {abs_path}")
+        self._model = model
+        if model.GetSaveFlag():
+            raise SolidWorksError(f"{os.path.basename(abs_path)} has unsaved changes: call save_part, "
+                                  "then make the drawing again if the part changed.")
+        return {"ok": True, "path": abs_path, **self.get_mass_properties()}
+
     @staticmethod
     def _native_or_neutral(path: str, native: str, kind: str) -> tuple:
         """(absolute path, whether it needs an import); other formats are refused
