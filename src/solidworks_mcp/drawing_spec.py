@@ -19,7 +19,7 @@ from fractions import Fraction
 from .errors import SolidWorksError
 from .units import in_to_mm
 
-KINDS = ("dimension", "thread", "hole", "finish", "datum", "gdt", "note")
+KINDS = ("dimension", "thread", "hole", "finish", "datum", "gdt", "note", "title")
 STATUSES = ("read", "unreadable")
 TOLERANCE_DISPLAYS = ("bilateral", "symmetric", "limits")
 # Optional extra keys an item may carry besides its kind's own fields.
@@ -36,6 +36,20 @@ FIELDS = {  # required keys per kind (besides id, kind, status)
     "datum": ("label", "feature"),
     "gdt": ("characteristic", "tolerance", "modifier", "datums", "feature"),
     "note": ("text",),
+    "title": ("field", "text"),  # a title-block value (material, finish, ...): set_title_block writes it
+}
+# Title-block fields by name: the custom property the stock ANSI sheet format links
+# to, and the document that carries it ("part": a $PRPSHEET link, read from the model
+# in the views; "drawing": a $PRP link, read from the drawing). Property names are the
+# usual SolidWorks ones; set_title_block reports the links the sheet format really has
+# and uses those first. Any other property the title block links to is accepted by its
+# own name. Company data (drawn by, dates, company name) is left to the user.
+TITLE_BLOCK_FIELDS = {
+    "material": ("Material", "part"),
+    "finish": ("Finish", "part"),
+    "description": ("Description", "part"),
+    "part_number": ("PartNo", "part"),
+    "revision": ("Revision", "drawing"),
 }
 # A dimension can be BASIC (boxed, theoretically exact, no tolerance), a
 # REFERENCE (in parentheses), and carry text before or after its value as
@@ -186,6 +200,12 @@ def validate(spec) -> dict:
             raise SolidWorksError(f"{where}: a {kind} needs {', '.join(missing)}.")
         if kind == "dimension":
             entry["parsed"] = _validate_dimension(item, where)
+        elif kind == "title":
+            if not isinstance(item["field"], str) or not item["field"].strip():
+                raise SolidWorksError(f"{where}: field names the title-block field, such as "
+                                      f"{', '.join(TITLE_BLOCK_FIELDS)}.")
+            if not isinstance(item["text"], str) or not item["text"].strip():
+                raise SolidWorksError(f"{where}: text is the title-block value as written.")
         elif kind in ("thread", "hole", "note"):
             key = "text" if kind == "note" else "callout"
             if not isinstance(item[key], str) or not item[key].strip():
@@ -1169,6 +1189,9 @@ def validate_placements(placements, checked_spec: dict, view_ids, marks: dict | 
             raise SolidWorksError(f"{where} is not an object.")
         view = place.get("view")
         kind = item["kind"]
+        if kind == "title":
+            raise SolidWorksError(f"{where}: a title-block value is not placed on a view; set_title_block "
+                                  "writes it after make_drawing.")
         if kind == "note" and view is None:
             allowed = {"view"}
         elif view not in view_ids:
@@ -1231,7 +1254,7 @@ def validate_placements(placements, checked_spec: dict, view_ids, marks: dict | 
             raise SolidWorksError(f"{where}: unknown field(s) {', '.join(extra)} for a {kind}.")
         out[sid] = entry
     missing = [item["id"] for item in checked_spec["items"]
-               if item["status"] == "read" and item["kind"] != "note" and item["id"] not in out]
+               if item["status"] == "read" and item["kind"] not in ("note", "title") and item["id"] not in out]
     if missing:
         raise SolidWorksError(f"Every read spec item is placed on the drawing; no placement for "
                               f"{', '.join(missing)}. (Notes without one go in the notes block.)")
@@ -1387,6 +1410,9 @@ def compare(spec, read: dict) -> dict:
         if item["status"] == "unreadable":
             lines.append({**line, "status": "unreadable", "detail": "flagged unreadable when the old drawing was read"})
             continue
+        if kind == "title":
+            lines.append({**line, **_compare_title(item, read.get("title_block"))})
+            continue
         found = by_name.get(item.get("annotation") or annotation_name(sid), [])
         if kind == "note":  # also found by its text when it sits unnamed in the notes block
             found = found or [("notes", n) for n in read.get("notes", [])
@@ -1405,6 +1431,75 @@ def compare(spec, read: dict) -> dict:
         counts[line["status"]] = counts.get(line["status"], 0) + 1
     return {"ok": True, "clean": counts.get("missing", 0) == counts.get("differs", 0) == 0,
             "counts": counts, "items": lines, "not_in_spec": extra}
+
+
+def _compare_title(item, title_block) -> dict:
+    """A title-block value against what the saved drawing's title block shows."""
+    if title_block is None:
+        return {"status": "missing", "detail": "the title block was not read"}
+    prop = title_property(item["field"])
+    shown = title_block.get(prop.lower())
+    if shown is None:
+        return {"status": "missing", "detail": f"the title block has no field linked to {prop!r}"}
+    want = norm_text(item["text"])
+    if any(want == norm_text(text) or want in norm_text(text) for text in shown):
+        return {"status": "ok", "shown": shown[0]}
+    return {"status": "differs", "shown": shown[0] if shown else "", "spec": item["text"]}
+
+
+# --- the title block ---------------------------------------------------------------------
+
+_LINK = re.compile(r'\$PRP(SHEET)?:"([^"]+)"', re.IGNORECASE)
+
+
+def parse_property_links(text) -> list:
+    """The custom properties a title-block note shows: [(document, property)], document
+    'part' for $PRPSHEET:"Name" (the model in the views) and 'drawing' for $PRP:"Name"."""
+    return [("part" if m.group(1) else "drawing", m.group(2)) for m in _LINK.finditer(text or "")]
+
+
+def title_property(field: str) -> str:
+    """The custom property a field name stands for: 'material' -> 'Material'; any other name as given."""
+    key = str(field).strip()
+    return TITLE_BLOCK_FIELDS[key.lower()][0] if key.lower() in TITLE_BLOCK_FIELDS else key
+
+
+def title_block_targets(fields, links) -> list:
+    """set_title_block's `fields` ({field: text}) checked against the title block's links
+    ([(document, property)]): [{field, property, document, value}]. A known field goes to the
+    document its link names (else its usual one); another name must be a linked property. Pure."""
+    if not isinstance(fields, dict):
+        raise SolidWorksError("fields is {field: text}, e.g. {\"material\": \"6061-T6\", \"finish\": \"ANODIZE BLACK\"}.")
+    linked = {}
+    for document, prop in links:
+        linked.setdefault(prop.lower(), (prop, document))
+    known = {prop.lower() for prop, _ in TITLE_BLOCK_FIELDS.values()}
+    allowed = sorted(TITLE_BLOCK_FIELDS) + sorted(prop for key, (prop, _) in linked.items() if key not in known)
+    out, seen = [], set()
+    for field, value in fields.items():
+        key = str(field).strip()
+        if key.lower() in TITLE_BLOCK_FIELDS:
+            prop, document = TITLE_BLOCK_FIELDS[key.lower()]
+            prop, document = linked.get(prop.lower(), (prop, document))
+        elif key.lower() in linked:
+            prop, document = linked[key.lower()]
+        else:
+            raise SolidWorksError(f"Unknown title-block field {key!r}. Use one of: {', '.join(allowed)}.")
+        if prop.lower() in seen:
+            raise SolidWorksError(f"Two fields write the property {prop!r}; give it once.")
+        seen.add(prop.lower())
+        if not isinstance(value, str) or not value.strip():
+            raise SolidWorksError(f"{key}: the value is the text as written on the old drawing (a non-empty string).")
+        if len(value) > 255:
+            raise SolidWorksError(f"{key}: at most 255 characters.")
+        out.append({"field": key, "property": prop, "document": document, "value": value.strip()})
+    return out
+
+
+def title_items(spec) -> dict:
+    """The spec's read title-block values as set_title_block's `fields`."""
+    return {item["field"]: item["text"] for item in validate(spec)["items"]
+            if item["kind"] == "title" and item["status"] == "read"}
 
 
 def _compare_one(item, group, got) -> dict:

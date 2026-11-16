@@ -40,7 +40,9 @@ scrapped part. Accuracy beats speed, every time.
 5. **Never type a file name.** The tools name every output from the DN number.
 6. **Verify, don't assume.** Every modelling tool returns measured volume, mass and bounding
    box. Compare them with what the drawing says before moving on.
-7. **Leave the title block empty.** The user fills it in.
+7. **Title block: only what the old drawing gives.** Fill material, finish and any other title-block
+   value exactly as written on the old drawing (`set_title_block`). Leave every field the old drawing
+   does not give empty; company data (drawn by, dates, company name) stays for the user.
 
 ## Workflow
 
@@ -58,7 +60,10 @@ region until everything on it has been seen at full resolution.
 Record **every item** in the drawing-spec format (SHOP-DRAWINGS.md §4.1):
 - dimensions: value as written, decimal places, tolerance, what it measures from/to
 - datums and their features; every GD&T frame (characteristic, tolerance, modifier, datum order)
-- threads, holes (counterbore/countersink), finishes, notes (material, heat treat, deburr…)
+- threads, holes (counterbore/countersink), finishes, notes (heat treat, deburr…)
+- title-block values as `title` items: `{"id": "TB1", "kind": "title", "field": "material",
+  "text": "6061-T6", "status": "read"}`; fields `material`, `finish`, `description`,
+  `part_number`, `revision` (an unreadable one is flagged and asked like any other value)
 - anything unreadable, flagged
 
 If "DN17" is also written on the sheet, report what you read.
@@ -100,7 +105,11 @@ The views **do not** have to match the old drawing. The information does.
 - **Never an isometric view.**
 
 Call `make_drawing` **with no path**, your chosen `views` and the latest `spec`; the server
-saves it as `DN17.SLDDRW` next to the part. Then call `check_drawing`. Fix every item it
+saves it as `DN17.SLDDRW` next to the part. Then call `set_title_block` **with no path** and the
+spec's read `title` items as `fields` (`{"material": "6061-T6", "finish": "ANODIZE BLACK"}`); it
+saves the part and drawing again and says, per field, whether the title block shows it. A field
+the sheet format has no place for is reported, not forced: mention it to the user. Then call
+`check_drawing`. Fix every item it
 reports as `missing` or `differs`, and make the drawing again until it is clean. This
 drawing is the one the user reviews and the shop machines from; nothing regenerates it later.
 

@@ -103,7 +103,8 @@ else:
 
 # Tools that are slow while healthy get more than the COM worker's 120 s:
 # make_drawing of a real 33-item shop drawing took 53-190 s on SOLIDWORKS 2020.
-_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0, "export_reviewed_drawing": 300.0}
+_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0, "export_reviewed_drawing": 300.0,
+                   "set_title_block": 300.0}
 
 
 async def _call(fn, *args, **kwargs) -> dict:
@@ -1215,11 +1216,29 @@ async def check_drawing(path: str, spec: dict) -> dict:
     what the spec says; a dimension also differs when the model's measured
     value is not the spec's, even if the shown text matches) or unreadable
     (flagged when the old drawing was read). Also lists what is on the drawing
-    but not in the spec (the title block is left out). `clean` is true when
+    but not in the spec (the title block is left out; "title" items are checked
+    against the title block's fields). `clean` is true when
     nothing is missing or different. "layout" measures the saved sheet: text
     boxes, leader lengths and layout problems (see make_drawing).
     """
     return await _call(_session.check_drawing, path, spec)
+
+
+@mcp.tool()
+async def set_title_block(fields: dict, path: str | None = None) -> dict:
+    """Fill the drawing's title block: material, finish and the other fields, exactly as
+    written on the old drawing (the spec's "title" items). Call after make_drawing, before
+    check_drawing. With a knowledge-base case open, leave out `path`.
+
+    fields: {"material": "6061-T6", "finish": "ANODIZE BLACK"}. Known names: material,
+    finish, description, part_number, revision; any other property the title block links
+    to is accepted by its own name (the result's title_block lists them). Each value is
+    written as a custom property of the document the title-block note reads (the part for
+    $PRPSHEET links, the drawing for $PRP), both files are saved, and the title block is
+    read back: written[].shown says whether it now shows the value. fields={} only reads
+    the title block's fields. Leave out what the old drawing does not give; company data
+    (drawn by, dates, company) stays for the user."""
+    return await _call(_session.set_title_block, fields, path)
 
 
 @mcp.tool()

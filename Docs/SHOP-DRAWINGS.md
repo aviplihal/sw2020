@@ -35,7 +35,7 @@ datums dimensions are measured from.
 | Views | **Chosen per part by good drafting practice** (§4.4). **No isometric, ever** | Was a fixed front/top/right + isometric |
 | Units | **Inches** on the drawing | Was millimetres |
 | Template, sheet and title block | **The user's default drawing template**, the one SolidWorks' own *New → Drawing* uses. On this SOLIDWORKS 2020 install that template carries **no sheet format** (New → Drawing asks for one), so the sheet is **always A size (11 × 8.5 in) landscape with SolidWorks' stock ANSI format `a - landscape.slddrt`** and its title block (decided by the user, 2026-10-19) | Was A4. `make_drawing` starts from the default template, then sets the sheet with `SetupSheet5` |
-| Title block contents | **Left empty.** The user fills it in; it holds information the model cannot see | The server writes nothing into it |
+| Title block contents | **Only what the old drawing gives** (material, finish, description, part number, revision), as `title` spec items; company data stays for the user (changed 2026-11-16; was: left empty) | `set_title_block` writes each value as a custom property of the document its title-block note links to (`$PRPSHEET`: the part, `$PRP`: the drawing) and reads the title block back |
 
 **Inches in, millimetres inside, inches out.** The server keeps working in millimetres at
 its boundary (rule 3 in `CLAUDE.md`):
@@ -96,6 +96,10 @@ the model, the drawing, and the final check.
   ]
 }
 ```
+
+A title-block value is a `title` item: `{"id": "TB1", "kind": "title", "field": "material", "text": "6061-T6", "status": "read"}`.
+It is never placed on a view; `set_title_block` writes it after `make_drawing`, and `check_drawing` compares it with
+the title block.
 
 Rules:
 - **Values are strings exactly as written** (`".375"`, `".50"`), never floats: a trailing

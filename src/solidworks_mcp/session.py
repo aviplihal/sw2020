@@ -157,6 +157,9 @@ from .constants import (  # shop drawings
     SHEETS,
     SW_ANGULAR_DIMENSION_TYPE,
     SW_ANNOTATION_OWNER_TEMPLATE,
+    SW_CUSTOM_INFO_ADD_OK,
+    SW_CUSTOM_INFO_TEXT,
+    SW_CUSTOM_PROPERTY_REPLACE_VALUE,
     SW_ANNOTATION_TYPES,
     SW_ARROW_CLOSED,
     SW_DECIMAL,
@@ -529,7 +532,7 @@ class SolidWorksSession:
             raise SolidWorksError(f"SolidWorks could not open the {kind} {abs_path}.")
         if already and doc.GetSaveFlag():
             raise SolidWorksError(f"{os.path.basename(abs_path)} is open in SolidWorks with unsaved changes: "
-                                  "save your fixes first, then review again.")
+                                  "save it first, then try again.")
         return doc, already
 
     def export_reviewed_part(self, path: str, step_path: str) -> dict:
@@ -7241,13 +7244,113 @@ class SolidWorksSession:
                 sw.CloseDoc(doc.GetPathName() or title)
         return {**drawing_spec.compare(spec, read), "layout": layout, "path": abs_path}
 
+    def _title_block_links(self, doc) -> list:
+        """The title block's linked fields: one entry per $PRP / $PRPSHEET link in the sheet
+        format's notes, with what the note shows now. A note that cannot be read is skipped,
+        so check_drawing never fails on the title block."""
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        sheet_view = binding.wrap(drawing.GetFirstView(), self._mod.IView)  # the sheet: it holds the format
+        links = []
+        for handle in (sheet_view.GetAnnotations() or ()) if sheet_view is not None else ():
+            try:
+                annotation = binding.wrap(handle, self._mod.IAnnotation)
+                if annotation.OwnerType != SW_ANNOTATION_OWNER_TEMPLATE or SW_ANNOTATION_TYPES.get(
+                        annotation.GetType()) != "note":
+                    continue
+                note = binding.wrap(annotation.GetSpecificAnnotation(), self._mod.INote)
+                raw, shown = note.PropertyLinkedText or "", note.GetText() or ""
+            except (pythoncom.com_error, AttributeError):
+                continue
+            for document, prop in drawing_spec.parse_property_links(raw):
+                links.append({"property": prop, "document": document, "note": annotation.GetName(),
+                              "linked_text": raw, "shown": shown})
+        return links
+
+    def _write_property(self, model, prop: str, value: str) -> str:
+        """Set one file-level text custom property and return what reads back."""
+        ext = binding.wrap(model.Extension, self._mod.IModelDocExtension)
+        manager = binding.wrap(ext.CustomPropertyManager(""), self._mod.ICustomPropertyManager)
+        if manager is None:
+            raise SolidWorksError(f"{model.GetTitle()} gave no custom property manager.")
+        result = manager.Add3(prop, SW_CUSTOM_INFO_TEXT, value, SW_CUSTOM_PROPERTY_REPLACE_VALUE)
+        if result != SW_CUSTOM_INFO_ADD_OK:
+            raise SolidWorksError(f"SolidWorks refused the property {prop!r} on {model.GetTitle()} "
+                                  f"(swCustomInfoAddResult_e {result}).")
+        got = manager.Get4(prop, False)
+        return got[1] if isinstance(got, tuple) and len(got) > 1 else str(got)
+
+    def set_title_block(self, fields: dict, path: str | None = None) -> dict:
+        """Fill the drawing's title block from custom properties: each field is written to the
+        document its title-block note links to ($PRPSHEET: the part in the views, $PRP: the
+        drawing), both files are saved, and the title block is read back. fields={} only reads
+        which fields the title block links to. With a knowledge-base case open, leave out path."""
+        abs_path = os.path.abspath(case_paths.resolve("drawing", path))
+        if not abs_path.lower().endswith(".slddrw") or not os.path.isfile(abs_path):
+            raise SolidWorksError(f"set_title_block works on a saved .slddrw (got '{abs_path}'): make_drawing first.")
+        doc, already = self._open_reviewed(abs_path, SW_DOC_DRAWING, "drawing")
+        opened = [] if already else [doc]
+        try:
+            links = self._title_block_links(doc)
+            targets = drawing_spec.title_block_targets(fields, [(l["document"], l["property"]) for l in links])
+            part = None
+            if any(t["document"] == "part" for t in targets):
+                part_path = self._drawing_model_path(doc)
+                part, part_open = self._open_reviewed(part_path, SW_DOC_PART, "part")
+                if not part_open:
+                    opened.append(part)
+            written = []
+            for target in targets:
+                model = part if target["document"] == "part" else doc
+                back = self._write_property(model, target["property"], target["value"])
+                if back != target["value"]:
+                    raise SolidWorksError(f"{target['property']} reads back {back!r}, not {target['value']!r}.")
+                written.append({**target, "file": model.GetPathName()})
+            if part is not None:
+                self._write_via_saveas3(part.GetPathName(), part)  # $PRPSHEET reads the saved part
+            if targets:
+                doc.ForceRebuild3(False)
+                links = self._title_block_links(doc)
+                self._write_via_saveas3(abs_path, doc)
+            shown = {}
+            for target in written:
+                texts = [l["shown"] for l in links if l["property"].lower() == target["property"].lower()]
+                target["shown"] = (any(drawing_spec.norm_text(target["value"]) in drawing_spec.norm_text(t)
+                                       for t in texts) if texts else None)
+                shown[target["field"]] = target["shown"]
+        finally:
+            for document in opened:
+                self._sw.CloseDoc(document.GetPathName())
+        result = {"ok": True, "drawing": abs_path, "written": written,
+                  "title_block": [{k: l[k] for k in ("property", "document", "shown")} for l in links]}
+        missing = [f for f, s in shown.items() if s is None]
+        hidden = [f for f, s in shown.items() if s is False]
+        if missing:
+            result["note"] = (f"Stored, but this sheet format shows no field for {', '.join(missing)}; "
+                              "the user can add it to the title block.")
+        if hidden:
+            result["warning"] = f"Written and saved, but the title block does not show {', '.join(hidden)} yet."
+        return result
+
+    def _drawing_model_path(self, doc) -> str:
+        """The part the drawing's first model view shows."""
+        drawing = binding.wrap(doc, self._mod.IDrawingDoc)
+        view = binding.wrap(drawing.GetFirstView(), self._mod.IView)
+        while view is not None:
+            name = view.GetReferencedModelName()
+            if name:
+                return name
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        raise SolidWorksError("The drawing has no model view, so no part carries its title-block values.")
+
     def _read_drawing(self, doc) -> dict:
         """Every dimension, note, datum, frame and finish symbol on the drawing,
         as SolidWorks has them (drawing_spec.compare's input)."""
         drawing = binding.wrap(doc, self._mod.IDrawingDoc)
         ext = binding.wrap(doc.Extension, self._mod.IModelDocExtension)
         doc_places = ext.GetUserPreferenceInteger(SW_PREF_UNITS_LINEAR_DECIMALS, 0)
-        read = {"dimensions": [], "notes": [], "datums": [], "gtols": [], "finishes": []}
+        read = {"dimensions": [], "notes": [], "datums": [], "gtols": [], "finishes": [], "title_block": {}}
+        for link in self._title_block_links(doc):
+            read["title_block"].setdefault(link["property"].lower(), []).append(link["shown"])
         view = binding.wrap(drawing.GetFirstView(), self._mod.IView)  # the sheet first, then its views
         while view is not None:
             vname = view.GetName2()

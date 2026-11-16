@@ -303,6 +303,10 @@ SW_DIMENSION_TEXT_SUFFIX = 2
 SW_ANGULAR_DIMENSION_TYPE = 3               # swDimensionType_e
 SW_ANNOTATION_TYPES = {2: "datum", 4: "dimension", 5: "gtol", 6: "note", 7: "finish"}   # swAnnotationType_e
 SW_ANNOTATION_OWNER_TEMPLATE = 2           # swAnnotationOwner_e: the sheet format (title block)
+# set_title_block: custom properties (ICustomPropertyManager.Add3), from the 2020 swconst.tlb
+SW_CUSTOM_INFO_TEXT = 30                    # swCustomInfoType_e
+SW_CUSTOM_PROPERTY_REPLACE_VALUE = 2        # swCustomPropertyAddOption_e
+SW_CUSTOM_INFO_ADD_OK = 0                   # swCustomInfoAddResult_AddedOrChanged
 SW_GCS = {  # swGtolGeomCharSymbol_e
     "symmetry": 13, "straightness": 14, "flatness": 15, "circularity": 16, "cylindricity": 17,
     "profile of a line": 18, "profile of a surface": 19, "angularity": 20, "perpendicularity": 21,

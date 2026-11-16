@@ -501,3 +501,19 @@ copies in `Projects\_tmp\drawings\arrange2\`. Findings on 2020 and in the planne
 - The bridge is now started with `scripts\start-bridge.cmd` (sw2020's `.venv` and `src`), not from the old
   `Projects\SolidWorks-MCP` copy (0.16.0, not a git repo). `bridge_dev.py` reloads `drawing_layout` too.
 
+### 2026-11-16 — `set_title_block` (branch `feat/title-block`; unit-tested only, unverified on 2020)
+
+- The title block is filled through custom properties, the usual SolidWorks way: each title-block note in the
+  sheet format is read (`INote.PropertyLinkedText`, annotation owner = sheet format) for `$PRPSHEET:"Name"`
+  (read from the part in the views) and `$PRP:"Name"` (read from the drawing) links, and each value goes to that
+  document with `ICustomPropertyManager.Add3(name, swCustomInfoText 30, value, swCustomPropertyReplaceValue 2)`
+  (values from the 2020 swconst.tlb), read back with `Get4`. The part is saved before the drawing is rebuilt
+  and saved, so the `$PRPSHEET` notes show the new values; then the title block is read again (`shown`).
+- Not yet known on 2020: which properties the stock `a/b/c - landscape.slddrt` title blocks link to (the
+  files are compressed, so the names could not be read from disk). The field table (material → Material,
+  finish → Finish, description → Description, part_number → PartNo, revision → Revision) is the usual
+  SolidWorks naming; a link found in the format wins. To check, through the bridge, on a throwaway part:
+  `new_part`, `add_box 50 30 10`, `save_part C:\Users\Sandbox\Projects\_tmp\tb_test.SLDPRT`,
+  `make_drawing C:\Users\Sandbox\Projects\_tmp\tb_test.SLDDRW`, then `set_title_block "{}" path=...` (lists the
+  links) and `set_title_block "{\"material\": \"6061-T6\", \"finish\": \"ANODIZE BLACK\"}" path=...`.
+

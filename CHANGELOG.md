@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project follows
 - New sessions brief themselves: a `SessionStart` hook (`scripts/session_start.py`) prints the project rules, the job workflow, the tool groups and live state (branch, KB index, bridge). The server instructions now name the drawing-job workflow, and `solidworks://job` serves it (the job brief moved to `src/solidworks_mcp/job.md`). A prompt like "do DN17" is enough.
 
 ### Shared (knowledge base and shop drawings)
+- `set_title_block(fields, path=None)` fills the drawing's title block (material, finish, description, part number, revision, or any property its notes link to) by writing custom properties to the part ($PRPSHEET links) or drawing ($PRP links), saves both and reads the title block back. The drawing spec takes `title` items, `check_drawing` compares them with the title block, and the job brief fills the title block from the old drawing instead of leaving it empty.
 - `set_units` (inches or millimetres, and decimal places) and
   `set_dimension_tolerance` (a +/- tolerance on a length dimension, shown on the
   drawing).

@@ -47,7 +47,7 @@ def test_drawing_tools_get_longer_than_the_default():
     """make_drawing of the 33-item DTN6 drawing took 53-190 s on 2020: never
     120 s. The table is keyed by session method name, which _call reads."""
     source = pathlib.Path("src/solidworks_mcp/server.py").read_text(encoding="utf-8")
-    assert '_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0, "export_reviewed_drawing": 300.0}' in source
+    assert '_CALL_TIMEOUT_S = {"make_drawing": 900.0, "check_drawing": 300.0, "export_reviewed_drawing": 300.0,' in source
     assert callable(getattr(SolidWorksSession, "make_drawing"))
     assert SolidWorksSession.make_drawing.__name__ == "make_drawing"
 

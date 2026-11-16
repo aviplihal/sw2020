@@ -797,3 +797,67 @@ def test_a_round_part_seen_at_a_slant_is_as_wide_as_it_is_round():
     # the box: 120 mm wide, off the area at 1:4 where it is pinned, so 1:5
     assert ds.layout(views, o, size, SHEETS["B"]["area_mm"])["scale"] == (1, 5)
     assert ds.layout(views, o, size, SHEETS["B"]["area_mm"], round_span)["scale"] == (1, 4)
+
+
+# --- title block ------------------------------------------------------------------------
+
+TITLE_SPEC = {"units": "in", "items": [
+    {"id": "D1", "kind": "dimension", "value": "2.000", "decimals": 3, "tolerance": None, "between": "length",
+     "status": "read"},
+    {"id": "TB1", "kind": "title", "field": "material", "text": "6061-T6 ALUMINUM", "status": "read"},
+    {"id": "TB2", "kind": "title", "field": "finish", "text": "ANODIZE BLACK", "status": "read"},
+    {"id": "TB3", "kind": "title", "field": "part_number", "text": None, "status": "unreadable"},
+]}
+
+
+def test_title_block_values_are_spec_items_that_are_never_placed():
+    checked = ds.validate(TITLE_SPEC)
+    assert [i["kind"] for i in checked["items"]] == ["dimension", "title", "title", "title"]
+    assert ds.title_items(TITLE_SPEC) == {"material": "6061-T6 ALUMINUM", "finish": "ANODIZE BLACK"}
+    bad = {"units": "in", "items": [{"id": "TB1", "kind": "title", "field": "material", "text": " ",
+                                     "status": "read"}]}
+    with pytest.raises(SolidWorksError, match="text is the title-block value as written"):
+        ds.validate(bad)
+
+
+def test_property_links_are_read_from_title_block_notes():
+    assert ds.parse_property_links('$PRPSHEET:"Material"') == [("part", "Material")]
+    assert ds.parse_property_links('DWG NO. $PRP:"SW-File Name" REV $prp:"Revision"') == [
+        ("drawing", "SW-File Name"), ("drawing", "Revision")]
+    assert ds.parse_property_links("FINISH") == []
+
+
+def test_fields_go_to_the_document_their_link_names_and_unknown_ones_are_refused():
+    links = [("part", "MATERIAL"), ("drawing", "Finish"), ("drawing", "SW-File Name"), ("part", "Weight")]
+    targets = ds.title_block_targets({"material": "6061-T6", "Finish": "ANODIZE", "Weight": "0.2 LB",
+                                                "description": " BRACKET "}, links)
+    assert targets == [
+        {"field": "material", "property": "MATERIAL", "document": "part", "value": "6061-T6"},
+        {"field": "Finish", "property": "Finish", "document": "drawing", "value": "ANODIZE"},
+        {"field": "Weight", "property": "Weight", "document": "part", "value": "0.2 LB"},
+        {"field": "description", "property": "Description", "document": "part", "value": "BRACKET"},
+    ]
+    with pytest.raises(SolidWorksError, match="Unknown title-block field 'colour'. Use one of: .*material.*Weight"):
+        ds.title_block_targets({"colour": "red"}, links)
+    with pytest.raises(SolidWorksError, match="non-empty string"):
+        ds.title_block_targets({"finish": ""}, links)
+    with pytest.raises(SolidWorksError, match="Two fields write the property"):
+        ds.title_block_targets({"material": "A", "MATERIAL": "B"}, links)
+    assert ds.title_block_targets({}, links) == []
+
+
+def test_check_drawing_compares_title_items_with_the_title_block():
+    read = {"dimensions": [], "notes": [], "datums": [], "gtols": [], "finishes": [],
+            "title_block": {"material": ["6061-T6 ALUMINUM"], "finish": ["ANODIZE"]}}
+    lines = {line["id"]: line for line in ds.compare(TITLE_SPEC, read)["items"]}
+    assert lines["TB1"]["status"] == "ok"
+    assert (lines["TB2"]["status"], lines["TB2"]["shown"]) == ("differs", "ANODIZE")
+    assert lines["TB3"]["status"] == "unreadable"
+    read["title_block"] = {}
+    assert ds.compare(TITLE_SPEC, read)["items"][1]["status"] == "missing"
+
+
+def test_a_title_item_cannot_be_placed_and_needs_no_placement():
+    checked = ds.validate(TITLE_SPEC)
+    with pytest.raises(SolidWorksError, match="not placed on a view; set_title_block"):
+        ds.validate_placements({"TB1": {"view": "v1"}}, checked, {"v1"})
