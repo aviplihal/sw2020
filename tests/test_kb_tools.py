@@ -360,6 +360,44 @@ def test_the_server_exports_the_checked_files_then_records_the_review(tools, tmp
     assert refused == {"ok": False, "error": "No case DN99."} and len(fake.calls) == 2
 
 
+# --- job folders ---------------------------------------------------------------------------
+
+
+def test_a_pdf_in_a_dn_folder_takes_its_number_and_its_files_go_there(tools, tmp_path, monkeypatch):
+    from solidworks_mcp import case_paths
+    from solidworks_mcp.kb import dn
+
+    monkeypatch.setenv("SWMCP_OUTPUT_DIR", str(tmp_path / "elsewhere"))
+    job = tmp_path / "Jobs" / "DN17"
+    job.mkdir(parents=True)
+    assert dn.from_path(str(job / "scan.pdf")) == (17, str(job))
+    assert dn.from_path(str(tmp_path / "DN5.pdf")) == (5, None)
+    with pytest.raises(SolidWorksError, match="The file is DN18 but its folder is DN17"):
+        dn.from_path(str(job / "DN18.pdf"))
+    result, _ = tools.ingest_drawing(make_pdf(job / "DN17.pdf"))
+    assert (result["dn"], result["files_go_to"]) == ("DN17", str(job))
+    assert tools.kb.open_case()["folder"] == str(job), "kept in case.md, so it survives a restart"
+    assert case_paths.case_output_path("part") == str(job / "DN17.SLDPRT")
+    assert case_paths.resolve("drawing", None) == str(job / "DN17.SLDDRW")
+
+
+def test_a_job_folder_case_finalises_and_reviews_from_that_folder(tools, tmp_path, monkeypatch):
+    monkeypatch.setenv("SWMCP_OUTPUT_DIR", str(tmp_path / "elsewhere"))
+    job = tmp_path / "Jobs" / "DN17"
+    job.mkdir(parents=True)
+    tools.ingest_drawing(make_pdf(job / "DN17.pdf"))
+    tools.describe_case(view_boxes=BOXES, description="An L bracket.", part_type="bracket", drawing_spec=SPEC)
+    call("add_box", 10)
+    for ext in (".SLDPRT", ".SLDDRW"):
+        (job / f"DN17{ext}").write_bytes(b"x")
+    assert tools.finalise_case(["x"], MEASURED)["files"] == [str(job / "DN17.SLDPRT"), str(job / "DN17.SLDDRW")]
+    files = tools.review_files("DN17", "approved")
+    assert files["part"] == str(job / "DN17.SLDPRT")
+    result = tools.review_case("DN17", "approved", None, exported(files))
+    assert result["delivered"] == [str(job / "DN17.step"), str(job / "DN17 drawing.pdf")]
+    assert (job / "DN17.pdf").read_bytes()[:4] == b"%PDF", "the old drawing is left as it was"
+
+
 # --- the MCP side ---------------------------------------------------------------------
 
 

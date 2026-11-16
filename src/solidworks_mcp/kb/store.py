@@ -31,7 +31,7 @@ OPEN_STATUSES = {"ingested", "described", "modelling"}
 STATUSES = set(TRANSITIONS)
 UNASSIGNED = "_unassigned"
 
-HEADER_KEYS = ("dn", "status", "part_type", "size_mm", "page", "dpi", "ingested", "finalised", "reviewed",
+HEADER_KEYS = ("dn", "status", "part_type", "size_mm", "page", "dpi", "folder", "ingested", "finalised", "reviewed",
                "abandoned", "reason")
 SECTIONS = ("Description", "Drawing", "Questions asked", "How it was modelled", "Result", "Review", "Lessons")
 TIERS = {"approved": 0, "changes_needed": 1}  # everything else is unreviewed: 2
@@ -231,7 +231,7 @@ class KnowledgeBase:
                                   code="KB_BAD_TRANSITION")
         return self.update_case(case, sections, status=status, **fields)
 
-    def ingest(self, number: int, source_name: str, page: int) -> tuple:
+    def ingest(self, number: int, source_name: str, page: int, folder: str | None = None) -> tuple:
         """Open a new case for DN<number>; returns it and any warnings (a gap in the numbers).
 
         Refused while another case is open, or when the DN already exists (an
@@ -252,7 +252,8 @@ class KnowledgeBase:
         if highest is not None and number > highest + 1:
             missing = (f"DN{highest + 1}" if number == highest + 2 else f"DN{highest + 1} to DN{number - 1}")
             warnings.append(f"{missing} missing: the highest earlier case is DN{highest}.")
-        case = {"dn": name, "number": number, "status": "ingested", "page": page, "ingested": self.today(),
+        case = {"dn": name, "number": number, "status": "ingested", "page": page, "folder": folder,
+                "ingested": self.today(),
                 "sections": {"Drawing": f"input.pdf page {page} (from {source_name})"}}
         return self.write_case(case), warnings
 

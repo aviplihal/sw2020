@@ -529,3 +529,11 @@ Through the bridge, on a throwaway 50 x 30 x 10 block and its A-sheet drawing:
 - `check_drawing` reopened the saved drawing and matched title items (a wrong revision came back `differs`).
 - The tool closed what it opened; the current part stayed open and unmodified.
 
+### 2026-11-16 (evening) — Job folders
+
+- A PDF in a folder named `DN<n>` (`C:\Sandbox DropBox\Jobs\DN<n>\`) gives the case its number, and the case's
+  part and drawing are saved in that folder (`kb.config.case_output_dir`, `folder:` in case.md); review copies
+  `DN<n>.step` and `DN<n> drawing.pdf` there as well. A DN file name and a DN folder that disagree are refused.
+- The bridge (`sw_bridge\bridge.py`) now also accepts paths under `C:\Sandbox DropBox\Jobs`; it reads that list at
+  start, so a running bridge must be restarted to take it.
+

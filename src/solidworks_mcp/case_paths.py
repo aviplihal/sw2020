@@ -17,7 +17,8 @@ EXTENSIONS = {"part": ".SLDPRT", "drawing": ".SLDDRW"}
 def case_output_path(kind: str) -> str | None:
     """The open case's file for `kind` ('part' or 'drawing'), or None with no case open.
 
-    SWMCP_OUTPUT_DIR\\DN17.SLDPRT and DN17.SLDDRW; the folder is made if missing.
+    DN17.SLDPRT and DN17.SLDDRW in the case's job folder (the DN17 folder its PDF was
+    dropped in), else in SWMCP_OUTPUT_DIR; the folder is made if missing.
     """
     from .kb import config
     from .kb import log as kb_log
@@ -25,7 +26,7 @@ def case_output_path(kind: str) -> str | None:
     case = kb_log.knowledge_base().open_case()
     if case is None:
         return None
-    folder = config.output_dir()
+    folder = config.case_output_dir(case)
     folder.mkdir(parents=True, exist_ok=True)
     return str(folder / f"{case['dn']}{EXTENSIONS[kind]}")
 

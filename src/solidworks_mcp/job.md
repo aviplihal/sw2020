@@ -47,7 +47,12 @@ scrapped part. Accuracy beats speed, every time.
 ## Workflow
 
 ### 1. Ingest
-- Call `kb_ingest_drawing` with the PDF's path (and `page` if it is not page 1).
+- Call `kb_ingest_drawing` with the PDF's path (and `page` if it is not page 1). The user
+  usually drops the PDF in a **job folder** named after the job (`...\Jobs\DN17\`); if they
+  give only "DN17", look there for the PDF. A PDF in a DN17 folder may have any name.
+- The job's **output folder** is that job folder (`files_go_to` in the result): the part,
+  the drawing and, after review, the STEP and drawing PDF are saved there, next to the old
+  drawing. A PDF dropped anywhere else uses the server's output folder instead.
 - If it refuses (bad file name, DN already used, another case still open), stop and tell
   the user. If it warns about a gap in the DN numbers, mention it and continue.
 - It returns an **overview** of the page: good for the layout, too coarse for small text.

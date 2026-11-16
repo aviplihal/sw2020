@@ -87,11 +87,12 @@ class CaseTools:
 
     def ingest_drawing(self, path: str, page: int = 1) -> tuple:
         """Check the DN number, render the page, open the case; the overview image goes with the result."""
-        number = dn_names.from_filename(path)
+        number, job_folder = dn_names.from_path(path)
         if not os.path.isfile(path):
             raise SolidWorksError(f"No file at {path}.", code="KB_FILE_NOT_FOUND")
         image, dpi = images.render_page(path, page)
-        case, warnings = self.kb.ingest(number, ntpath.basename(path), page)
+        case, warnings = self.kb.ingest(number, ntpath.basename(path), page,
+                                        os.path.abspath(job_folder) if job_folder else None)
         folder = self.kb.case_folder(case["dn"])
         (folder / "views").mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, folder / "input.pdf")
@@ -102,6 +103,7 @@ class CaseTools:
         self.kb.update_case(case, dpi=dpi)
         overview, scale = images.shown(image)
         result = {"ok": True, "dn": case["dn"], "page": page, "dpi": dpi, "page_px": list(image.size),
+                  "files_go_to": str(config.case_output_dir(case)) if job_folder else None,
                   "overview_dpi": round(dpi * scale), "warnings": warnings,
                   "next": "This overview is too coarse to read dimensions. Read every value from a zoomed region "
                           "(kb_view_region with a box in page fractions [x0, y0, x1, y1]), then call "
@@ -277,7 +279,7 @@ class CaseTools:
         if len(lessons) > 5:
             raise SolidWorksError(f"At most 5 lessons (got {len(lessons)}): keep the ones a later job needs most.",
                                   code="KB_BAD_LESSONS")
-        folder = config.output_dir()
+        folder = config.case_output_dir(case)
         missing = [name for name in (f"{case['dn']}.SLDPRT", f"{case['dn']}.SLDDRW") if not (folder / name).is_file()]
         if missing:
             raise SolidWorksError(f"Not saved in {folder}: {', '.join(missing)}. Call save_part and make_drawing "
@@ -335,7 +337,7 @@ class CaseTools:
         if verdict == "changes_needed" and not (notes or "").strip():
             raise SolidWorksError("Say what the user changed (notes), e.g. 'the bore was Ø.750, not Ø.875'.",
                                   code="KB_NO_REVIEW_NOTES")
-        out = config.output_dir()
+        out = config.case_output_dir(case)
         files = {"part": out / f"{case['dn']}.SLDPRT", "drawing": out / f"{case['dn']}.SLDDRW"}
         missing = [p.name for p in files.values() if not p.is_file()]
         if missing:
@@ -383,8 +385,14 @@ class CaseTools:
             lessons = [line for line in lessons if not line.startswith("- Review: ")]
             sections["Lessons"] = "\n".join([f"- Review: {note}", *lessons])
         self.kb.set_status(case, verdict, sections, reviewed=self.kb.today())
+        delivered = []
+        if case.get("folder"):  # a job folder: the STEP and drawing PDF go next to the user's files too
+            for key in ("step", "pdf"):
+                target = os.path.join(case["folder"], os.path.basename(files[key]))
+                shutil.copyfile(files[key], target)
+                delivered.append(target)
         return {"ok": True, "dn": case["dn"], "verdict": verdict, "measured_changes": changes,
-                "stored": [files["step"], files["pdf"]],
+                "stored": [files["step"], files["pdf"]], "delivered": delivered,
                 "next": f"Stored {case['dn']}.step and {case['dn']} drawing.pdf. Tell the user the files can now "
                         "be moved out of the output folder."}
 

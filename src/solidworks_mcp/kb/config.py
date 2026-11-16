@@ -15,6 +15,12 @@ def kb_dir() -> Path:
     return Path(base) / "solidworks-mcp" / "kb"
 
 
+def case_output_dir(case: dict) -> Path:
+    """Where a case's DN17.SLDPRT / .SLDDRW go: its job folder (the DN17 folder the PDF was
+    dropped in), else SWMCP_OUTPUT_DIR."""
+    return Path(case["folder"]) if case.get("folder") else output_dir()
+
+
 def output_dir() -> Path:
     """The folder a case's SLDPRT and SLDDRW are saved to for review (SWMCP_OUTPUT_DIR)."""
     folder = os.environ.get("SWMCP_OUTPUT_DIR")

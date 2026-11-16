@@ -18,7 +18,8 @@ STATIC = r"""\
 # Session briefing (SolidWorks MCP, SOLIDWORKS 2020 fork)
 You are working on / with the SolidWorks MCP server (tools `mcp__solidworks__*`, ~90 tools: modelling, assemblies,
 drawings via make_drawing, and the knowledge base `kb_*`). Read CLAUDE.md for the project rules.
-- A user message like "do DN17" or a path to DN17.pdf is a DRAWING JOB: read the MCP resource solidworks://job
+- A user message like "do DN17" or a path to DN17.pdf is a DRAWING JOB. Its PDF is normally in the job folder
+  C:\Sandbox DropBox\Jobs\DN17\ and the part and drawing are saved there too. Read the MCP resource solidworks://job
   (source: src/solidworks_mcp/job.md) and follow it step by step. Nothing is invented; unreadable values are asked.
 - Before modelling, look at earlier jobs: kb_search / kb_get_case, and kb_tool_card for each tool you will use.
 - Real jobs are DN<n>. DTN<n> are old development test runs: never lessons, never KB cases.
