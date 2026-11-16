@@ -12,6 +12,7 @@ green by scripts/m1_block.py and scripts/m2_parametric.py.
 import contextlib
 import itertools
 import math
+from fractions import Fraction
 import os
 import re
 import shutil
@@ -54,6 +55,8 @@ from .constants import (
     SW_DOC_DRAWING,
     SW_DOC_PART,
     SW_DONT_REBUILD_ACTIVE_DOC,
+    SW_DISPLAY_HIDDEN_GREYED,
+    SW_DWG_PAPER_A,
     SW_DWG_PAPER_A4,
     SW_END_COND_BLIND,
     SW_END_COND_MID_PLANE,
@@ -126,7 +129,11 @@ from .constants import (
     SW_TOGGLE_DISPLAY_AXES,
     SW_TOGGLE_DISPLAY_PLANES,
     SW_TOGGLE_STL_ONE_FILE,
+    SW_TOL_BILAT,
+    SW_TOL_NONE,
     SW_UNITS_LINEAR,
+    SW_UNITS_LINEAR_DECIMAL_PLACES,
+    UNIT_CODES,
     SW_UNSUPPRESS_DEPENDENT,
     SW_VERT_LINEAR_DIMENSION,
     SW_WZD_COUNTERBORE,
@@ -300,8 +307,9 @@ class SolidWorksSession:
             raise SolidWorksError("Saving on close is not supported yet; use 'save_part', 'save_assembly' or 'export' first.")
         if self._model is None:
             return self._close_active_document()
-        title = self._require_model().GetTitle()
-        self._sw.CloseDoc(title)
+        model = self._require_model()
+        title = model.GetTitle()
+        self._sw.CloseDoc(model.GetPathName() or title)  # the path: a part and its drawing share a title
         self._model = None
         return {"ok": True, "closed": title}
 
@@ -327,11 +335,15 @@ class SolidWorksSession:
         return {"ok": True, "count": len(out), "documents": out}
 
     def activate_document(self, title: str) -> dict:
-        """Make an open document current again by its title (list_documents),
-        also a new one that was never saved."""
+        """Make an open document current again by its title (list_documents) or,
+        when a part and its drawing share a title, by its full path; also a new
+        one that was never saved."""
         documents = self._open_documents()
         key = re.sub(r"\.(sldprt|sldasm|slddrw)$", "", str(title).strip(), flags=re.IGNORECASE).lower()
-        matches = [d for d in documents if d.GetTitle() == title] or \
+        wanted = os.path.normcase(os.path.abspath(str(title))) if re.search(r"[\\/]", str(title)) else None
+        # a full path tells apart a part and its drawing, which share one title
+        matches = [d for d in documents if wanted and os.path.normcase(d.GetPathName() or "") == wanted] or \
+            [d for d in documents if d.GetTitle() == title] or \
             [d for d in documents if re.sub(r"\.(sldprt|sldasm|slddrw)$", "", d.GetTitle(), flags=re.IGNORECASE).lower() == key]
         if len(matches) != 1:
             listed = ", ".join(d.GetTitle() for d in documents) or "none"
@@ -351,7 +363,7 @@ class SolidWorksSession:
                 "changes, so it stays open. Save it in SolidWorks, or open it with open_part or "
                 "open_assembly to work on it."
             )
-        self._sw.CloseDoc(title)
+        self._sw.CloseDoc(active.GetPathName() or title)  # the path, as a part and its drawing share a title
         return {"ok": True, "closed": title}
 
     def _write_via_saveas3(self, abs_path: str, document=None) -> None:
@@ -4186,6 +4198,45 @@ class SolidWorksSession:
             return "deg", math.radians, math.degrees
         return "mm", mm_to_m, m_to_mm
 
+    def set_units(self, units: str = "inches", decimals: int = 3) -> dict:
+        """Show the current document's lengths in `units` ('inches' or 'millimetres')
+        with `decimals` places. Only the display changes: the model keeps its
+        size, and every tool still takes millimetres. A drawing made from the
+        part afterwards shows the same unit and places."""
+        key = str(units).lower()
+        if key not in UNIT_CODES:
+            raise SolidWorksError(f"units must be 'inches' or 'millimetres' (got '{units}').")
+        if not 0 <= int(decimals) <= 8:
+            raise SolidWorksError(f"decimals must be 0 to 8 (got {decimals}).")
+        model = self._require_model()
+        extension = binding.wrap(model.Extension, self._mod.IModelDocExtension)
+        extension.SetUserPreferenceInteger(SW_UNITS_LINEAR, SW_DETAILING_NO_OPTION, UNIT_CODES[key])
+        extension.SetUserPreferenceInteger(SW_UNITS_LINEAR_DECIMAL_PLACES, SW_DETAILING_NO_OPTION, int(decimals))
+        unit = extension.GetUserPreferenceInteger(SW_UNITS_LINEAR, SW_DETAILING_NO_OPTION)
+        places = extension.GetUserPreferenceInteger(SW_UNITS_LINEAR_DECIMAL_PLACES, SW_DETAILING_NO_OPTION)
+        if unit != UNIT_CODES[key] or places != int(decimals):
+            raise SolidWorksError(f"SolidWorks kept {LENGTH_UNITS.get(unit, unit)} with {places} places.")
+        return {"ok": True, "units": LENGTH_UNITS[unit], "decimals": places}
+
+    def set_dimension_tolerance(self, dimension_name: str, plus_mm: float = 0.0, minus_mm: float = 0.0) -> dict:
+        """Give a length dimension a bilateral tolerance: +plus_mm / -minus_mm
+        (both positive or zero, in millimetres: 0.0508 is .002 in). It shows on
+        a drawing made from the part. minus and plus both 0 removes it."""
+        if plus_mm < 0 or minus_mm < 0:
+            raise SolidWorksError("plus_mm and minus_mm are sizes: give them as positive numbers (or 0).")
+        dim = self._dimension(dimension_name)
+        if dim.GetType() == SW_DIMENSION_PARAM_ANGULAR:
+            raise SolidWorksError("Only a length dimension takes a tolerance here.")
+        tolerance = binding.wrap(dim.Tolerance, self._mod.IDimensionTolerance)
+        if plus_mm == 0 and minus_mm == 0:
+            tolerance.Type = SW_TOL_NONE
+        else:
+            tolerance.Type = SW_TOL_BILAT
+            tolerance.SetValues(-mm_to_m(minus_mm), mm_to_m(plus_mm))
+        got = (m_to_mm(tolerance.GetMinValue()), m_to_mm(tolerance.GetMaxValue()))
+        return {"ok": True, "dimension": dimension_name, "type": int(tolerance.Type),
+                "min_mm": round(got[0], 6), "max_mm": round(got[1], 6)}
+
     def set_equation(self, equation: str) -> dict:
         """Add an equation, or replace the one that sets the same name, then
         rebuild and remeasure (see set_equations).
@@ -5545,15 +5596,318 @@ class SolidWorksSession:
                   for corner in itertools.product(*zip(*corners_mm))]
         return [min(t[i] for t in turned) for i in range(3)], [max(t[i] for t in turned) for i in range(3)]
 
-    def make_drawing(self, path: str | None = None) -> dict:
+    _SHEET_FORMAT_FILE = "a - landscape.slddrt"   # SolidWorks' stock ANSI A sheet, with its title block
+
+    def _apply_sheet_format(self, sheets, ratio: float = 1.0) -> None:
+        """ANSI A landscape (11 x 8.5 in) on the stock sheet format, so the sheet
+        carries its title block (left empty: the person fills it in), third-angle."""
+        folders = [f.strip() for f in (self._sw.GetUserPreferenceStringValue(7) or "").split(";") if f.strip()]
+        fmt = next((os.path.join(f, self._SHEET_FORMAT_FILE) for f in folders
+                    if os.path.isfile(os.path.join(f, self._SHEET_FORMAT_FILE))), None)
+        if fmt is None:
+            raise SolidWorksError(f"The sheet format '{self._SHEET_FORMAT_FILE}' is not in SolidWorks' sheet format "
+                                  "folders.")
+        sheet = binding.wrap(sheets.GetCurrentSheet(), self._mod.ISheet)
+        fraction = Fraction(ratio).limit_denominator(16)
+        if not sheets.SetupSheet5(sheet.GetName(), SW_DWG_PAPER_A, 12, float(fraction.numerator),
+                                  float(fraction.denominator), False, fmt,
+                                  mm_to_m(279.4), mm_to_m(215.9), "Default", True):
+            raise SolidWorksError(f"SolidWorks could not set the sheet up on '{fmt}'.")
+        sheet = binding.wrap(sheets.GetCurrentSheet(), self._mod.ISheet)
+        sheet.SheetFormatVisible = True
+        sheet.SetScale(float(fraction.numerator), float(fraction.denominator), False, 0.0)
+        got = sheet.GetProperties2()
+        if abs(got[2] / got[3] - fraction.numerator / fraction.denominator) > 1e-9:
+            raise SolidWorksError(f"SolidWorks kept the sheet scale {got[2]:g}:{got[3]:g}, not "
+                                  f"{fraction.numerator}:{fraction.denominator}.")
+
+    _VIEW_SPANS = {"front": ("x", "y"), "back": ("x", "y"), "left": ("z", "y"), "right": ("z", "y"),
+                   "top": ("x", "z"), "bottom": ("x", "z")}
+
+    _SHEET_M = (0.2794, 0.2159)   # ANSI A landscape
+
+    def _choose_scale(self, names: list, scale: str | None) -> float:
+        """The sheet scale as a ratio (1.0 = full size): `scale` ('1:1') if given,
+        else the largest ordinary scale at which the views fit in a row."""
+        keys = [str(n).lower() for n in names]
+        for key in keys:
+            if key not in self._STANDARD_VIEWS:
+                raise SolidWorksError(f"Unknown view '{key}': use {', '.join(self._STANDARD_VIEWS)}.")
+        if scale:
+            try:
+                num, den = (float(part) for part in str(scale).split(":"))
+            except ValueError:
+                raise SolidWorksError(f"scale must look like '1:1' or '1:2' (got '{scale}').") from None
+            if num <= 0 or den <= 0:
+                raise SolidWorksError(f"scale must be positive (got '{scale}').")
+            return num / den
+        width_m, height_m = self._SHEET_M
+        box = binding.wrap(self._model, self._mod.IPartDoc).GetPartBox(True)
+        size = {"x": box[3] - box[0], "y": box[4] - box[1], "z": box[5] - box[2]}
+
+        def fits(ratio: float) -> bool:
+            total = sum(size[self._VIEW_SPANS[k][0]] for k in keys) * ratio + 0.04 * (len(keys) - 1)
+            return total <= width_m * 0.72 and max(size[self._VIEW_SPANS[k][1]] for k in keys) * ratio <= height_m * 0.3
+
+        return next((r for r in (2.0, 1.0, 0.5, 0.25, 0.2, 0.125, 0.1, 0.05) if fits(r)), 0.05)
+
+    def _place_standard_views(self, sheets, part_path: str, names: list) -> dict:
+        """Standard views in a row on the sheet scale, left to right in the order
+        given, centred above the title block."""
+        keys = [str(n).lower() for n in names]
+        sheet = binding.wrap(sheets.GetCurrentSheet(), self._mod.ISheet)
+        width_m, height_m = sheet.GetProperties2()[5:7]
+        ratio = sheet.GetProperties2()[2] / sheet.GetProperties2()[3]
+        box = binding.wrap(self._model, self._mod.IPartDoc).GetPartBox(True)
+        size = {"x": box[3] - box[0], "y": box[4] - box[1], "z": box[5] - box[2]}
+        gap = 0.04
+        placed = {}
+        widths = [size[self._VIEW_SPANS[k][0]] * ratio for k in keys]
+        x = (width_m - (sum(widths) + gap * (len(keys) - 1))) / 2
+        for key, span in zip(keys, widths):
+            view = binding.wrap(sheets.CreateDrawViewFromModelView3(part_path, self._STANDARD_VIEWS[key],
+                                                                    x + span / 2, height_m * 0.66, 0.0),
+                                self._mod.IView)
+            if view is None:
+                raise SolidWorksError(f"SolidWorks could not place the {key} view.")
+            view.UseSheetScale = True
+            placed[key] = view
+            x += span + gap
+        return placed
+
+    def _edge_through(self, point_mm, tolerance_mm: float = 0.02):
+        """The solid body's edge that passes through a model point (mm), or None. A straight
+        edge must also span the point between its two ends."""
+        edges = self._solid_body().GetEdges() or ()
+        if not isinstance(edges, (list, tuple)):
+            edges = [edges]
+        target = [mm_to_m(c) for c in point_mm]
+        for edge_dispatch in edges:
+            edge = binding.wrap(edge_dispatch, self._mod.IEdge)
+            curve = binding.wrap(edge.GetCurve(), self._mod.ICurve)
+            if curve is None:
+                continue
+            nearest = curve.GetClosestPointOn(*target)
+            if nearest is None or m_to_mm(math.dist(nearest[:3], target)) > tolerance_mm:
+                continue
+            if curve.IsLine():
+                start, end = (binding.wrap(v, self._mod.IVertex).GetPoint() for v in (edge.GetStartVertex(),
+                                                                                       edge.GetEndVertex()))
+                span = [e - s for s, e in zip(start, end)]
+                along = sum((t - s) * w for t, s, w in zip(target, start, span)) / (sum(w * w for w in span) or 1.0)
+                if not -1e-6 <= along <= 1 + 1e-6:
+                    continue
+            return edge_dispatch
+        return None
+
+    def _view_edge(self, view, ref: dict, append: bool, drawing) -> None:
+        """Select, in `view`, the edge `ref` names."""
+        if "circle_mm" in ref:
+            centre, radius = ref["circle_mm"], ref.get("radius_mm")
+            for edge, found in self._circular_edges_at(*centre):
+                if radius is None or abs(found - radius) < 0.01:
+                    if not view.SelectEntity(edge, append):
+                        raise SolidWorksError(f"The view would not select the circle {ref}.")
+                    return
+            raise SolidWorksError(f"No circular edge at {ref}.")
+        if "at_model_mm" in ref:
+            # The part's own edge through the point, selected through the view (as the circles are):
+            # on SOLIDWORKS 2020 neither IMathPoint.MultiplyTransform nor a pick by sheet position
+            # (it selects the view too) can be trusted.
+            edge = self._edge_through(ref["at_model_mm"])
+            if edge is None or not view.SelectEntity(edge, append):
+                raise SolidWorksError(f"The view has no edge at model point {ref['at_model_mm']}.")
+            return
+        raise SolidWorksError(f"An edge is {{'circle_mm': [x, y, z], 'radius_mm': r}} or "
+                              f"{{'at_model_mm': [x, y, z]}} (got {ref}).")
+
+    def _add_view_dimensions(self, drawing, sheets, placed: dict, items: list) -> list:
+        """The extra dimensions of make_drawing: select the named edges in a view
+        and dimension them where the text should go."""
+        report = []
+        for k, item in enumerate(items):
+            view = placed.get(str(item.get("view", "")).lower())
+            if view is None:
+                raise SolidWorksError(f"Dimension {k}: no '{item.get('view')}' view.")
+            kind = str(item.get("kind", "")).lower()
+            maker = {"horizontal": drawing.AddHorizontalDimension2, "vertical": drawing.AddVerticalDimension2,
+                     "diameter": drawing.AddDiameterDimension2}.get(kind)
+            if maker is None:
+                raise SolidWorksError(f"Dimension {k}: kind must be horizontal, vertical or diameter.")
+            drawing.ClearSelection2(True)
+            for n, ref in enumerate(item.get("edges", ())):
+                try:
+                    self._view_edge(view, ref, n > 0, drawing)
+                except SolidWorksError as error:
+                    raise SolidWorksError(f"Dimension {k}: {error}") from None
+            box = view.GetOutline()
+            at = item.get("at_mm", [0, 0])
+            shown = binding.wrap(maker((box[0] + box[2]) / 2 + at[0] / 1000, (box[1] + box[3]) / 2 + at[1] / 1000, 0.0),
+                                 self._mod.IDisplayDimension)
+            drawing.ClearSelection2(True)
+            if shown is None:
+                raise SolidWorksError(f"Dimension {k} ({kind}): SolidWorks would not dimension the selection.")
+            if item.get("suffix"):
+                shown.SetText(2, str(item["suffix"]))  # swDimensionTextSuffix
+            binding.wrap(shown.GetAnnotation(), self._mod.IAnnotation).Color = 0  # black, not the default grey
+            report.append({"item": k, "text": shown.GetText(0)})
+        return report
+
+    def _enforce_scale(self, sheets, ratio: float) -> None:
+        """Creating the first view can put the sheet back on SolidWorks' own scale:
+        set the sheet scale again, and every view at it, and check."""
+        fraction = Fraction(ratio).limit_denominator(16)
+        sheet = binding.wrap(sheets.GetCurrentSheet(), self._mod.ISheet)
+        sheet.SetScale(float(fraction.numerator), float(fraction.denominator), False, 0.0)
+        view = binding.wrap(sheets.GetFirstView(), self._mod.IView)  # the sheet itself comes first
+        view = binding.wrap(view.GetNextView(), self._mod.IView)
+        while view is not None:
+            if abs(view.ScaleDecimal - ratio) > 1e-9:
+                view.UseSheetScale = False
+                view.ScaleDecimal = ratio
+            if abs(view.ScaleDecimal - ratio) > 1e-9:
+                raise SolidWorksError(f"View {view.GetName2()} stayed at scale {view.ScaleDecimal:g}, "
+                                      f"not {ratio:g}.")
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+
+    def save_drawing(self, path: str | None = None, pdf_path: str | None = None) -> dict:
+        """Save the open drawing (the current document) as it stands, to its own
+        file or to `path`, and with pdf_path also export a PDF of the sheet.
+        Whatever was edited by hand in SolidWorks is kept: nothing is rebuilt."""
+        model = self._require_model()
+        if int(model.GetType()) != SW_DOC_DRAWING:
+            raise SolidWorksError("The current document is not a drawing: activate_document it first.")
+        target = os.path.abspath(path or model.GetPathName() or "")
+        if not target or not target.lower().endswith(".slddrw"):
+            raise SolidWorksError("Give a path ending in .slddrw (the drawing has no file yet).")
+        self._write_via_saveas3(target, model)
+        result = {"ok": True, "path": target, "bytes": os.path.getsize(target)}
+        if pdf_path:
+            pdf = os.path.abspath(pdf_path)
+            if not pdf.lower().endswith(".pdf"):
+                raise SolidWorksError("pdf_path must end in .pdf.")
+            self._write_via_saveas3(pdf, model)
+            result["pdf"] = pdf
+            result["pdf_bytes"] = os.path.getsize(pdf)
+        return result
+
+    def describe_drawing(self, image_path: str | None = None) -> dict:
+        """Read the open drawing (as the current document) without changing it:
+        its views, every dimension's text and the notes. image_path also exports
+        a picture of the sheet (an export, so the document keeps its name and
+        its unsaved changes)."""
+        model = self._require_model()
+        if int(model.GetType()) != SW_DOC_DRAWING:
+            raise SolidWorksError("The current document is not a drawing: activate_document it first.")
+        sheets = binding.wrap(model, self._mod.IDrawingDoc)
+        views, dimensions, notes = [], [], []
+        view = binding.wrap(sheets.GetFirstView(), self._mod.IView)
+        sheet_view = True
+        while view is not None:
+            if not sheet_view:
+                views.append({"name": view.GetName2(), "scale": round(view.ScaleDecimal, 6)})
+            shown = binding.wrap(view.GetFirstDisplayDimension5(), self._mod.IDisplayDimension)
+            while shown is not None:
+                try:
+                    dimensions.append({"view": view.GetName2(), "text": shown.GetText(0),
+                                       "prefix": shown.GetText(1), "suffix": shown.GetText(2)})
+                except Exception:
+                    dimensions.append({"view": view.GetName2(), "text": "?"})
+                shown = binding.wrap(shown.GetNext5(), self._mod.IDisplayDimension)
+            for handle in view.GetAnnotations() or ():
+                annotation = binding.wrap(handle, self._mod.IAnnotation)
+                if annotation.GetType() == 6:  # swNote
+                    notes.append(binding.wrap(annotation.GetSpecificAnnotation(), self._mod.INote).GetText())
+            sheet_view = False
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        result = {"ok": True, "title": model.GetTitle(), "modified": bool(model.GetSaveFlag()), "views": views,
+                  "dimensions": dimensions, "notes": notes}
+        if image_path:
+            self._write_via_saveas3(os.path.abspath(image_path), model)
+            result["image"] = os.path.abspath(image_path)
+        return result
+
+    def _remove_dimensions(self, drawing, sheets, fragments) -> int:
+        """Delete the drawing's dimensions whose full name contains a fragment."""
+        if not fragments:
+            return 0
+        doomed = []
+        view = binding.wrap(sheets.GetFirstView(), self._mod.IView)
+        view = binding.wrap(view.GetNextView(), self._mod.IView)  # the sheet itself comes first
+        while view is not None:
+            shown = binding.wrap(view.GetFirstDisplayDimension5(), self._mod.IDisplayDimension)
+            while shown is not None:
+                following = binding.wrap(shown.GetNext5(), self._mod.IDisplayDimension)
+                try:
+                    dim = binding.wrap(shown.GetDimension2(0), self._mod.IDimension)
+                    if dim is not None and any(f in (dim.FullName or "") for f in fragments):
+                        doomed.append(binding.wrap(shown.GetAnnotation(), self._mod.IAnnotation))
+                except Exception:  # a dimension SolidWorks cannot name (a chamfer's, say) is simply kept
+                    pass
+                shown = following
+            view = binding.wrap(view.GetNextView(), self._mod.IView)
+        drawing.ClearSelection2(True)
+        selected = 0
+        step = "selection manager"
+        try:
+            manager = binding.wrap(drawing.SelectionManager, self._mod.ISelectionMgr)
+            step = "selection data"
+            data = binding.wrap(manager.CreateSelectData(), self._mod.ISelectData)
+            step = "select"
+            for k, annotation in enumerate(doomed):
+                if annotation.Select3(k > 0, data):
+                    selected += 1
+            step = "delete"
+            extension = binding.wrap(drawing.Extension, self._mod.IModelDocExtension)
+            deleted = bool(doomed) and bool(extension.DeleteSelection2(2))
+        except Exception as error:
+            raise SolidWorksError(f"Taking dimensions off the drawing failed at {step}: {error}") from None
+        drawing.ClearSelection2(True)
+        self._last_dimension_removal = {"matched": len(doomed), "selected": selected, "deleted": deleted}
+        if doomed and not deleted:
+            raise SolidWorksError(f"Could not take {len(doomed)} dimensions off the drawing "
+                                  f"({selected} selected).")
+        return len(doomed)
+
+    def _copy_length_units(self, source, target) -> None:
+        """The drawing shows lengths in the part's unit and places."""
+        src = binding.wrap(source.Extension, self._mod.IModelDocExtension)
+        dst = binding.wrap(target.Extension, self._mod.IModelDocExtension)
+        for preference in (SW_UNITS_LINEAR, SW_UNITS_LINEAR_DECIMAL_PLACES):
+            dst.SetUserPreferenceInteger(preference, SW_DETAILING_NO_OPTION,
+                                         src.GetUserPreferenceInteger(preference, SW_DETAILING_NO_OPTION))
+
+    _STANDARD_VIEWS = {"front": "*Front", "back": "*Back", "left": "*Left", "right": "*Right",
+                       "top": "*Top", "bottom": "*Bottom"}
+
+    def make_drawing(self, path: str | None = None, dimensions: bool = True,
+                     leave_out: list | None = None, notes: list | None = None,
+                     views: list | None = None, scale: str | None = None,
+                     hidden_lines: list | None = None,
+                     extra_dimensions: list | None = None) -> dict:
         """A 2D drawing of the current part, saved as PDF or as an editable .slddrw.
 
-        Front, top and right views in European (first angle) projection plus an
-        isometric view, on an A4 sheet at the scale SolidWorks picks, with the
-        model's own dimensions, each shown once. The drawing refers to the part's
+        Third-angle projection, never an isometric view, on an ANSI A sheet (11 x 8.5 in)
+        with the stock title block, left empty, with the
+        model's own dimensions, each shown once. By default the front, top and
+        right views at the scale SolidWorks picks; views=['right', 'back'] places
+        just those standard views (front, back, left, right, top, bottom) side by
+        side in a row, and scale='1:1' sets the sheet scale (numbers 'n:m'). The drawing refers to the part's
         file, so the part must have been saved; unsaved changes show in a PDF
         but not when a saved drawing is opened later. With a knowledge-base case
-        open the server names the file (case_paths).
+        open the server names the file (case_paths). dimensions=False leaves the
+        model's dimensions out: views only, to be dimensioned by hand or from a
+        measurement sheet. leave_out lists name fragments: a dimension whose name
+        contains one ('GrooveSketch') is taken off again, for the coordinate
+        dimensions that fully define a sketch and mean nothing to a machinist.
+        notes: lines of text placed bottom left, such as 'BREAK ALL SHARP EDGES'.
+        extra_dimensions: dimensions the model does not carry, each {"view": "right",
+        "kind": "horizontal"|"vertical"|"diameter", "edges": [ref, ...], "at_mm": [dx, dy],
+        "suffix": " X 90 DEG CSK"}; a ref is {"circle_mm": [x, y, z], "radius_mm": r} (a
+        circular edge) or {"at_model_mm": [x, y, z]} (the edge through that model point);
+        at_mm is where the text goes, from the view's centre.
+        hidden_lines: standard views ('right') drawn with their hidden lines
+        shown (greyed), so the dimensions of internal features land in them.
         """
         path = case_paths.resolve("drawing", path)
         fmt = os.path.splitext(path)[1].lstrip(".").lower()
@@ -5564,36 +5918,59 @@ class SolidWorksSession:
         if not part_path:
             raise SolidWorksError("Save the part first (save_part): the drawing refers to its file.")
         template = self._sw.GetUserPreferenceStringValue(SW_PREF_DEFAULT_TEMPLATE_DRAWING)
-        drawing = binding.wrap(self._sw.NewDocument(template, SW_DWG_PAPER_A4, 0.0, 0.0), self._mod.IModelDoc2)
+        drawing = binding.wrap(self._sw.NewDocument(template, SW_DWG_PAPER_A, 0.0, 0.0), self._mod.IModelDoc2)
         if drawing is None:
             raise SolidWorksError(f"SolidWorks could not start a drawing from the template '{template}'.")
         try:
+            self._copy_length_units(self._model, drawing)
             sheets = binding.wrap(drawing, self._mod.IDrawingDoc)
-            if not sheets.Create1stAngleViews2(part_path):
+            ratio = self._choose_scale(views or ["front", "top", "right"], scale)
+            self._apply_sheet_format(sheets, ratio)
+            placed = {}
+            if views:
+                placed = self._place_standard_views(sheets, part_path, views)
+            elif not sheets.Create3rdAngleViews2(part_path):
                 raise SolidWorksError("SolidWorks could not place the front, top and right views.")
-            iso = binding.wrap(sheets.CreateDrawViewFromModelView3(part_path, "*Isometric", 0.24, 0.16, 0.0),
-                               self._mod.IView)
-            if iso is None:
-                raise SolidWorksError("SolidWorks could not place the isometric view.")
-            iso.UseSheetScale = True
+            for key in hidden_lines or ():
+                shown = placed.get(str(key).lower())
+                if shown is None:
+                    raise SolidWorksError(f"No '{key}' view to show hidden lines in.")
+                if not shown.SetDisplayMode3(False, SW_DISPLAY_HIDDEN_GREYED, False, True):
+                    raise SolidWorksError(f"SolidWorks would not show the hidden lines in the {key} view.")
+            self._enforce_scale(sheets, ratio)
             # DuplicateDims True leaves out repeats: each dimension in one view
-            dimensions = sheets.InsertModelAnnotations3(SW_IMPORT_ENTIRE_MODEL, SW_INSERT_DIMENSIONS,
-                                                        True, True, False, False) or ()
+            inserted = (sheets.InsertModelAnnotations3(SW_IMPORT_ENTIRE_MODEL, SW_INSERT_DIMENSIONS,
+                                                       True, True, False, False) or ()) if dimensions else ()
+            removed = self._remove_dimensions(drawing, sheets, leave_out or ()) if inserted else 0
+            added = self._add_view_dimensions(drawing, sheets, placed, extra_dimensions or ())
+            # Notes go under the lowest view, but never lower than the title block
+            low = min((v.GetOutline()[1] for v in placed.values()), default=0.135)
+            notes_top = max(0.075, min(0.115, low - 0.012))
+            for k, text in enumerate(notes or ()):
+                note = binding.wrap(drawing.InsertNote(str(text)), self._mod.INote)
+                if note is None:
+                    raise SolidWorksError(f"SolidWorks could not place the note '{text}'.")
+                annotation = binding.wrap(note.GetAnnotation(), self._mod.IAnnotation)
+                annotation.SetPosition2(0.035, notes_top - 0.0075 * k, 0.0)
             views = []
             view = binding.wrap(sheets.GetFirstView(), self._mod.IView)  # the sheet itself comes first
             view = binding.wrap(view.GetNextView(), self._mod.IView)
+            view_scales = []
             while view is not None:
                 views.append(view.GetName2())
+                view_scales.append(round(view.ScaleDecimal, 6))
                 view = binding.wrap(view.GetNextView(), self._mod.IView)
-            scale = binding.wrap(sheets.GetCurrentSheet(), self._mod.ISheet).GetProperties2()[2:4]
+            fraction = Fraction(ratio).limit_denominator(16)
+            scale = (fraction.numerator, fraction.denominator)
             abs_path = os.path.abspath(path)
             self._write_via_saveas3(abs_path, drawing)
         finally:
             # saved, the drawing is named after the part ('holed_box - Sheet1'),
             # so the title it started with no longer closes it (verified)
-            self._sw.CloseDoc(drawing.GetTitle())
+            self._sw.CloseDoc(drawing.GetPathName() or drawing.GetTitle())  # by path: the part may share the title
         return {"ok": True, "path": abs_path, "bytes": os.path.getsize(abs_path), "views": views,
-                "dimensions": len(dimensions), "scale": f"{scale[0]:g}:{scale[1]:g}"}
+                "dimensions": len(inserted) - removed, "scale": f"{scale[0]:g}:{scale[1]:g}",
+                "view_scales": view_scales, "added_dimensions": added}
 
     # --- assemblies -----------------------------------------------------------
     #

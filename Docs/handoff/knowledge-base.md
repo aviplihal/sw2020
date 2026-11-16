@@ -8,7 +8,7 @@ You are continuing the knowledge-base work on the SolidWorks MCP server (repo gi
 ## Read first
 1. `CLAUDE.md`: project rules (early binding, all COM on one thread, mm/deg at the boundary, fail loud, measure back).
 2. `Docs/KNOWLEDGE-BASE.md`: the design. Build steps K0–K6 are in §14, and §15 covers working alongside the drawings branch.
-3. `Docs/JOB-BRIEF.md`: the workflow the agent in Claude Desktop follows.
+3. `src/solidworks_mcp/job.md`: the workflow the agent in Claude Desktop follows.
 4. `Docs/SHOP-DRAWINGS.md` §8 (the same rules as KNOWLEDGE-BASE.md §15).
 5. `Docs/PROGRESS.md`: the SOLIDWORKS 2020 conversion plan. Log your findings there.
 

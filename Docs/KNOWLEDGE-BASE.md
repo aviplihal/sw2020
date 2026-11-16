@@ -461,7 +461,7 @@ One small commit, so both branches start from the same contract:
 - `errors.py`: `SolidWorksError` gains optional `code` and `params` (default `None`), so
   existing raises keep working unchanged.
 - `units.py`: exact inch ↔ mm helpers (1 in = 25.4 mm), with pure tests.
-- This document, `SHOP-DRAWINGS.md` and `JOB-BRIEF.md`, with the drawing-spec format in
+- This document, `SHOP-DRAWINGS.md` and `job.md`, with the drawing-spec format in
   SHOP-DRAWINGS.md §4.1 frozen. Changing the format afterwards needs agreement from both
   branches.
 - `make_drawing`'s and `save_part`'s `path` becomes optional in their signatures, and the

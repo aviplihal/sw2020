@@ -133,10 +133,13 @@ MCP_MATERIAL_DATABASE = "solidworks-mcp"  # where set_material(density_kg_m3=...
 # swUnitsLinear, swUserPreferenceIntegerValue_e, and no option): the tools work
 # in SI, but equations are typed in these units. Names per swLengthUnit_e.
 SW_UNITS_LINEAR = 47
+SW_UNITS_LINEAR_DECIMAL_PLACES = 49   # swUnitsLinearDecimalPlaces
+SW_TOL_NONE, SW_TOL_BASIC, SW_TOL_BILAT, SW_TOL_LIMIT, SW_TOL_SYMMETRIC = 0, 1, 2, 3, 4   # swTolType_e
 SW_DETAILING_NO_OPTION = 0
 LENGTH_UNITS = {0: "millimetres", 1: "centimetres", 2: "metres", 3: "inches", 4: "feet",
                 5: "feet and inches", 6: "angstroms", 7: "nanometres", 8: "microns", 9: "mils",
                 10: "microinches"}
+UNIT_CODES = {"mm": 0, "millimetres": 0, "millimeters": 0, "inches": 3, "inch": 3, "in": 3}
 
 # swConstraintType_e -- relation types for ISketchRelationManager.AddRelation,
 # which (unlike the string-keyed SketchAddConstraints) returns the relation, so a
@@ -253,6 +256,7 @@ VIEWS = {"front": 1, "back": 2, "left": 3, "right": 4, "top": 5, "bottom": 6, "i
 # Drawings (make_drawing): an A4 sheet (swDwgPaperSizes_e) with the model's
 # dimensions (IDrawingDoc.InsertModelAnnotations3: swImportModelItemsSource_e,
 # swInsertAnnotation_e dimensions + those marked for drawings).
+SW_DWG_PAPER_A = 0      # swDwgPaperAsize: ANSI A, 11 x 8.5 in
 SW_DWG_PAPER_A4 = 6
 SW_IMPORT_ENTIRE_MODEL = 0
 SW_INSERT_DIMENSIONS = 8 | 32768
@@ -271,3 +275,5 @@ IMPORT_FORMATS = {"step", "stp", "iges", "igs", "x_t", "x_b"}
 # extensions (png/jpg/tif) are here because `screenshot` writes via the same
 # SaveAs3 path; .bmp wrote nothing.
 EXPORT_FORMATS = {"step", "stp", "stl", "iges", "igs", "x_t", "x_b", "3mf", "png", "jpg", "tif"}
+
+SW_DISPLAY_HIDDEN_GREYED = 1   # swDisplayMode_e: hidden lines visible, greyed

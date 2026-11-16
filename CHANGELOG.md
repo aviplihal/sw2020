@@ -5,7 +5,23 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Session start
+- New sessions brief themselves: a `SessionStart` hook (`scripts/session_start.py`) prints the project rules, the job workflow, the tool groups and live state (branch, KB index, bridge). The server instructions now name the drawing-job workflow, and `solidworks://job` serves it (the job brief moved to `src/solidworks_mcp/job.md`). A prompt like "do DN17" is enough.
+
 ### Shared (knowledge base and shop drawings)
+- `make_drawing` takes `dimensions=False` to leave the model's dimensions off the
+  sheet: views only, for a part still to be measured. `leave_out=["GrooveSketch"]`
+  takes dimensions whose name contains a fragment off again (the coordinates that
+  define a sketch). A drawing now shows the part's length unit and decimal places.
+  Drawings are on the stock ANSI A sheet with its title block (left empty),
+  third-angle, and never get an isometric view (the shop standard);
+  `views=["right", "back"]` places just those standard views in a row at the
+  largest ordinary scale that fits (or `scale="1:1"`), and `notes` adds text lines. `hidden_lines=["right"]` shows a view's hidden lines, and
+  `extra_dimensions` adds dimensions the model does not carry (a distance between two
+  circular edges, a diameter, with optional suffix text such as " X 90 DEG CSK").
+- `set_units` (inches or millimetres, and decimal places) and
+  `set_dimension_tolerance` (a +/- tolerance on a length dimension, shown on the
+  drawing).
 - `SolidWorksError` takes an optional `code` and `params`, a stable name and
   the measured values behind a failure.
 - Exact inch ↔ millimetre helpers (`units.in_to_mm`, `units.mm_to_in`); a

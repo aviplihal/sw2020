@@ -306,7 +306,7 @@ stray drag in SolidWorks can change the part.
 
 ### Old drawing jobs: the knowledge base
 
-For a job that starts from an old drawing (`DN17.pdf`), follow Docs/JOB-BRIEF.md.
+For a job that starts from an old drawing (`DN17.pdf`), follow src/solidworks_mcp/job.md.
 In short: `kb_ingest_drawing`; read **every** value from zoomed regions
 (`kb_view_region`), never from the overview; `kb_describe_case` with the drawing
 spec; ask the user about each unreadable item and store the answers with

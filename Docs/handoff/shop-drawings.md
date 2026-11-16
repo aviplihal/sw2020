@@ -13,7 +13,7 @@ You are building the shop-drawing support for the SolidWorks MCP server (repo gi
 ## Read first
 1. `CLAUDE.md`: project rules (early binding through `binding.wrap`, all COM on one thread, mm/deg at the boundary, fail loud, measure back, enum values from `constants.py`, verified against the typelib).
 2. **`Docs/SHOP-DRAWINGS.md`: your design.** The drawing standard is in §3, the spec format in §4.1 (frozen: changing it needs agreement from both branches), the tool changes in §5, the check in §6, file ownership in §8, the build order in §10.
-3. `Docs/JOB-BRIEF.md` step 5: how the agent in Claude Desktop will call `make_drawing` and `check_drawing`.
+3. `src/solidworks_mcp/job.md` step 5: how the agent in Claude Desktop will call `make_drawing` and `check_drawing`.
 4. `Docs/KNOWLEDGE-BASE.md` §6.1–§6.2: the knowledge base calls `make_drawing` with no `path` while a case is open, and stores `check_drawing`'s result.
 5. `Docs/PROGRESS.md`: the SOLIDWORKS 2020 conversion plan. Phase 1 is your baseline. Log your API findings there; drawing annotation calls will produce plenty.
 6. The current code:

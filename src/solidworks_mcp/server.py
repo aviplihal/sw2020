@@ -44,6 +44,11 @@ Pitfalls
 - add_mirror needs its plane where the copies land in material: add_box spans x 0..w, so mirror about offset_mm = w / 2, not x = 0.
 - SolidWorks' memory grows in long sessions: on a low-memory warning, save and restart SolidWorks (never during a run).
 
+Drawing jobs (a PDF named DN<n>.pdf, e.g. "do DN17")
+- Read the resource solidworks://job FIRST and follow it: ingest the PDF, read every value from zoomed regions, model, make the drawing, finalise. Nothing on the drawing is invented; an unreadable value is asked, never guessed.
+- Knowledge base (kb_* tools): kb_search / kb_get_case find earlier similar jobs, kb_tool_card gives a tool's known failures. Real jobs are DN<n>; DTN<n> are old test runs, never lessons.
+- A tool missing from the workflow (not built yet): say so, do not improvise around it.
+
 Read the resource solidworks://guide for the full guide: recipes (holes, ribs, threads, patterns, assemblies), 3D printing, and reverse-engineering a part from a mesh.
 """
 
@@ -55,6 +60,13 @@ mcp = FastMCP("solidworks-mcp", instructions=INSTRUCTIONS)
                           "reverse-engineering from a mesh, limits.")
 def guide() -> str:
     return resources.files("solidworks_mcp").joinpath("guide.md").read_text(encoding="utf-8")
+
+
+@mcp.resource("solidworks://job", name="job", mime_type="text/markdown",
+              description="Workflow for a drawing job (DN<n>.pdf): ingest, spec, earlier cases, model, "
+                          "drawing, finalise, review. Read it before starting a job.")
+def job() -> str:
+    return resources.files("solidworks_mcp").joinpath("job.md").read_text(encoding="utf-8")
 
 
 class _NoSolidWorks:
@@ -1057,7 +1069,11 @@ async def screenshot(path: str, view: str = "iso", zoom_mm: list | None = None,
 
 
 @mcp.tool()
-async def make_drawing(path: str | None = None) -> dict:
+async def make_drawing(path: str | None = None, dimensions: bool = True,
+                       leave_out: list[str] | None = None, notes: list[str] | None = None,
+                       views: list[str] | None = None, scale: str | None = None,
+                       hidden_lines: list[str] | None = None,
+                       extra_dimensions: list[dict] | None = None) -> dict:
     """Make a 2D drawing of the current part: a PDF, or an editable .slddrw.
 
     With a knowledge-base case open, leave out `path`: the server saves the
@@ -1067,8 +1083,40 @@ async def make_drawing(path: str | None = None) -> dict:
     isometric view, on an A4 sheet at the scale SolidWorks picks, with the
     model's own dimensions, each shown once: a dimensioned sketch to print or
     send. Save the part first (save_part): the drawing refers to its file.
+    dimensions=False leaves the dimensions out: views only, for a sketch to
+    measure and dimension by hand. leave_out = name fragments, e.g.
+    ["GrooveSketch"]: dimensions whose name contains one are taken off again
+    (the coordinates that define a sketch). notes = lines of text placed
+    lower left, e.g. ["BREAK ALL SHARP EDGES"]. views = standard views to place
+    side by side (front, back, left, right, top, bottom), e.g. ["right", "back"]
+    for a turned part, instead of front/top/right; scale = the sheet scale such
+    as "1:1". hidden_lines = views to draw with hidden lines shown, e.g. ["right"].
+    extra_dimensions = dimensions the model does not carry: [{"view": "right",
+    "kind": "horizontal", "edges": [{"circle_mm": [0, 0, 0], "radius_mm": 3.39},
+    {"circle_mm": [0, 0, 8.38], "radius_mm": 2.08}], "at_mm": [60, -24]}]; kind is
+    horizontal, vertical or diameter; an edge is a circle by centre and radius, or
+    {"at_model_mm": [x, y, z]}; at_mm is where the text goes, from the view centre;
+    an optional "suffix" text follows the value.
+    Always third-angle projection and never an isometric view.
     """
-    return await _call(_session.make_drawing, path)
+    return await _call(_session.make_drawing, path, dimensions, leave_out, notes, views, scale, hidden_lines, extra_dimensions)
+
+
+@mcp.tool()
+async def set_units(units: str = "inches", decimals: int = 3) -> dict:
+    """Show the current document's lengths in 'inches' or 'millimetres' with
+    `decimals` places (default inches, 3 places). Only the display changes:
+    the model keeps its size and every tool still takes millimetres. A drawing
+    made afterwards shows the same unit and places."""
+    return await _call(_session.set_units, units, decimals)
+
+
+@mcp.tool()
+async def set_dimension_tolerance(dimension_name: str, plus_mm: float = 0.0, minus_mm: float = 0.0) -> dict:
+    """Give a length dimension (such as 'diameter@Sketch5') a +plus_mm / -minus_mm
+    tolerance, in millimetres (0.0508 mm is .002 in). It shows on a drawing made
+    from the part. Both 0 removes the tolerance."""
+    return await _call(_session.set_dimension_tolerance, dimension_name, plus_mm, minus_mm)
 
 
 @mcp.tool()

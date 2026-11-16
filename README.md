@@ -288,7 +288,7 @@ A memory of earlier drawing jobs, kept on the Windows machine as plain Markdown 
 by reading `INDEX.md` or by a plain text search. Install the extra:
 `pip install "solidworks-mcp[kb]"` (page rendering only). Every tool call, these included,
 is logged automatically as one row of a timeline kept for fix sessions. Design:
-[Docs/KNOWLEDGE-BASE.md](Docs/KNOWLEDGE-BASE.md); the workflow for an agent: [Docs/JOB-BRIEF.md](Docs/JOB-BRIEF.md).
+[Docs/KNOWLEDGE-BASE.md](Docs/KNOWLEDGE-BASE.md); the workflow for an agent: [src/solidworks_mcp/job.md](src/solidworks_mcp/job.md).
 
 | Tool | Purpose |
 |---|---|

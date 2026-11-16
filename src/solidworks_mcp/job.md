@@ -2,8 +2,8 @@
 
 > Drop this into a new Claude Desktop session (or a Claude Desktop Project's instructions)
 > before starting a drawing job. It describes the finished workflow. The `kb_*` tools and
-> the new drawing options come from [KNOWLEDGE-BASE.md](KNOWLEDGE-BASE.md) and
-> [SHOP-DRAWINGS.md](SHOP-DRAWINGS.md); until those are built, the steps that use them
+> the new drawing options come from [KNOWLEDGE-BASE.md](../../Docs/KNOWLEDGE-BASE.md) and
+> [SHOP-DRAWINGS.md](../../Docs/SHOP-DRAWINGS.md); until those are built, the steps that use them
 > cannot run yet. Say so instead of improvising around a missing tool.
 
 ## The job
